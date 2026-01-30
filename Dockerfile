@@ -1,11 +1,13 @@
 FROM python:3.11-slim
 
 WORKDIR /app
+COPY thronos-trader-sentinel/backend/requirements.txt .
 
-COPY requirements.txt .
+
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app ./app
+
+COPY thronos-trader-sentinel/backend/app ./app
 
 ENV PYTHONUNBUFFERED=1
 
