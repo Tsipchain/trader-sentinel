@@ -16,7 +16,7 @@
         "buildType": "apk"
       },
       "ios": {
-        "simulator": true
+        "buildType": "archive"
       },
       "env": {
         "npm_config_ignore_scripts": "true"
