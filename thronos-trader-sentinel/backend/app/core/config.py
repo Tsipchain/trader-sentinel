@@ -22,5 +22,8 @@ class Settings(BaseSettings):
     google_tts_voice: str = "en-US-Neural2-D"
     google_tts_language: str = "en-US"
 
+    # NYT Article Search API (developer.nytimes.com)
+    nyt_api_key: str | None = None
+
 
 settings = Settings()

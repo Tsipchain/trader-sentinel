@@ -190,6 +190,7 @@ async def sentinel_geo() -> dict[str, Any]:
         "top_headlines": result.headlines_scored,
         "top_keywords": result.top_keywords_hit,
         "total_checked": result.total_headlines_checked,
+        "nyt_used": result.nyt_used,
         "cached": result.cached,
         "error": result.error,
     }
