@@ -167,7 +167,7 @@ export const CONFIG = {
   },
 
   // WalletConnect Configuration
-  WALLETCONNECT_PROJECT_ID: 'YOUR_WALLETCONNECT_PROJECT_ID',
+  WALLETCONNECT_PROJECT_ID: 'b4954b0dc4eb9832e0f03ef0f25cc744',
 
   // App Settings
   APP_NAME: 'Trader Sentinel',

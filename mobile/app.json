@@ -57,7 +57,8 @@
       },
       "apiUrl": "https://sentinel.thronoschain.org",
       "analystUrl": "https://alanisys.up.railway.app",
-      "brainUrl": "https://your-brain-service.up.railway.app"
+      "brainUrl": "https://your-brain-service.up.railway.app",
+      "walletConnectProjectId": "b4954b0dc4eb9832e0f03ef0f25cc744"
     }
   }
 }
