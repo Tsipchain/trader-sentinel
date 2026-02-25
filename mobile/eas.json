@@ -5,7 +5,10 @@
   "build": {
     "development": {
       "developmentClient": true,
-      "distribution": "internal"
+      "distribution": "internal",
+      "env": {
+        "npm_config_ignore_scripts": "true"
+      }
     },
     "preview": {
       "distribution": "internal",
@@ -14,6 +17,9 @@
       },
       "ios": {
         "simulator": true
+      },
+      "env": {
+        "npm_config_ignore_scripts": "true"
       }
     },
     "production": {
@@ -22,6 +28,9 @@
       },
       "android": {
         "buildType": "apk"
+      },
+      "env": {
+        "npm_config_ignore_scripts": "true"
       }
     }
   },
