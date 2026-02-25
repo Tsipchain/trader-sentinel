@@ -2,6 +2,7 @@
   "expo": {
     "name": "Trader Sentinel",
     "slug": "trader-sentinel",
+    "owner": "cryptohunterthronosnetwork",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -55,7 +56,7 @@
         "projectId": "trader-sentinel-thronos"
       },
       "apiUrl": "https://sentinel.thronoschain.org",
-      "analystUrl": "https://your-analyst-service.up.railway.app",
+      "analystUrl": "https://alanisys.up.railway.app",
       "brainUrl": "https://your-brain-service.up.railway.app"
     }
   }
