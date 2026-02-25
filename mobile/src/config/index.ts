@@ -5,8 +5,8 @@ export const CONFIG = {
   // Backend API (Render)
   API_URL: 'https://sentinel.thronoschain.org',
 
-  // LLM Analyst service (Railway) — replace with your Railway URL after deploy
-  ANALYST_URL: 'https://your-analyst-service.up.railway.app',
+  // LLM Analyst service (Railway)
+  ANALYST_URL: 'https://alanisys.up.railway.app',
 
   // Neural Prediction Brain service (Railway) — replace with your Railway URL
   BRAIN_URL: 'https://your-brain-service.up.railway.app',
