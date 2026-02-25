@@ -1,7 +1,7 @@
 {
   "name": "trader-sentinel-mobile",
   "version": "1.0.0",
-  "main": "expo/AppEntry.js",
+  "main": "expo-router/entry",
   "scripts": {
     "start": "expo start",
     "android": "expo start --android",
@@ -48,7 +48,7 @@
   "devDependencies": {
     "@babel/core": "^7.24.0",
     "@types/react": "~18.2.0",
-    "typescript": "~5.3.0"
+    "typescript": "~5.7.3"
   },
   "private": true,
   "overrides": {
