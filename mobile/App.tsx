@@ -14,10 +14,11 @@ import ConnectWalletScreen from './src/screens/ConnectWalletScreen';
 import DashboardScreen from './src/screens/DashboardScreen';
 import SignalsScreen from './src/screens/SignalsScreen';
 import WalletScreen from './src/screens/WalletScreen';
-import SubscriptionScreen from './src/screens/SubscriptionScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
+import SubscriptionScreen from './src/screens/SubscriptionScreen';
 import RewardsScreen from './src/screens/RewardsScreen';
 import LiquidityScreen from './src/screens/LiquidityScreen';
+import RiskScreen from './src/screens/RiskScreen';
 
 // Store
 import { useStore } from './src/store/useStore';
@@ -36,6 +37,7 @@ export type RootStackParamList = {
 export type TabParamList = {
   Dashboard: undefined;
   Signals: undefined;
+  Risk: undefined;
   Wallet: undefined;
   Settings: undefined;
 };
@@ -43,10 +45,8 @@ export type TabParamList = {
 const Stack = createNativeStackNavigator<RootStackParamList>();
 const Tab = createBottomTabNavigator<TabParamList>();
 
-// Keep splash screen visible while loading
 SplashScreen.preventAutoHideAsync();
 
-// Tab Navigator
 function MainTabs() {
   return (
     <Tab.Navigator
@@ -60,6 +60,9 @@ function MainTabs() {
               break;
             case 'Signals':
               iconName = focused ? 'flash' : 'flash-outline';
+              break;
+            case 'Risk':
+              iconName = focused ? 'shield' : 'shield-outline';
               break;
             case 'Wallet':
               iconName = focused ? 'wallet' : 'wallet-outline';
@@ -82,38 +85,19 @@ function MainTabs() {
           height: 65,
         },
         tabBarLabelStyle: {
-          fontSize: 12,
+          fontSize: 11,
           fontWeight: '500',
         },
-        headerStyle: {
-          backgroundColor: COLORS.background,
-        },
+        headerStyle: { backgroundColor: COLORS.background },
         headerTintColor: COLORS.text,
-        headerTitleStyle: {
-          fontWeight: '600',
-        },
+        headerTitleStyle: { fontWeight: '600' },
       })}
     >
-      <Tab.Screen
-        name="Dashboard"
-        component={DashboardScreen}
-        options={{ title: 'Dashboard' }}
-      />
-      <Tab.Screen
-        name="Signals"
-        component={SignalsScreen}
-        options={{ title: 'Signals' }}
-      />
-      <Tab.Screen
-        name="Wallet"
-        component={WalletScreen}
-        options={{ title: 'Wallet' }}
-      />
-      <Tab.Screen
-        name="Settings"
-        component={SettingsScreen}
-        options={{ title: 'Settings' }}
-      />
+      <Tab.Screen name="Dashboard" component={DashboardScreen} options={{ title: 'Dashboard' }} />
+      <Tab.Screen name="Signals" component={SignalsScreen} options={{ title: 'Signals' }} />
+      <Tab.Screen name="Risk" component={RiskScreen} options={{ title: 'Risk & AI' }} />
+      <Tab.Screen name="Wallet" component={WalletScreen} options={{ title: 'Wallet' }} />
+      <Tab.Screen name="Settings" component={SettingsScreen} options={{ title: 'Settings' }} />
     </Tab.Navigator>
   );
 }
@@ -125,7 +109,6 @@ export default function App() {
   useEffect(() => {
     async function prepare() {
       try {
-        // Load any resources or data here
         await new Promise((resolve) => setTimeout(resolve, 1000));
       } catch (e) {
         console.warn(e);
@@ -134,7 +117,6 @@ export default function App() {
         await SplashScreen.hideAsync();
       }
     }
-
     prepare();
   }, []);
 

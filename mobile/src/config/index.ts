@@ -2,8 +2,14 @@
 // Thronos Integration & API Settings
 
 export const CONFIG = {
-  // Backend API
-  API_URL: 'https://trader-sentinel.onrender.com',
+  // Backend API (Render)
+  API_URL: 'https://sentinel.thronoschain.org',
+
+  // LLM Analyst service (Railway)
+  ANALYST_URL: 'https://alanisys.up.railway.app',
+
+  // Neural Prediction Brain service (Railway) — replace with your Railway URL
+  BRAIN_URL: 'https://your-brain-service.up.railway.app',
 
   // Thronos Gateway - Payment & Rewards
   THRONOS_GATEWAY_URL: 'https://gateway.thronos.io',
@@ -64,24 +70,23 @@ export const CONFIG = {
 
   // Supported Payment Tokens per Chain
   PAYMENT_TOKENS: {
-    1: [ // Ethereum
+    1: [
       { symbol: 'USDT', address: '0xdAC17F958D2ee523a2206206994597C13D831ec7', decimals: 6 },
       { symbol: 'USDC', address: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', decimals: 6 },
-      { symbol: 'DAI', address: '0x6B175474E89094C44Da98b954EesDAFAE6Aceb', decimals: 18 },
       { symbol: 'THRONOS', address: '0x...', decimals: 18 },
     ],
-    56: [ // BSC
+    56: [
       { symbol: 'USDT', address: '0x55d398326f99059fF775485246999027B3197955', decimals: 18 },
       { symbol: 'USDC', address: '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d', decimals: 18 },
       { symbol: 'BUSD', address: '0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56', decimals: 18 },
       { symbol: 'THRONOS', address: '0x...', decimals: 18 },
     ],
-    137: [ // Polygon
+    137: [
       { symbol: 'USDT', address: '0xc2132D05D31c914a87C6611C10748AEb04B58e8F', decimals: 6 },
       { symbol: 'USDC', address: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174', decimals: 6 },
       { symbol: 'THRONOS', address: '0x...', decimals: 18 },
     ],
-    42161: [ // Arbitrum
+    42161: [
       { symbol: 'USDT', address: '0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9', decimals: 6 },
       { symbol: 'USDC', address: '0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8', decimals: 6 },
       { symbol: 'THRONOS', address: '0x...', decimals: 18 },
@@ -94,7 +99,7 @@ export const CONFIG = {
       id: 'starter',
       name: 'Starter',
       priceUSD: 29,
-      priceThronos: 25, // Discount with THRONOS token
+      priceThronos: 25,
       features: [
         'Real-time market signals',
         'Basic arbitrage alerts',
@@ -154,16 +159,15 @@ export const CONFIG = {
 
   // Rewards Configuration
   REWARDS: {
-    // Earn rewards for activity
-    REFERRAL_BONUS: 50, // THRONOS tokens
+    REFERRAL_BONUS: 50,
     DAILY_LOGIN_BONUS: 1,
     TRADE_SIGNAL_USAGE: 0.5,
-    LIQUIDITY_PROVISION_APY: 0.12, // 12% APY
-    STAKING_APY: 0.08, // 8% APY
+    LIQUIDITY_PROVISION_APY: 0.12,
+    STAKING_APY: 0.08,
   },
 
   // WalletConnect Configuration
-  WALLETCONNECT_PROJECT_ID: 'YOUR_WALLETCONNECT_PROJECT_ID',
+  WALLETCONNECT_PROJECT_ID: 'b4954b0dc4eb9832e0f03ef0f25cc744',
 
   // App Settings
   APP_NAME: 'Trader Sentinel',

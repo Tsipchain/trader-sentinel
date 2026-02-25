@@ -2,6 +2,7 @@
   "expo": {
     "name": "Trader Sentinel",
     "slug": "trader-sentinel",
+    "owner": "cryptohunterthronosnetwork",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -41,7 +42,6 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-router",
       "expo-secure-store",
       [
         "expo-notifications",
@@ -51,16 +51,14 @@
         }
       ]
     ],
-    "experiments": {
-      "typedRoutes": true
-    },
     "extra": {
       "eas": {
         "projectId": "trader-sentinel-thronos"
       },
-      "apiUrl": "https://trader-sentinel.onrender.com",
-      "thronosGatewayUrl": "https://gateway.thronos.io",
-      "walletConnectProjectId": "YOUR_WALLETCONNECT_PROJECT_ID"
+      "apiUrl": "https://sentinel.thronoschain.org",
+      "analystUrl": "https://alanisys.up.railway.app",
+      "brainUrl": "https://your-brain-service.up.railway.app",
+      "walletConnectProjectId": "b4954b0dc4eb9832e0f03ef0f25cc744"
     }
   }
 }
