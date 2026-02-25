@@ -41,7 +41,6 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-router",
       "expo-secure-store",
       [
         "expo-notifications",
@@ -51,16 +50,13 @@
         }
       ]
     ],
-    "experiments": {
-      "typedRoutes": true
-    },
     "extra": {
       "eas": {
         "projectId": "trader-sentinel-thronos"
       },
-      "apiUrl": "https://trader-sentinel.onrender.com",
-      "thronosGatewayUrl": "https://gateway.thronos.io",
-      "walletConnectProjectId": "YOUR_WALLETCONNECT_PROJECT_ID"
+      "apiUrl": "https://sentinel.thronoschain.org",
+      "analystUrl": "https://your-analyst-service.up.railway.app",
+      "brainUrl": "https://your-brain-service.up.railway.app"
     }
   }
 }
