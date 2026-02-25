@@ -42,7 +42,6 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-secure-store",
       [
         "expo-notifications",
         {
@@ -53,7 +52,7 @@
     ],
     "extra": {
       "eas": {
-        "projectId": "trader-sentinel-thronos"
+        "projectId": ""
       },
       "apiUrl": "https://sentinel.thronoschain.org",
       "analystUrl": "https://alanisys.up.railway.app",
