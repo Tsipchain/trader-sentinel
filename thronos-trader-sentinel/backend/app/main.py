@@ -11,6 +11,10 @@ from app.core.config import settings
 from app.providers.cex import CEXProvider
 from app.providers.dex import DexScreenerProvider
 from app.tts.google_tts import synthesize as g_tts
+from app.sentinel import calendar as cal_module
+from app.sentinel import geo as geo_module
+from app.sentinel import technicals as tech_module
+from app.sentinel import risk as risk_module
 
 app = FastAPI(title="Thronos Trader Sentinel", version="0.1.0")
 
@@ -126,6 +130,88 @@ async def market_stream(symbol: str = Query(...), interval_ms: int = Query(1000,
             await asyncio.sleep(interval_ms / 1000)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.get("/api/sentinel/risk")
+async def sentinel_risk(symbol: str = Query("BTC/USDT")) -> dict[str, Any]:
+    """
+    Francis-Monitor: Composite Early Warning Risk Report.
+
+    Combines:
+    - Calendar Risk  (historical market event proximity)
+    - Geopolitical Risk (live news sentiment — Iran/Energy/Conflict)
+    - Technical Risk (RSI, ATR volatility, Fibonacci levels)
+
+    Returns composite score 0–10, recommendation level, alerts, and
+    asset-specific portfolio guidance.
+    """
+    report = await risk_module.generate_report(symbol=symbol)
+    return {
+        "ok": True,
+        "composite_score": report.composite_score,
+        "recommendation": report.recommendation,
+        "alerts": report.alerts,
+        "portfolio_guidance": report.portfolio_guidance,
+        "scores": {
+            "calendar":   report.calendar_score,
+            "geo":        report.geo_score,
+            "technical":  report.technical_score,
+        },
+        "detail": {
+            "calendar":   report.calendar_detail,
+            "geo":        report.geo_detail,
+            "technical":  report.technical_detail,
+        },
+        "ts": report.ts,
+    }
+
+
+@app.get("/api/sentinel/calendar")
+async def sentinel_calendar() -> dict[str, Any]:
+    """Historical event calendar proximity — standalone endpoint."""
+    result = cal_module.calculate()
+    return {
+        "ok": True,
+        "score": result.score,
+        "active_events": result.active_events,
+        "nearest_event": result.nearest_event,
+        "nearest_days": result.nearest_days,
+        "tags_active": result.tags_active,
+    }
+
+
+@app.get("/api/sentinel/geo")
+async def sentinel_geo() -> dict[str, Any]:
+    """Live geopolitical news sentiment — standalone endpoint."""
+    result = await geo_module.calculate()
+    return {
+        "ok": True,
+        "score": result.score,
+        "top_headlines": result.headlines_scored,
+        "top_keywords": result.top_keywords_hit,
+        "total_checked": result.total_headlines_checked,
+        "cached": result.cached,
+        "error": result.error,
+    }
+
+
+@app.get("/api/sentinel/technicals")
+async def sentinel_technicals(symbol: str = Query("BTC/USDT")) -> dict[str, Any]:
+    """Technical analysis risk for a symbol — standalone endpoint."""
+    result = await tech_module.calculate(symbol)
+    return {
+        "ok": True,
+        "symbol": result.symbol,
+        "score": result.score,
+        "current_price": result.current_price,
+        "rsi_14": result.rsi_14,
+        "rsi_signal": result.rsi_signal,
+        "volatility_score": result.volatility_score,
+        "nearest_fib": result.nearest_fib,
+        "fib_levels": result.fib_levels,
+        "cycle_deviation_pct": result.cycle_deviation,
+        "error": result.error,
+    }
 
 
 @app.get("/api/tts")
