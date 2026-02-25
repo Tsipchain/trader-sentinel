@@ -173,6 +173,9 @@ export const CONFIG = {
   APP_NAME: 'Trader Sentinel',
   APP_VERSION: '1.0.0',
   SUPPORT_EMAIL: 'support@thronos.io',
+
+  // API security — set this to the same value as API_KEY env var on each service
+  API_KEY: process.env.EXPO_PUBLIC_API_KEY ?? '',
 };
 
 export default CONFIG;

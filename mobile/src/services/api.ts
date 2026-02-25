@@ -2,23 +2,76 @@ import axios from 'axios';
 import { CONFIG } from '../config';
 import type { MarketData, Signal } from '../store/useStore';
 
+const _authHeaders = CONFIG.API_KEY
+  ? { 'Content-Type': 'application/json', 'X-API-Key': CONFIG.API_KEY }
+  : { 'Content-Type': 'application/json' };
+
 const api = axios.create({
   baseURL: CONFIG.API_URL,
   timeout: 30000,
-  headers: { 'Content-Type': 'application/json' },
+  headers: _authHeaders,
 });
 
 const analystApi = axios.create({
   baseURL: CONFIG.ANALYST_URL,
   timeout: 30000,
-  headers: { 'Content-Type': 'application/json' },
+  headers: _authHeaders,
 });
 
 const brainApi = axios.create({
   baseURL: CONFIG.BRAIN_URL,
   timeout: 30000,
-  headers: { 'Content-Type': 'application/json' },
+  headers: _authHeaders,
 });
+
+// ── React Native SSE client (XHR-based, no native EventSource needed) ────────
+export function createRNStream(
+  url: string,
+  onData: (data: unknown) => void,
+  onError: () => void,
+): () => void {
+  const xhr = new XMLHttpRequest();
+  xhr.open('GET', url, true);
+  xhr.setRequestHeader('Accept', 'text/event-stream');
+  xhr.setRequestHeader('Cache-Control', 'no-cache');
+  if (CONFIG.API_KEY) {
+    xhr.setRequestHeader('X-API-Key', CONFIG.API_KEY);
+  }
+
+  let processed = 0;
+  let buffer = '';
+
+  xhr.onreadystatechange = () => {
+    if (
+      xhr.readyState === XMLHttpRequest.LOADING ||
+      xhr.readyState === XMLHttpRequest.DONE
+    ) {
+      buffer += xhr.responseText.slice(processed);
+      processed = xhr.responseText.length;
+
+      const chunks = buffer.split('\n\n');
+      buffer = chunks.pop() ?? '';
+
+      for (const chunk of chunks) {
+        let dataLine = '';
+        for (const line of chunk.split('\n')) {
+          if (line.startsWith('data: ')) dataLine = line.slice(6);
+        }
+        if (dataLine) {
+          try { onData(JSON.parse(dataLine)); } catch { /* skip malformed */ }
+        }
+      }
+    }
+    if (xhr.readyState === XMLHttpRequest.DONE && xhr.status !== 200) {
+      onError();
+    }
+  };
+
+  xhr.onerror = onError;
+  xhr.send();
+
+  return () => xhr.abort();
+}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 

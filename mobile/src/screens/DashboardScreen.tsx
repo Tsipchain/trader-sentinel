@@ -15,7 +15,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { RootStackParamList } from '../../App';
 import { COLORS, SPACING, FONT_SIZES, BORDER_RADIUS, SHADOWS } from '../constants/theme';
 import { useStore } from '../store/useStore';
-import { marketAPI, ArbitrageData } from '../services/api';
+import { marketAPI, createRNStream, ArbitrageData } from '../services/api';
 import { CONFIG } from '../config';
 
 type NavigationProp = NativeStackNavigationProp<RootStackParamList>;
@@ -45,7 +45,7 @@ export default function DashboardScreen() {
           return {
             symbol,
             price: arb.best_bid,
-            change24h: Math.random() * 10 - 5, // Mock 24h change
+            change24h: 0,
             spread: arb.spread,
             bestBid: arb.best_bid_venue,
             bestAsk: arb.best_ask_venue,
@@ -54,8 +54,6 @@ export default function DashboardScreen() {
         })
       );
       setPrices(results);
-
-      // Filter for good arbitrage opportunities
       const opps = results.filter((r) => (r.spread / r.price) * 100 > 0.1);
       setArbitrageOpps(opps as any);
     } catch (error) {
@@ -65,11 +63,52 @@ export default function DashboardScreen() {
     }
   }, [watchlist]);
 
+  // Use SSE stream for primary symbol; fall back to fetchData on error
   useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 5000);
-    return () => clearInterval(interval);
-  }, [fetchData]);
+    const primarySymbol = watchlist[0] ?? 'BTC/USDT';
+    const streamUrl = `${CONFIG.API_URL}/api/market/stream?symbol=${encodeURIComponent(primarySymbol)}&interval_ms=2000`;
+
+    const stopStream = createRNStream(
+      streamUrl,
+      (snapshot: any) => {
+        if (!snapshot?.venues) return;
+        const transformed = marketAPI.transformToMarketData(snapshot);
+        setPrices((prev) => {
+          const idx = prev.findIndex((p) => p.symbol === primarySymbol);
+          const updated = {
+            symbol: primarySymbol,
+            price: transformed.bestBid,
+            change24h: prev[idx]?.change24h ?? 0,
+            spread: transformed.spread,
+            bestBid: transformed.bestBidVenue,
+            bestAsk: transformed.bestAskVenue,
+            best_bid: transformed.bestBid,
+            best_ask: transformed.bestAsk,
+            best_bid_venue: transformed.bestBidVenue,
+            best_ask_venue: transformed.bestAskVenue,
+            dex_last: null,
+            dex_minus_best_ask: null,
+          } as any;
+          if (idx >= 0) {
+            const next = [...prev];
+            next[idx] = updated;
+            return next;
+          }
+          return [updated, ...prev];
+        });
+        setLoading(false);
+      },
+      () => {
+        // SSE error — fall back to one-shot fetch
+        fetchData();
+      },
+    );
+
+    // Initial fetch for remaining symbols in watchlist
+    if (watchlist.length > 1) fetchData();
+
+    return () => stopStream();
+  }, [watchlist, fetchData]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
