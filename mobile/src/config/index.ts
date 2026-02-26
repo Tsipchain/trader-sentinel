@@ -8,8 +8,8 @@ export const CONFIG = {
   // LLM Analyst service (Railway)
   ANALYST_URL: 'https://alanisys.up.railway.app',
 
-  // Neural Prediction Brain service (Railway) — replace with your Railway URL
-  BRAIN_URL: 'https://your-brain-service.up.railway.app',
+  // Neural Prediction Brain service (Railway)
+  BRAIN_URL: 'https://alanisys.up.railway.app',
 
   // Thronos Gateway - Payment & Rewards
   THRONOS_GATEWAY_URL: 'https://gateway.thronos.io',
@@ -173,6 +173,9 @@ export const CONFIG = {
   APP_NAME: 'Trader Sentinel',
   APP_VERSION: '1.0.0',
   SUPPORT_EMAIL: 'support@thronos.io',
+
+  // API security — set this to the same value as API_KEY env var on each service
+  API_KEY: process.env.EXPO_PUBLIC_API_KEY ?? '',
 };
 
 export default CONFIG;

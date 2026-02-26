@@ -1,11 +1,20 @@
 import asyncio
 import json
+import logging
+import os
 import time
 from typing import Any
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
+from fastapi.security.api_key import APIKeyHeader
+from starlette.status import HTTP_403_FORBIDDEN
+
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from starlette.requests import Request
 
 from app.core.config import settings
 from app.providers.cex import CEXProvider
@@ -16,7 +25,24 @@ from app.sentinel import geo as geo_module
 from app.sentinel import technicals as tech_module
 from app.sentinel import risk as risk_module
 
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
+
+limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="Thronos Trader Sentinel", version="0.1.0")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# ── API Key Auth ──────────────────────────────────────────────────────────────
+_API_KEY = os.getenv("API_KEY", "")
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def verify_api_key(key: str = Security(_api_key_header)):
+    if _API_KEY and key != _API_KEY:
+        from fastapi import HTTPException as _HTTPException
+        raise _HTTPException(status_code=HTTP_403_FORBIDDEN, detail="Invalid or missing API key")
+    return key
 
 app.add_middleware(
     CORSMiddleware,
@@ -42,7 +68,8 @@ async def health() -> dict[str, Any]:
 
 
 @app.get("/api/market/snapshot")
-async def market_snapshot(symbol: str = Query(..., description="ccxt style, e.g. BTC/USDT")) -> dict[str, Any]:
+@limiter.limit("60/minute")
+async def market_snapshot(request: Request, symbol: str = Query(..., description="ccxt style, e.g. BTC/USDT"), _: str = Security(verify_api_key)) -> dict[str, Any]:
     ts = int(time.time())
     cex_ticks = await _cex.snapshot(symbol)
     dex_tick = await _dex.snapshot(symbol)
@@ -73,7 +100,8 @@ async def market_snapshot(symbol: str = Query(..., description="ccxt style, e.g.
 
 
 @app.get("/api/market/arb")
-async def market_arb(symbol: str = Query(...)) -> dict[str, Any]:
+@limiter.limit("30/minute")
+async def market_arb(request: Request, symbol: str = Query(...), _: str = Security(verify_api_key)) -> dict[str, Any]:
     snap = await market_snapshot(symbol)
     venues = snap.get("venues") or []
 
@@ -121,7 +149,7 @@ async def market_arb(symbol: str = Query(...)) -> dict[str, Any]:
 
 
 @app.get("/api/market/stream")
-async def market_stream(symbol: str = Query(...), interval_ms: int = Query(1000, ge=250, le=60000)):
+async def market_stream(symbol: str = Query(...), interval_ms: int = Query(1000, ge=250, le=60000), _: str = Security(verify_api_key)):
     async def gen():
         while True:
             payload = await market_snapshot(symbol)
@@ -133,7 +161,8 @@ async def market_stream(symbol: str = Query(...), interval_ms: int = Query(1000,
 
 
 @app.get("/api/sentinel/risk")
-async def sentinel_risk(symbol: str = Query("BTC/USDT")) -> dict[str, Any]:
+@limiter.limit("20/minute")
+async def sentinel_risk(request: Request, symbol: str = Query("BTC/USDT"), _: str = Security(verify_api_key)) -> dict[str, Any]:
     """
     Francis-Monitor: Composite Early Warning Risk Report.
 
@@ -167,7 +196,7 @@ async def sentinel_risk(symbol: str = Query("BTC/USDT")) -> dict[str, Any]:
 
 
 @app.get("/api/sentinel/calendar")
-async def sentinel_calendar() -> dict[str, Any]:
+async def sentinel_calendar(_: str = Security(verify_api_key)) -> dict[str, Any]:
     """Historical event calendar proximity — standalone endpoint."""
     result = cal_module.calculate()
     return {
@@ -181,7 +210,8 @@ async def sentinel_calendar() -> dict[str, Any]:
 
 
 @app.get("/api/sentinel/geo")
-async def sentinel_geo() -> dict[str, Any]:
+@limiter.limit("10/minute")
+async def sentinel_geo(request: Request, _: str = Security(verify_api_key)) -> dict[str, Any]:
     """Live geopolitical news sentiment — standalone endpoint."""
     result = await geo_module.calculate()
     return {
@@ -197,7 +227,8 @@ async def sentinel_geo() -> dict[str, Any]:
 
 
 @app.get("/api/sentinel/technicals")
-async def sentinel_technicals(symbol: str = Query("BTC/USDT")) -> dict[str, Any]:
+@limiter.limit("20/minute")
+async def sentinel_technicals(request: Request, symbol: str = Query("BTC/USDT"), _: str = Security(verify_api_key)) -> dict[str, Any]:
     """Technical analysis risk for a symbol — standalone endpoint."""
     result = await tech_module.calculate(symbol)
     return {

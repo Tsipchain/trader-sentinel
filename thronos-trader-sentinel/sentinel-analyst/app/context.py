@@ -85,23 +85,23 @@ class ContextManager:
         # Geo headlines
         headlines: list[str] = []
         for h in detail.get("geo", {}).get("top_headlines", [])[:5]:
-            headlines.append(h.get("title", str(h)) if isinstance(h, dict) else str(h))
+            headlines.append(h.get("headline", h.get("title", str(h))) if isinstance(h, dict) else str(h))
 
         # Active calendar events
         active_events: list[str] = []
         for ev in detail.get("calendar", {}).get("active_events", [])[:4]:
-            active_events.append(ev.get("name", str(ev)) if isinstance(ev, dict) else str(ev))
+            active_events.append(ev.get("label", ev.get("name", str(ev))) if isinstance(ev, dict) else str(ev))
 
-        # Technical indicators
+        # Technical indicators — backend returns rsi_14 (float) and volatility_score (float) directly
         rsi: Optional[float] = None
         atr_score: Optional[float] = None
         if tech.get("ok"):
-            rsi_data = tech.get("rsi", {})
-            if isinstance(rsi_data, dict):
-                rsi = rsi_data.get("value")
-            atr_data = tech.get("atr", {})
-            if isinstance(atr_data, dict):
-                atr_score = atr_data.get("score")
+            rsi_raw = tech.get("rsi_14")
+            if isinstance(rsi_raw, (int, float)):
+                rsi = float(rsi_raw)
+            vol_raw = tech.get("volatility_score")
+            if isinstance(vol_raw, (int, float)):
+                atr_score = float(vol_raw)
 
         self._context = MarketContext(
             ts=risk.get("ts", time.time()),

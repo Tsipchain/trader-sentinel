@@ -30,10 +30,33 @@
       },
       "package": "com.thronos.tradersentinel",
       "versionCode": 1,
+      "allowBackup": false,
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.VIBRATE",
-        "android.permission.INTERNET"
+        "android.permission.INTERNET",
+        "android.permission.POST_NOTIFICATIONS"
+      ],
+      "blockedPermissions": [
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.USE_FINGERPRINT",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "com.sonyericsson.home.permission.BROADCAST_BADGE",
+        "com.sonymobile.home.permission.PROVIDER_INSERT_BADGE",
+        "com.anddoes.launcher.permission.UPDATE_COUNT",
+        "com.majeur.launcher.permission.UPDATE_BADGE",
+        "com.huawei.android.launcher.permission.CHANGE_BADGE",
+        "com.huawei.android.launcher.permission.READ_SETTINGS",
+        "com.huawei.android.launcher.permission.WRITE_SETTINGS",
+        "com.samsung.android.app.telephony.permission.RECEIVE",
+        "com.htc.launcher.permission.READ_SETTINGS",
+        "com.htc.launcher.permission.UPDATE_SHORTCUT",
+        "com.sec.android.provider.badge.permission.READ",
+        "com.sec.android.provider.badge.permission.WRITE",
+        "com.oppo.launcher.permission.READ_SETTINGS",
+        "com.oppo.launcher.permission.WRITE_SETTINGS"
       ]
     },
     "web": {
@@ -48,6 +71,16 @@
           "icon": "./assets/notification-icon.png",
           "color": "#6366F1"
         }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "compileSdkVersion": 35,
+            "targetSdkVersion": 35,
+            "minSdkVersion": 23
+          }
+        }
       ]
     ],
     "extra": {
@@ -56,7 +89,7 @@
       },
       "apiUrl": "https://sentinel.thronoschain.org",
       "analystUrl": "https://alanisys.up.railway.app",
-      "brainUrl": "https://your-brain-service.up.railway.app",
+      "brainUrl": "https://alanisys.up.railway.app",
       "walletConnectProjectId": "b4954b0dc4eb9832e0f03ef0f25cc744"
     }
   }

@@ -7,8 +7,14 @@ Supports:
   - predict() — inference with live market signals
   - adapt()   — online partial_fit after each real trade (incremental learning)
   - stats()   — model diagnostics
+
+Models are persisted to MODELS_DIR (default: /models) so they survive restarts.
 """
+import logging
+import os
+import pickle
 import time
+from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
@@ -18,7 +24,10 @@ from sklearn.preprocessing import StandardScaler
 
 from .features import build_dataset, market_features, trade_features
 
+log = logging.getLogger(__name__)
+
 MIN_PAIRS = 5  # minimum matched pairs required to train
+MODELS_DIR = Path(os.getenv("MODELS_DIR", "/models"))
 
 
 class _UserModel:
@@ -42,6 +51,41 @@ class _UserModel:
 class PredictionEngine:
     def __init__(self) -> None:
         self._models: dict[str, _UserModel] = {}
+        self._load_persisted_models()
+
+    # ── Persistence ──────────────────────────────────────────────────────────
+
+    def _model_path(self, user_id: str) -> Path:
+        # Sanitize user_id to safe filename chars
+        safe_id = "".join(c if c.isalnum() or c in "-_." else "_" for c in user_id)
+        return MODELS_DIR / f"{safe_id}.pkl"
+
+    def _save_model(self, user_id: str) -> None:
+        try:
+            MODELS_DIR.mkdir(parents=True, exist_ok=True)
+            path = self._model_path(user_id)
+            with open(path, "wb") as f:
+                pickle.dump(self._models[user_id], f, protocol=pickle.HIGHEST_PROTOCOL)
+            log.info("[brain] saved model for user=%s → %s", user_id, path)
+        except Exception as exc:
+            log.warning("[brain] could not save model for user=%s: %s", user_id, exc)
+
+    def _load_persisted_models(self) -> None:
+        if not MODELS_DIR.exists():
+            return
+        loaded = 0
+        for pkl_path in MODELS_DIR.glob("*.pkl"):
+            user_id = pkl_path.stem
+            try:
+                with open(pkl_path, "rb") as f:
+                    model = pickle.load(f)
+                if isinstance(model, _UserModel):
+                    self._models[user_id] = model
+                    loaded += 1
+            except Exception as exc:
+                log.warning("[brain] could not load model from %s: %s", pkl_path, exc)
+        if loaded:
+            log.info("[brain] loaded %d persisted model(s) from %s", loaded, MODELS_DIR)
 
     def user_count(self) -> int:
         return len(self._models)
@@ -91,6 +135,8 @@ class PredictionEngine:
         model.pairs_used = len(X_raw)
         model.win_rate = round(sum(y) / len(y), 3)
         model.trained_at = time.time()
+
+        self._save_model(user_id)
 
         return {
             "trained": True,
@@ -168,6 +214,7 @@ class PredictionEngine:
         X = np.array([features], dtype=float)
         X_scaled = model.scaler.transform(X)
         model.clf.partial_fit(X_scaled, [outcome], classes=[0, 1])
+        self._save_model(user_id)
 
     # ── Stats ────────────────────────────────────────────────────────────────
 

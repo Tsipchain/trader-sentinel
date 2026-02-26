@@ -3,22 +3,42 @@ Sentinel Brain — FastAPI service
 Connects to user exchange accounts, trains a personal MLP on their trade history,
 and serves adaptive price-direction predictions.
 """
+import logging
+import os
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Security
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel, Field
+from starlette.status import HTTP_403_FORBIDDEN
 
 from .connector import fetch_user_trades
 from .predictor import PredictionEngine
 
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
+
 _engine = PredictionEngine()
+
+# ── API Key Auth ──────────────────────────────────────────────────────────────
+_API_KEY = os.getenv("API_KEY", "")
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def verify_api_key(key: str = Security(_api_key_header)):
+    if _API_KEY and key != _API_KEY:
+        from fastapi import HTTPException as _HTTPException
+        raise _HTTPException(status_code=HTTP_403_FORBIDDEN, detail="Invalid or missing API key")
+    return key
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    log.info("[brain] starting up — %d model(s) pre-loaded", _engine.user_count())
     yield
+    log.info("[brain] shutting down")
 
 
 app = FastAPI(
@@ -69,7 +89,7 @@ def health():
 
 
 @app.post("/api/brain/sync")
-async def sync_trades(req: SyncRequest):
+async def sync_trades(req: SyncRequest, _: str = Security(verify_api_key)):
     """
     Fetch closed trade history from the user's exchange and train (or retrain)
     their personal MLP model.  Uses read-only credentials — never places orders.
@@ -95,7 +115,7 @@ async def sync_trades(req: SyncRequest):
 
 
 @app.post("/api/brain/predict")
-def predict(req: PredictRequest):
+def predict(req: PredictRequest, _: str = Security(verify_api_key)):
     """
     Return a trade-outcome prediction for the given market conditions.
     Uses the user's personal model if trained, otherwise falls back to a
@@ -111,7 +131,7 @@ def predict(req: PredictRequest):
 
 
 @app.post("/api/brain/feedback")
-def feedback(req: FeedbackRequest):
+def feedback(req: FeedbackRequest, _: str = Security(verify_api_key)):
     """
     Feed back the actual outcome of a trade to adapt the model online.
     Call this after every closed position for continuous personalisation.
@@ -121,6 +141,6 @@ def feedback(req: FeedbackRequest):
 
 
 @app.get("/api/brain/stats/{user_id}")
-def stats(user_id: str):
+def stats(user_id: str, _: str = Security(verify_api_key)):
     """Diagnostics for a user's model: accuracy, trade count, win rate."""
     return {"ok": True, **_engine.stats(user_id)}
