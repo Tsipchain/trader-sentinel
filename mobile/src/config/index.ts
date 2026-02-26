@@ -8,8 +8,8 @@ export const CONFIG = {
   // LLM Analyst service (Railway)
   ANALYST_URL: 'https://alanisys.up.railway.app',
 
-  // Neural Prediction Brain service (Railway) — replace with your Railway URL
-  BRAIN_URL: 'https://your-brain-service.up.railway.app',
+  // Neural Prediction Brain service (Railway)
+  BRAIN_URL: 'https://alanisys.up.railway.app',
 
   // Thronos Gateway - Payment & Rewards
   THRONOS_GATEWAY_URL: 'https://gateway.thronos.io',
