@@ -62,6 +62,12 @@ async def _shutdown():
     await _dex.close()
 
 
+@app.get("/robots.txt", include_in_schema=False)
+async def robots_txt():
+    content = "User-agent: *\nDisallow: /\n"
+    return Response(content=content, media_type="text/plain")
+
+
 @app.get("/health")
 async def health() -> dict[str, Any]:
     return {"ok": True, "ts": int(time.time())}
