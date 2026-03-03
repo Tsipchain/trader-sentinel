@@ -8,13 +8,12 @@ Supports:
   - adapt()   — online partial_fit after each real trade (incremental learning)
   - stats()   — model diagnostics
 
-Models are persisted to MODELS_DIR (default: /models) so they survive restarts.
+Models are persisted to MODELS_DIR (from store.py → /disckb/models by default)
+so they survive container restarts on the Railway volume.
 """
 import logging
-import os
 import pickle
 import time
-from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
@@ -23,11 +22,11 @@ from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
 
 from .features import build_dataset, market_features, trade_features
+from .store import MODELS_DIR
 
 log = logging.getLogger(__name__)
 
 MIN_PAIRS = 5  # minimum matched pairs required to train
-MODELS_DIR = Path(os.getenv("MODELS_DIR", "/models"))
 
 
 class _UserModel:
