@@ -12,11 +12,14 @@ Score: 0.0 (calm/normal) → 10.0 (extreme — high RSI, high vol, at fib resist
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from typing import Optional
 
 import ccxt.async_support as ccxt
+
+log = logging.getLogger(__name__)
 
 
 # ── Fibonacci retracement levels (standard: 0.236, 0.382, 0.5, 0.618, 0.786) ─
@@ -47,23 +50,38 @@ class TechnicalResult:
     error: str | None = None
 
 
-async def _fetch_ohlcv(symbol: str, exchange_id: str = "binance",
-                       timeframe: str = "1d", limit: int = 60) -> list[list]:
-    """Fetch daily OHLCV candles. Returns list of [ts, o, h, l, c, v]."""
+_FALLBACK_EXCHANGES = ["binance", "bybit", "okx"]
+
+
+async def _fetch_ohlcv_from(exchange_id: str, symbol: str,
+                             timeframe: str, limit: int) -> list[list]:
+    """Try one exchange; return candles or raise."""
     ex_class = getattr(ccxt, exchange_id, None)
     if ex_class is None:
-        return []
-    ex = ex_class({"enableRateLimit": True, "timeout": 15_000})
+        raise ValueError(f"Unknown exchange: {exchange_id}")
+    ex = ex_class({"enableRateLimit": True, "timeout": 20_000})
     try:
         candles = await ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         return candles or []
-    except Exception:
-        return []
     finally:
         try:
             await ex.close()
         except Exception:
             pass
+
+
+async def _fetch_ohlcv(symbol: str, exchange_id: str = "binance",
+                       timeframe: str = "1d", limit: int = 60) -> list[list]:
+    """Fetch daily OHLCV candles, falling back through exchanges on failure."""
+    order = [exchange_id] + [e for e in _FALLBACK_EXCHANGES if e != exchange_id]
+    for ex_id in order:
+        try:
+            candles = await _fetch_ohlcv_from(ex_id, symbol, timeframe, limit)
+            if candles:
+                return candles
+        except Exception as exc:
+            log.warning("OHLCV fetch failed on %s for %s: %s", ex_id, symbol, exc)
+    return []
 
 
 def _rsi(closes: list[float], period: int = 14) -> float | None:
@@ -130,14 +148,16 @@ async def calculate(symbol: str = "BTC/USDT") -> TechnicalResult:
     candles = await _fetch_ohlcv(symbol, limit=60)
 
     if not candles or len(candles) < 20:
-        result = TechnicalResult(
+        log.error(
+            "Insufficient candle data for %s: got %d candles from all exchanges",
+            symbol, len(candles),
+        )
+        return TechnicalResult(
             score=0.0, symbol=symbol, current_price=None,
             rsi_14=None, rsi_signal="unknown",
             volatility_score=0.0, fib_levels=[], nearest_fib=None,
             cycle_deviation=None, error="Insufficient candle data",
         )
-        _CACHE[cache_key] = (time.time(), result)
-        return result
 
     closes    = [c[4] for c in candles]
     highs     = [c[2] for c in candles]
