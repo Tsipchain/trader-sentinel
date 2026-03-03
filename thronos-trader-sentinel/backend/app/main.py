@@ -247,11 +247,41 @@ async def sentinel_technicals(request: Request, symbol: str = Query("BTC/USDT"),
         "symbol": result.symbol,
         "score": result.score,
         "current_price": result.current_price,
+        # RSI
         "rsi_14": result.rsi_14,
         "rsi_signal": result.rsi_signal,
+        # Volatility
         "volatility_score": result.volatility_score,
+        # MACD (12/26/9)
+        "macd": {
+            "line": result.macd_line,
+            "signal": result.macd_signal,
+            "histogram": result.macd_histogram,
+            "trend": result.macd_trend,
+        },
+        # Bollinger Bands (20, 2σ)
+        "bollinger_bands": {
+            "upper": result.bb_upper,
+            "middle": result.bb_middle,
+            "lower": result.bb_lower,
+            "pct_b": result.bb_pct,
+            "signal": result.bb_signal,
+        },
+        # EMA crossover
+        "ema": {
+            "ema_20": result.ema_20,
+            "ema_50": result.ema_50,
+            "cross": result.ema_cross,
+        },
+        # Williams %R (14)
+        "williams_r": {
+            "value": result.williams_r,
+            "signal": result.williams_r_signal,
+        },
+        # Fibonacci
         "nearest_fib": result.nearest_fib,
         "fib_levels": result.fib_levels,
+        # Cycle
         "cycle_deviation_pct": result.cycle_deviation,
         "error": result.error,
     }

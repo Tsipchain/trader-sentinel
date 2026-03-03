@@ -2,10 +2,14 @@
 Technical Risk Module
 ---------------------
 Fetches OHLCV candles from a CEX provider and calculates:
-- RSI (14-period) — momentum / overbought-oversold
-- ATR-based Volatility — normalised to 0-10
-- Fibonacci Retracement levels — proximity to key levels
-- 30-day Cycle deviation — distance from 30/60/90-day price midpoints
+- RSI (14-period)            — momentum / overbought-oversold
+- ATR-based Volatility       — normalised to 0-10
+- Fibonacci Retracement      — proximity to key levels
+- 30-day Cycle deviation     — distance from 30-day price midpoint
+- MACD (12/26/9)             — trend direction and momentum
+- Bollinger Bands (20, 2σ)   — price position within recent range
+- EMA 20 / EMA 50 crossover  — short vs medium-term trend
+- Williams %R (14)           — momentum oscillator (-100 to 0)
 
 Score: 0.0 (calm/normal) → 10.0 (extreme — high RSI, high vol, at fib resistance)
 """
@@ -14,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import httpx
@@ -42,12 +46,34 @@ class TechnicalResult:
     score: float              # 0–10
     symbol: str
     current_price: float | None
+    # RSI
     rsi_14: float | None      # 0–100
     rsi_signal: str           # "overbought" | "oversold" | "neutral"
+    # Volatility
     volatility_score: float   # 0–10  (ATR / price normalised)
-    fib_levels: list[dict]    # nearest fib levels with prices
-    nearest_fib: dict | None  # closest fib level
+    # Fibonacci
+    fib_levels: list[dict]
+    nearest_fib: dict | None
+    # Cycle
     cycle_deviation: float | None  # % from 30-day midpoint
+    # MACD
+    macd_line: float | None = None
+    macd_signal: float | None = None
+    macd_histogram: float | None = None
+    macd_trend: str = "unknown"   # "bullish" | "bearish" | "neutral"
+    # Bollinger Bands
+    bb_upper: float | None = None
+    bb_middle: float | None = None
+    bb_lower: float | None = None
+    bb_pct: float | None = None   # 0–100 position within bands
+    bb_signal: str = "unknown"    # "overbought" | "oversold" | "neutral"
+    # EMA
+    ema_20: float | None = None
+    ema_50: float | None = None
+    ema_cross: str = "unknown"    # "bullish" | "bearish"
+    # Williams %R
+    williams_r: float | None = None
+    williams_r_signal: str = "unknown"  # "overbought" | "oversold" | "neutral"
     error: str | None = None
 
 
@@ -120,6 +146,8 @@ async def _fetch_ohlcv(symbol: str, exchange_id: str = "binance",
     return []
 
 
+# ── Indicator helpers ──────────────────────────────────────────────────────────
+
 def _rsi(closes: list[float], period: int = 14) -> float | None:
     if len(closes) < period + 1:
         return None
@@ -128,7 +156,6 @@ def _rsi(closes: list[float], period: int = 14) -> float | None:
         delta = closes[i] - closes[i - 1]
         gains.append(max(delta, 0))
         losses.append(max(-delta, 0))
-    # Wilder smoothing
     avg_gain = sum(gains[:period]) / period
     avg_loss = sum(losses[:period]) / period
     for i in range(period, len(gains)):
@@ -157,6 +184,68 @@ def _atr(candles: list[list], period: int = 14) -> float | None:
     return atr
 
 
+def _ema(values: list[float], period: int) -> list[float]:
+    """Exponential Moving Average; returns [] if insufficient data."""
+    if len(values) < period:
+        return []
+    k = 2.0 / (period + 1)
+    result = [sum(values[:period]) / period]
+    for v in values[period:]:
+        result.append(v * k + result[-1] * (1 - k))
+    return result
+
+
+def _macd(closes: list[float], fast: int = 12, slow: int = 26,
+          signal: int = 9) -> tuple[float | None, float | None, float | None]:
+    """Returns (macd_line, signal_line, histogram) for the most recent candle."""
+    if len(closes) < slow + signal:
+        return None, None, None
+    ema_fast = _ema(closes, fast)   # len = len(closes) - fast + 1
+    ema_slow = _ema(closes, slow)   # len = len(closes) - slow + 1
+    if not ema_fast or not ema_slow:
+        return None, None, None
+    # Align: ema_fast is longer by (slow - fast) entries
+    offset = slow - fast
+    macd_line = [ema_fast[i + offset] - ema_slow[i] for i in range(len(ema_slow))]
+    sig_line = _ema(macd_line, signal)
+    if not sig_line:
+        return None, None, None
+    m = macd_line[-1]
+    s = sig_line[-1]
+    return round(m, 6), round(s, 6), round(m - s, 6)
+
+
+def _bollinger(closes: list[float], period: int = 20,
+               std_dev: float = 2.0) -> tuple[float | None, float | None, float | None, float | None]:
+    """Returns (upper, middle, lower, bb_pct).
+    bb_pct = (price - lower) / (upper - lower) * 100 — 0 at lower band, 100 at upper.
+    """
+    if len(closes) < period:
+        return None, None, None, None
+    window = closes[-period:]
+    middle = sum(window) / period
+    variance = sum((x - middle) ** 2 for x in window) / period
+    std = variance ** 0.5
+    upper = middle + std_dev * std
+    lower = middle - std_dev * std
+    current = closes[-1]
+    bb_pct = ((current - lower) / (upper - lower) * 100) if upper != lower else 50.0
+    return round(upper, 4), round(middle, 4), round(lower, 4), round(bb_pct, 2)
+
+
+def _williams_r(candles: list[list], period: int = 14) -> float | None:
+    """Williams %R: -100 (oversold) to 0 (overbought)."""
+    if len(candles) < period:
+        return None
+    window = candles[-period:]
+    highest_high = max(c[2] for c in window)
+    lowest_low = min(c[3] for c in window)
+    if highest_high == lowest_low:
+        return -50.0
+    wr = (highest_high - candles[-1][4]) / (highest_high - lowest_low) * -100
+    return round(wr, 2)
+
+
 def _fibonacci_levels(high: float, low: float, current: float) -> tuple[list[dict], dict | None]:
     span = high - low
     if span <= 0:
@@ -173,6 +262,8 @@ def _fibonacci_levels(high: float, low: float, current: float) -> tuple[list[dic
     nearest = min(levels, key=lambda x: x["distance_pct"])
     return levels, nearest
 
+
+# ── Main calculation ───────────────────────────────────────────────────────────
 
 async def calculate(symbol: str = "BTC/USDT") -> TechnicalResult:
     cache_key = symbol
@@ -195,10 +286,10 @@ async def calculate(symbol: str = "BTC/USDT") -> TechnicalResult:
             cycle_deviation=None, error="Insufficient candle data",
         )
 
-    closes    = [c[4] for c in candles]
-    highs     = [c[2] for c in candles]
-    lows      = [c[3] for c in candles]
-    current   = closes[-1]
+    closes  = [c[4] for c in candles]
+    highs   = [c[2] for c in candles]
+    lows    = [c[3] for c in candles]
+    current = closes[-1]
 
     # ── RSI ──────────────────────────────────────────────────────────────────
     rsi = _rsi(closes)
@@ -213,15 +304,13 @@ async def calculate(symbol: str = "BTC/USDT") -> TechnicalResult:
         rsi_score  = min(10.0, (50 - rsi) / 5)
     else:
         rsi_signal = "neutral"
-        rsi_score  = abs(rsi - 50) / 10  # 0–5 in neutral zone
+        rsi_score  = abs(rsi - 50) / 10
 
     # ── ATR Volatility ────────────────────────────────────────────────────────
     atr = _atr(candles)
     if atr and current > 0:
-        atr_pct = atr / current * 100   # daily ATR as % of price
-        # Normalise: 1% ATR = calm(2), 3% = moderate(5), 6%+ = extreme(10)
-        volatility_score = min(10.0, atr_pct * 1.6)
-        volatility_score = round(volatility_score, 2)
+        atr_pct = atr / current * 100
+        volatility_score = round(min(10.0, atr_pct * 1.6), 2)
     else:
         volatility_score = 0.0
 
@@ -230,12 +319,10 @@ async def calculate(symbol: str = "BTC/USDT") -> TechnicalResult:
     period_low  = min(lows[-60:])
     fib_levels, nearest_fib = _fibonacci_levels(period_high, period_low, current)
 
-    # Score: higher if very close to a key fib level (0.618 or 0.786 = resistance)
     fib_score = 0.0
     if nearest_fib:
-        dist = nearest_fib["distance_pct"]
+        dist  = nearest_fib["distance_pct"]
         ratio = nearest_fib["ratio"]
-        # Key resistance levels: 0.618 and 0.786
         weight = 2.0 if ratio in (0.618, 0.786, 0.382) else 1.0
         if dist < 0.5:
             fib_score = 8.0 * weight / 2
@@ -251,8 +338,72 @@ async def calculate(symbol: str = "BTC/USDT") -> TechnicalResult:
     else:
         deviation_pct = None
 
+    # ── MACD (12/26/9) ────────────────────────────────────────────────────────
+    macd_line, macd_signal, macd_histogram = _macd(closes)
+    if macd_line is not None and macd_histogram is not None:
+        if macd_line > macd_signal:
+            macd_trend = "bullish"
+            macd_score = 0.0   # bullish = lower risk
+        else:
+            macd_trend = "bearish"
+            # Score proportional to how far below signal
+            macd_score = min(5.0, abs(macd_histogram) / (abs(macd_line) + 1e-9) * 5)
+    else:
+        macd_trend = "unknown"
+        macd_score = 0.0
+
+    # ── Bollinger Bands (20, 2σ) ──────────────────────────────────────────────
+    bb_upper, bb_middle, bb_lower, bb_pct = _bollinger(closes)
+    if bb_pct is not None:
+        if bb_pct >= 80:
+            bb_signal = "overbought"
+            bb_score  = min(5.0, (bb_pct - 80) / 4)
+        elif bb_pct <= 20:
+            bb_signal = "oversold"
+            bb_score  = min(5.0, (20 - bb_pct) / 4)
+        else:
+            bb_signal = "neutral"
+            bb_score  = 0.0
+    else:
+        bb_signal = "unknown"
+        bb_score  = 0.0
+
+    # ── EMA 20 / EMA 50 crossover ─────────────────────────────────────────────
+    ema20_series = _ema(closes, 20)
+    ema50_series = _ema(closes, 50)
+    ema_20 = round(ema20_series[-1], 4) if ema20_series else None
+    ema_50 = round(ema50_series[-1], 4) if ema50_series else None
+    if ema_20 is not None and ema_50 is not None:
+        ema_cross = "bullish" if ema_20 > ema_50 else "bearish"
+    else:
+        ema_cross = "unknown"
+
+    # ── Williams %R (14) ──────────────────────────────────────────────────────
+    wr = _williams_r(candles)
+    if wr is not None:
+        if wr >= -20:
+            williams_r_signal = "overbought"
+            wr_score = min(5.0, (wr + 20) / 4)
+        elif wr <= -80:
+            williams_r_signal = "oversold"
+            wr_score = min(5.0, (-80 - wr) / 4)
+        else:
+            williams_r_signal = "neutral"
+            wr_score = 0.0
+    else:
+        williams_r_signal = "unknown"
+        wr_score = 0.0
+
     # ── Composite Technical Score ─────────────────────────────────────────────
-    score = round(min(10.0, (rsi_score * 0.45 + volatility_score * 0.35 + fib_score * 0.20)), 2)
+    # Weights: RSI 30%, Volatility 22%, Fib 13%, MACD 15%, BB 10%, Williams %R 10%
+    score = round(min(10.0, (
+        rsi_score        * 0.30
+        + volatility_score * 0.22
+        + fib_score        * 0.13
+        + macd_score       * 0.15
+        + bb_score         * 0.10
+        + wr_score         * 0.10
+    )), 2)
 
     result = TechnicalResult(
         score=score,
@@ -264,6 +415,20 @@ async def calculate(symbol: str = "BTC/USDT") -> TechnicalResult:
         fib_levels=fib_levels,
         nearest_fib=nearest_fib,
         cycle_deviation=round(deviation_pct, 2) if deviation_pct is not None else None,
+        macd_line=macd_line,
+        macd_signal=macd_signal,
+        macd_histogram=macd_histogram,
+        macd_trend=macd_trend,
+        bb_upper=bb_upper,
+        bb_middle=bb_middle,
+        bb_lower=bb_lower,
+        bb_pct=bb_pct,
+        bb_signal=bb_signal,
+        ema_20=ema_20,
+        ema_50=ema_50,
+        ema_cross=ema_cross,
+        williams_r=wr,
+        williams_r_signal=williams_r_signal,
     )
     _CACHE[cache_key] = (time.time(), result)
     return result
