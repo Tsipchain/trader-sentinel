@@ -10,7 +10,8 @@
     "build:apk": "eas build --platform android --profile preview",
     "build:android": "eas build --platform android --profile production",
     "build:ios": "eas build --platform ios --profile production",
-    "build:all": "eas build --platform all --profile production"
+    "build:all": "eas build --platform all --profile production",
+    "eas-build-post-install": "node scripts/patch-expo-modules.js"
   },
   "dependencies": {
     "@expo/vector-icons": "^14.0.0",
