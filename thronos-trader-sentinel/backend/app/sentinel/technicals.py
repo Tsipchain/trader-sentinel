@@ -76,7 +76,7 @@ async def _fetch_ohlcv_okx_http(symbol: str, limit: int) -> list[list]:
     OKX returns rows newest-first; we reverse to chronological order.
     Row format: [ts, open, high, low, close, vol, volCcy, volCcyQuote, confirm]
     """
-    inst_id = symbol.replace("/", "-")
+    inst_id = symbol.replace("/", "-") if "/" in symbol else f"{symbol}-USDT"
     url = (
         f"https://www.okx.com/api/v5/market/candles"
         f"?instId={inst_id}&bar=1D&limit={limit}"

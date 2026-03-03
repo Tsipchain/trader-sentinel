@@ -100,7 +100,7 @@ async def _okx_http_ticker(symbol: str) -> tuple[float | None, float | None, flo
     """Fetch last/bid/ask from OKX REST API without CCXT.
     Returns (last, bid, ask); raises on any failure.
     """
-    inst_id = symbol.replace("/", "-")
+    inst_id = symbol.replace("/", "-") if "/" in symbol else f"{symbol}-USDT"
     url = f"https://www.okx.com/api/v5/market/ticker?instId={inst_id}"
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.get(url)
