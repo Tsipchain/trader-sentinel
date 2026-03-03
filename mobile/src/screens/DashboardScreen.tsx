@@ -266,7 +266,12 @@ export default function DashboardScreen() {
           </View>
 
           {prices.map((item, index) => (
-            <View key={index} style={styles.watchlistItem}>
+            <TouchableOpacity
+              key={index}
+              style={styles.watchlistItem}
+              onPress={() => navigation.navigate('Chart', { symbol: item.symbol })}
+              activeOpacity={0.75}
+            >
               <View style={styles.watchlistLeft}>
                 <Text style={styles.watchlistSymbol}>{item.symbol}</Text>
                 <Text style={styles.watchlistExchange}>
@@ -284,7 +289,8 @@ export default function DashboardScreen() {
                   {item.change24h >= 0 ? '+' : ''}{item.change24h.toFixed(2)}%
                 </Text>
               </View>
-            </View>
+              <Ionicons name="chevron-forward" size={16} color={COLORS.textMuted} style={{ marginLeft: 4 }} />
+            </TouchableOpacity>
           ))}
         </View>
 
