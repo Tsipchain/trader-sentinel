@@ -5,18 +5,12 @@
   "build": {
     "development": {
       "developmentClient": true,
-      "distribution": "internal",
-      "env": {
-        "npm_config_ignore_scripts": "true"
-      }
+      "distribution": "internal"
     },
     "preview": {
       "distribution": "internal",
       "android": {
         "buildType": "apk"
-      },
-      "env": {
-        "npm_config_ignore_scripts": "true"
       }
     },
     "production": {
@@ -25,9 +19,6 @@
       },
       "android": {
         "buildType": "app-bundle"
-      },
-      "env": {
-        "npm_config_ignore_scripts": "true"
       }
     }
   },
