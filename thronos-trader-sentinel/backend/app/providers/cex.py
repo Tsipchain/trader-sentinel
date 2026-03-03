@@ -1,8 +1,12 @@
 import asyncio
+import logging
 import time
 from dataclasses import dataclass
 
+import httpx
 import ccxt.async_support as ccxt
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -71,8 +75,18 @@ class CEXProvider:
             bid = _to_float(t.get("bid"))
             ask = _to_float(t.get("ask"))
             return VenueTick(venue=venue, kind="cex", last=last, bid=bid, ask=ask, ts=ts)
-        except Exception:
-            return VenueTick(venue=venue, kind="cex", last=None, bid=None, ask=None, ts=ts)
+        except Exception as exc:
+            log.warning("CCXT ticker failed for %s/%s: %s", venue, symbol, exc)
+
+        # CCXT failed — try OKX REST directly (geo-robust)
+        if venue == "okx":
+            try:
+                last, bid, ask = await _okx_http_ticker(symbol)
+                return VenueTick(venue="okx", kind="cex", last=last, bid=bid, ask=ask, ts=ts)
+            except Exception as exc:
+                log.warning("OKX HTTP ticker failed for %s: %s", symbol, exc)
+
+        return VenueTick(venue=venue, kind="cex", last=None, bid=None, ask=None, ts=ts)
 
     async def snapshot(self, symbol: str) -> list[VenueTick]:
         await self.start()
@@ -80,6 +94,23 @@ class CEXProvider:
         if not tasks:
             return []
         return await asyncio.gather(*tasks)
+
+
+async def _okx_http_ticker(symbol: str) -> tuple[float | None, float | None, float | None]:
+    """Fetch last/bid/ask from OKX REST API without CCXT.
+    Returns (last, bid, ask); raises on any failure.
+    """
+    inst_id = symbol.replace("/", "-")
+    url = f"https://www.okx.com/api/v5/market/ticker?instId={inst_id}"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(url)
+        resp.raise_for_status()
+        data = resp.json()
+    rows = data.get("data") or []
+    if not rows:
+        raise ValueError(f"OKX HTTP ticker: no data for {symbol}")
+    row = rows[0]
+    return _to_float(row.get("last")), _to_float(row.get("bidPx")), _to_float(row.get("askPx"))
 
 
 def _to_float(x):
