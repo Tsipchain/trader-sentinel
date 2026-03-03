@@ -17,6 +17,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+import httpx
 import ccxt.async_support as ccxt
 
 log = logging.getLogger(__name__)
@@ -70,9 +71,34 @@ async def _fetch_ohlcv_from(exchange_id: str, symbol: str,
             pass
 
 
+async def _fetch_ohlcv_okx_http(symbol: str, limit: int) -> list[list]:
+    """Direct OKX REST fallback — no CCXT, plain httpx.
+    OKX returns rows newest-first; we reverse to chronological order.
+    Row format: [ts, open, high, low, close, vol, volCcy, volCcyQuote, confirm]
+    """
+    inst_id = symbol.replace("/", "-")
+    url = (
+        f"https://www.okx.com/api/v5/market/candles"
+        f"?instId={inst_id}&bar=1D&limit={limit}"
+    )
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        resp = await client.get(url)
+        resp.raise_for_status()
+        data = resp.json()
+    if data.get("code") != "0" or not data.get("data"):
+        raise ValueError(f"OKX HTTP error: {data.get('msg', 'empty response')}")
+    return [
+        [int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5])]
+        for r in reversed(data["data"])
+    ]
+
+
 async def _fetch_ohlcv(symbol: str, exchange_id: str = "binance",
                        timeframe: str = "1d", limit: int = 60) -> list[list]:
-    """Fetch daily OHLCV candles, falling back through exchanges on failure."""
+    """Fetch daily OHLCV candles, falling back through exchanges on failure.
+
+    Chain: CCXT binance → CCXT bybit → CCXT okx → direct OKX HTTP (httpx)
+    """
     order = [exchange_id] + [e for e in _FALLBACK_EXCHANGES if e != exchange_id]
     for ex_id in order:
         try:
@@ -81,6 +107,16 @@ async def _fetch_ohlcv(symbol: str, exchange_id: str = "binance",
                 return candles
         except Exception as exc:
             log.warning("OHLCV fetch failed on %s for %s: %s", ex_id, symbol, exc)
+
+    # All CCXT paths failed — try direct OKX REST as last resort
+    try:
+        candles = await _fetch_ohlcv_okx_http(symbol, limit)
+        if candles:
+            log.info("OHLCV fetched via direct OKX HTTP for %s", symbol)
+            return candles
+    except Exception as exc:
+        log.warning("OHLCV direct OKX HTTP failed for %s: %s", symbol, exc)
+
     return []
 
 
