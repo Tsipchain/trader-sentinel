@@ -19,6 +19,8 @@ import SubscriptionScreen from './src/screens/SubscriptionScreen';
 import RewardsScreen from './src/screens/RewardsScreen';
 import LiquidityScreen from './src/screens/LiquidityScreen';
 import RiskScreen from './src/screens/RiskScreen';
+import AutoTraderScreen from './src/screens/AutoTraderScreen';
+import HistoryScreen from './src/screens/HistoryScreen';
 
 // Store
 import { useStore } from './src/store/useStore';
@@ -37,6 +39,8 @@ export type RootStackParamList = {
 export type TabParamList = {
   Dashboard: undefined;
   Signals: undefined;
+  AutoTrader: undefined;
+  History: undefined;
   Risk: undefined;
   Wallet: undefined;
   Settings: undefined;
@@ -60,6 +64,12 @@ function MainTabs() {
               break;
             case 'Signals':
               iconName = focused ? 'flash' : 'flash-outline';
+              break;
+            case 'AutoTrader':
+              iconName = focused ? 'hardware-chip' : 'hardware-chip-outline';
+              break;
+            case 'History':
+              iconName = focused ? 'time' : 'time-outline';
               break;
             case 'Risk':
               iconName = focused ? 'shield' : 'shield-outline';
@@ -95,6 +105,8 @@ function MainTabs() {
     >
       <Tab.Screen name="Dashboard" component={DashboardScreen} options={{ title: 'Dashboard' }} />
       <Tab.Screen name="Signals" component={SignalsScreen} options={{ title: 'Signals' }} />
+      <Tab.Screen name="AutoTrader" component={AutoTraderScreen} options={{ title: 'AutoTrader' }} />
+      <Tab.Screen name="History" component={HistoryScreen} options={{ title: 'History' }} />
       <Tab.Screen name="Risk" component={RiskScreen} options={{ title: 'Risk & AI' }} />
       <Tab.Screen name="Wallet" component={WalletScreen} options={{ title: 'Wallet' }} />
       <Tab.Screen name="Settings" component={SettingsScreen} options={{ title: 'Settings' }} />

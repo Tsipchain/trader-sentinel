@@ -241,6 +241,50 @@ export const analystAPI = {
 
 // ── Brain Prediction API ─────────────────────────────────────────────────────
 
+// ── AutoTrader & History types ────────────────────────────────────────────────
+
+export interface ActiveTrade {
+  id: string;
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  entryPrice: number;
+  currentPrice: number;
+  quantity: number;
+  pnl: number;           // % unrealised P&L
+  openedAt: number;      // unix ms
+}
+
+export interface TradeRecord {
+  id: string;
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  entryPrice: number;
+  exitPrice: number;
+  quantity: number;
+  pnl: number;           // % realised P&L
+  pnlUsd: number;
+  openedAt: number;
+  closedAt: number;
+  exchange: string;
+}
+
+export interface TradeStats {
+  total_trades: number;
+  win_rate: number;       // 0–1
+  total_pnl_usd: number;
+  avg_pnl_pct: number;
+  best_trade_pct: number;
+  worst_trade_pct: number;
+  most_traded_symbol: string;
+}
+
+export interface AutoTraderStatus {
+  ok: boolean;
+  enabled: boolean;
+  active_trades: ActiveTrade[];
+  log: string[];
+}
+
 export const brainAPI = {
   async predict(params: {
     user_id: string;
@@ -265,8 +309,43 @@ export const brainAPI = {
     return response.data;
   },
 
-  async getStats(userId: string) {
+  async getStats(userId: string): Promise<{ ok: boolean } & TradeStats> {
     const response = await brainApi.get(`/api/brain/stats/${userId}`);
+    return response.data;
+  },
+
+  async getHistory(userId: string, limit: number = 50): Promise<{ ok: boolean; trades: TradeRecord[] }> {
+    const response = await brainApi.get(`/api/brain/history/${userId}`, { params: { limit } });
+    return response.data;
+  },
+
+  async getAutoTraderStatus(userId: string): Promise<AutoTraderStatus> {
+    const response = await brainApi.get(`/api/brain/autotrader/${userId}`);
+    return response.data;
+  },
+
+  async enableAutoTrader(params: {
+    user_id: string;
+    exchange: string;
+    api_key: string;
+    api_secret: string;
+    symbols: string[];
+    stop_loss_pct: number;
+    take_profit_pct: number;
+    max_position_pct: number;
+    max_open_trades: number;
+  }): Promise<{ ok: boolean }> {
+    const response = await brainApi.post('/api/brain/autotrader/enable', params);
+    return response.data;
+  },
+
+  async disableAutoTrader(userId: string): Promise<{ ok: boolean }> {
+    const response = await brainApi.post('/api/brain/autotrader/disable', { user_id: userId });
+    return response.data;
+  },
+
+  async closeTrade(userId: string, tradeId: string): Promise<{ ok: boolean }> {
+    const response = await brainApi.post('/api/brain/autotrader/close', { user_id: userId, trade_id: tradeId });
     return response.data;
   },
 };

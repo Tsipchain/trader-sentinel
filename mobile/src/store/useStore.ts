@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import type { ActiveTrade, TradeRecord, TradeStats } from '../services/api';
 
 // Types
 export interface User {
@@ -45,6 +46,17 @@ export interface MarketData {
   bestAsk: number;
   bestAskVenue: string;
   spread: number;
+}
+
+export interface AutoTraderConfig {
+  exchange: string;
+  apiKey: string;
+  apiSecret: string;
+  symbols: string[];
+  stopLossPct: number;
+  takeProfitPct: number;
+  maxPositionPct: number;
+  maxOpenTrades: number;
 }
 
 // Store Interface
@@ -97,6 +109,23 @@ interface AppStore {
   watchlist: string[];
   addToWatchlist: (symbol: string) => void;
   removeFromWatchlist: (symbol: string) => void;
+
+  // AutoTrader
+  autoTrader: {
+    enabled: boolean;
+    config: AutoTraderConfig;
+    activeTrades: ActiveTrade[];
+  };
+  setAutoTrader: (partial: Partial<AppStore['autoTrader']>) => void;
+
+  // Trade History
+  tradeHistory: {
+    trades: TradeRecord[];
+    stats: TradeStats | null;
+    lastSynced: string | null;
+    aiAnalysis: string | null;
+  };
+  setTradeHistory: (partial: Partial<AppStore['tradeHistory']>) => void;
 }
 
 export const useStore = create<AppStore>()(
@@ -191,6 +220,36 @@ export const useStore = create<AppStore>()(
       removeFromWatchlist: (symbol) => set((state) => ({
         watchlist: state.watchlist.filter((s) => s !== symbol),
       })),
+
+      // AutoTrader
+      autoTrader: {
+        enabled: false,
+        config: {
+          exchange: 'binance',
+          apiKey: '',
+          apiSecret: '',
+          symbols: ['BTC/USDT', 'ETH/USDT'],
+          stopLossPct: 2,
+          takeProfitPct: 4,
+          maxPositionPct: 10,
+          maxOpenTrades: 3,
+        },
+        activeTrades: [],
+      },
+      setAutoTrader: (partial) => set((state) => ({
+        autoTrader: { ...state.autoTrader, ...partial },
+      })),
+
+      // Trade History
+      tradeHistory: {
+        trades: [],
+        stats: null,
+        lastSynced: null,
+        aiAnalysis: null,
+      },
+      setTradeHistory: (partial) => set((state) => ({
+        tradeHistory: { ...state.tradeHistory, ...partial },
+      })),
     }),
     {
       name: 'trader-sentinel-storage',
@@ -202,6 +261,8 @@ export const useStore = create<AppStore>()(
         settings: state.settings,
         watchlist: state.watchlist,
         rewards: state.rewards,
+        autoTrader: state.autoTrader,
+        tradeHistory: state.tradeHistory,
       }),
     }
   )
