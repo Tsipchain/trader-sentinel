@@ -73,9 +73,8 @@ async def health() -> dict[str, Any]:
     return {"ok": True, "ts": int(time.time())}
 
 
-@app.get("/api/market/snapshot")
-@limiter.limit("60/minute")
-async def market_snapshot(request: Request, symbol: str = Query(..., description="ccxt style, e.g. BTC/USDT"), _: str = Security(verify_api_key)) -> dict[str, Any]:
+async def _snapshot_data(symbol: str) -> dict[str, Any]:
+    """Core snapshot logic shared by the snapshot and arb endpoints."""
     ts = int(time.time())
     cex_ticks = await _cex.snapshot(symbol)
     dex_tick = await _dex.snapshot(symbol)
@@ -105,10 +104,16 @@ async def market_snapshot(request: Request, symbol: str = Query(..., description
     return {"ok": True, "symbol": symbol, "ts": ts, "venues": venues}
 
 
+@app.get("/api/market/snapshot")
+@limiter.limit("60/minute")
+async def market_snapshot(request: Request, symbol: str = Query(..., description="ccxt style, e.g. BTC/USDT"), _: str = Security(verify_api_key)) -> dict[str, Any]:
+    return await _snapshot_data(symbol)
+
+
 @app.get("/api/market/arb")
 @limiter.limit("30/minute")
 async def market_arb(request: Request, symbol: str = Query(...), _: str = Security(verify_api_key)) -> dict[str, Any]:
-    snap = await market_snapshot(symbol)
+    snap = await _snapshot_data(symbol)
     venues = snap.get("venues") or []
 
     best_bid = None
@@ -158,7 +163,7 @@ async def market_arb(request: Request, symbol: str = Query(...), _: str = Securi
 async def market_stream(symbol: str = Query(...), interval_ms: int = Query(1000, ge=250, le=60000), _: str = Security(verify_api_key)):
     async def gen():
         while True:
-            payload = await market_snapshot(symbol)
+            payload = await _snapshot_data(symbol)
             yield "event: snapshot\n"
             yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
             await asyncio.sleep(interval_ms / 1000)
