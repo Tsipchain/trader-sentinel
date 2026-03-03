@@ -21,6 +21,7 @@ import LiquidityScreen from './src/screens/LiquidityScreen';
 import RiskScreen from './src/screens/RiskScreen';
 import AutoTraderScreen from './src/screens/AutoTraderScreen';
 import HistoryScreen from './src/screens/HistoryScreen';
+import ChartScreen from './src/screens/ChartScreen';
 
 // Store
 import { useStore } from './src/store/useStore';
@@ -34,6 +35,7 @@ export type RootStackParamList = {
   Subscription: undefined;
   Rewards: undefined;
   Liquidity: undefined;
+  Chart: { symbol: string };
 };
 
 export type TabParamList = {
@@ -203,6 +205,14 @@ export default function App() {
                   headerStyle: { backgroundColor: COLORS.background },
                   headerTintColor: COLORS.text,
                   presentation: 'modal',
+                }}
+              />
+              <Stack.Screen
+                name="Chart"
+                component={ChartScreen}
+                options={{
+                  headerShown: false,
+                  animation: 'slide_from_bottom',
                 }}
               />
             </>
