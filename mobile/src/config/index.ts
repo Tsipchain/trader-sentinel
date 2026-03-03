@@ -2,7 +2,7 @@
 // Thronos Integration & API Settings
 
 export const CONFIG = {
-  // Backend API (Render)
+  // Backend API (Railway → custom domain sentinel.thronoschain.org)
   API_URL: 'https://sentinel.thronoschain.org',
 
   // LLM Analyst service (Railway)
