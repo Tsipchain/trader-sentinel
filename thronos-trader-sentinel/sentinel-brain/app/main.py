@@ -17,7 +17,7 @@ from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel, Field
 from starlette.status import HTTP_403_FORBIDDEN
 
-from .connector import fetch_user_trades
+from .connector import fetch_exchange_snapshot, fetch_user_trades
 from .predictor import PredictionEngine
 from . import store
 
@@ -25,6 +25,23 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 _engine = PredictionEngine()
+
+
+def _exchange_availability() -> dict[str, dict[str, str | bool]]:
+    blocked = {
+        ex.strip().lower()
+        for ex in os.getenv("EXCHANGE_BLOCKED", "binance,bybit").split(",")
+        if ex.strip()
+    }
+    reason = "Execution not available from server region. Use OKX/MEXC or Local Executor."
+    out: dict[str, dict[str, str | bool]] = {}
+    for ex in ["binance", "bybit", "okx", "mexc"]:
+        is_enabled = ex not in blocked
+        out[ex] = {
+            "enabled": is_enabled,
+            "reason": "" if is_enabled else reason,
+        }
+    return out
 
 # ── API Key Auth ──────────────────────────────────────────────────────────────
 _API_KEY = os.getenv("API_KEY", "")
@@ -137,6 +154,42 @@ def _build_trade_records(trades: list[dict], exchange: str) -> tuple[list[dict],
 @app.get("/health")
 def health():
     return {"ok": True, "ts": time.time(), "users_with_models": _engine.user_count()}
+
+
+@app.get("/api/brain/exchange/availability")
+def exchange_availability(_: str = Security(verify_api_key)):
+    return {"ok": True, "exchanges": _exchange_availability()}
+
+
+@app.post("/api/brain/exchange/snapshot")
+async def exchange_snapshot(payload: dict = Body(default_factory=dict), _: str = Security(verify_api_key)):
+    exchange = (payload.get("exchange") or "").lower()
+    api_key = payload.get("api_key") or payload.get("apiKey")
+    api_secret = payload.get("api_secret") or payload.get("apiSecret")
+    passphrase = payload.get("passphrase")
+
+    if not exchange or not api_key or not api_secret:
+        return {
+            "ok": False,
+            "snapshot": None,
+            "error": "Missing exchange credentials",
+            "exchanges": _exchange_availability(),
+        }
+
+    try:
+        snapshot = await fetch_exchange_snapshot(exchange, api_key, api_secret, passphrase)
+        return {"ok": True, "snapshot": snapshot, "exchanges": _exchange_availability()}
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+    except Exception as e:
+        msg = str(e)
+        return {
+            "ok": False,
+            "snapshot": None,
+            "error": msg,
+            "blocked": "restricted" in msg.lower() or "forbidden" in msg.lower(),
+            "exchanges": _exchange_availability(),
+        }
 
 
 @app.post("/api/brain/sync")
@@ -284,11 +337,16 @@ def autotrader_enable(payload: dict = Body(default_factory=dict), _: str = Secur
             "exchange": payload.get("exchange", ""),
             "api_key": payload.get("api_key") or payload.get("apiKey") or "",
             "api_secret": payload.get("api_secret") or payload.get("apiSecret") or "",
+            "passphrase": payload.get("passphrase") or "",
             "symbols": payload.get("symbols") or ["BTC/USDT"],
             "stop_loss_pct": float(payload.get("stop_loss_pct") or payload.get("stopLossPct") or 2.0),
             "take_profit_pct": float(payload.get("take_profit_pct") or payload.get("takeProfitPct") or 4.0),
             "max_position_pct": float(payload.get("max_position_pct") or payload.get("maxPositionPct") or 10.0),
             "max_open_trades": int(payload.get("max_open_trades") or payload.get("maxOpenTrades") or 3),
+            "margin_mode": payload.get("margin_mode") or payload.get("marginMode") or "isolated",
+            "max_leverage": float(payload.get("max_leverage") or payload.get("maxLeverage") or 3),
+            "risk_per_trade_pct": float(payload.get("risk_per_trade_pct") or payload.get("riskPerTradePct") or 1),
+            "max_total_exposure_pct": float(payload.get("max_total_exposure_pct") or payload.get("maxTotalExposurePct") or 25),
         },
         "active_trades": [],
         "log": [f"AutoTrader enabled at {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}"],

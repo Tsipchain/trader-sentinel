@@ -52,11 +52,34 @@ export interface AutoTraderConfig {
   exchange: string;
   apiKey: string;
   apiSecret: string;
+  passphrase: string;
   symbols: string[];
   stopLossPct: number;
   takeProfitPct: number;
   maxPositionPct: number;
   maxOpenTrades: number;
+  marginMode: 'isolated' | 'cross';
+  maxLeverage: number;
+  riskPerTradePct: number;
+  maxTotalExposurePct: number;
+}
+
+export interface PortfolioState {
+  equity: number;
+  balances: Array<{ asset: string; total: number; free: number; used: number }>;
+  positions: Array<{
+    symbol: string;
+    side: string;
+    contracts: number;
+    entryPrice: number;
+    markPrice: number;
+    unrealizedPnl: number;
+    leverage: number;
+    marginMode: string;
+  }>;
+  usedMargin: number;
+  maxLeverageBySymbol: Record<string, number>;
+  lastSyncTs: number | null;
 }
 
 // Store Interface
@@ -115,6 +138,8 @@ interface AppStore {
     enabled: boolean;
     config: AutoTraderConfig;
     activeTrades: ActiveTrade[];
+    portfolio: PortfolioState;
+    exchangeAvailability: Record<string, { enabled: boolean; reason?: string }>;
   };
   setAutoTrader: (partial: Partial<AppStore['autoTrader']>) => void;
 
@@ -228,13 +253,27 @@ export const useStore = create<AppStore>()(
           exchange: 'binance',
           apiKey: '',
           apiSecret: '',
+          passphrase: '',
           symbols: ['BTC/USDT', 'ETH/USDT'],
           stopLossPct: 2,
           takeProfitPct: 4,
           maxPositionPct: 10,
           maxOpenTrades: 3,
+          marginMode: 'isolated',
+          maxLeverage: 3,
+          riskPerTradePct: 1,
+          maxTotalExposurePct: 25,
         },
         activeTrades: [],
+        portfolio: {
+          equity: 0,
+          balances: [],
+          positions: [],
+          usedMargin: 0,
+          maxLeverageBySymbol: {},
+          lastSyncTs: null,
+        },
+        exchangeAvailability: {},
       },
       setAutoTrader: (partial) => set((state) => ({
         autoTrader: { ...state.autoTrader, ...partial },
