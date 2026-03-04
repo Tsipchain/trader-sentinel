@@ -167,18 +167,28 @@ async def exchange_snapshot(payload: dict = Body(default_factory=dict), _: str =
     api_key = payload.get("api_key") or payload.get("apiKey")
     api_secret = payload.get("api_secret") or payload.get("apiSecret")
     passphrase = payload.get("passphrase")
+    availability = _exchange_availability()
 
     if not exchange or not api_key or not api_secret:
         return {
             "ok": False,
             "snapshot": None,
             "error": "Missing exchange credentials",
-            "exchanges": _exchange_availability(),
+            "exchanges": availability,
+        }
+
+    if exchange in availability and not bool(availability[exchange].get("enabled")):
+        return {
+            "ok": False,
+            "snapshot": None,
+            "error": availability[exchange].get("reason") or "Execution unavailable",
+            "blocked": True,
+            "exchanges": availability,
         }
 
     try:
         snapshot = await fetch_exchange_snapshot(exchange, api_key, api_secret, passphrase)
-        return {"ok": True, "snapshot": snapshot, "exchanges": _exchange_availability()}
+        return {"ok": True, "snapshot": snapshot, "exchanges": availability}
     except ValueError as e:
         raise HTTPException(400, detail=str(e))
     except Exception as e:
@@ -188,7 +198,7 @@ async def exchange_snapshot(payload: dict = Body(default_factory=dict), _: str =
             "snapshot": None,
             "error": msg,
             "blocked": "restricted" in msg.lower() or "forbidden" in msg.lower(),
-            "exchanges": _exchange_availability(),
+            "exchanges": availability,
         }
 
 

@@ -28,11 +28,10 @@ export default function AutoTraderScreen() {
   const exchangeAvailability = autoTrader.exchangeAvailability;
 
   const refreshStatus = useCallback(async () => {
-    if (!user?.id) return;
     setLoadingStatus(true);
     try {
       const [status, availability] = await Promise.all([
-        brainAPI.getAutoTraderStatus(user.id),
+        user?.id ? brainAPI.getAutoTraderStatus(user.id) : Promise.resolve({ ok: false, enabled: false, active_trades: [], log: [] }),
         brainAPI.getExchangeAvailability().catch(() => ({ ok: false, exchanges: {} })),
       ]);
       if (status.ok) {
