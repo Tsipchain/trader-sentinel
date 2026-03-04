@@ -82,6 +82,31 @@ export interface PortfolioState {
   lastSyncTs: number | null;
 }
 
+const DEFAULT_AUTOTRADER_CONFIG: AutoTraderConfig = {
+  exchange: 'binance',
+  apiKey: '',
+  apiSecret: '',
+  passphrase: '',
+  symbols: ['BTC/USDT', 'ETH/USDT'],
+  stopLossPct: 2,
+  takeProfitPct: 4,
+  maxPositionPct: 10,
+  maxOpenTrades: 3,
+  marginMode: 'isolated',
+  maxLeverage: 3,
+  riskPerTradePct: 1,
+  maxTotalExposurePct: 25,
+};
+
+const DEFAULT_PORTFOLIO: PortfolioState = {
+  equity: 0,
+  balances: [],
+  positions: [],
+  usedMargin: 0,
+  maxLeverageBySymbol: {},
+  lastSyncTs: null,
+};
+
 // Store Interface
 interface AppStore {
   // Auth & User
@@ -249,34 +274,28 @@ export const useStore = create<AppStore>()(
       // AutoTrader
       autoTrader: {
         enabled: false,
-        config: {
-          exchange: 'binance',
-          apiKey: '',
-          apiSecret: '',
-          passphrase: '',
-          symbols: ['BTC/USDT', 'ETH/USDT'],
-          stopLossPct: 2,
-          takeProfitPct: 4,
-          maxPositionPct: 10,
-          maxOpenTrades: 3,
-          marginMode: 'isolated',
-          maxLeverage: 3,
-          riskPerTradePct: 1,
-          maxTotalExposurePct: 25,
-        },
+        config: DEFAULT_AUTOTRADER_CONFIG,
         activeTrades: [],
-        portfolio: {
-          equity: 0,
-          balances: [],
-          positions: [],
-          usedMargin: 0,
-          maxLeverageBySymbol: {},
-          lastSyncTs: null,
-        },
+        portfolio: DEFAULT_PORTFOLIO,
         exchangeAvailability: {},
       },
       setAutoTrader: (partial) => set((state) => ({
-        autoTrader: { ...state.autoTrader, ...partial },
+        autoTrader: {
+          ...state.autoTrader,
+          ...partial,
+          config: {
+            ...state.autoTrader.config,
+            ...(partial.config ?? {}),
+          },
+          portfolio: {
+            ...state.autoTrader.portfolio,
+            ...(partial.portfolio ?? {}),
+          },
+          exchangeAvailability: {
+            ...state.autoTrader.exchangeAvailability,
+            ...(partial.exchangeAvailability ?? {}),
+          },
+        },
       })),
 
       // Trade History
@@ -303,6 +322,28 @@ export const useStore = create<AppStore>()(
         autoTrader: state.autoTrader,
         tradeHistory: state.tradeHistory,
       }),
+      merge: (persisted, current) => {
+        const persistedState = (persisted as Partial<AppStore>) ?? {};
+        return {
+          ...current,
+          ...persistedState,
+          autoTrader: {
+            ...current.autoTrader,
+            ...(persistedState.autoTrader ?? {}),
+            config: {
+              ...DEFAULT_AUTOTRADER_CONFIG,
+              ...(persistedState.autoTrader?.config ?? {}),
+            },
+            portfolio: {
+              ...DEFAULT_PORTFOLIO,
+              ...(persistedState.autoTrader?.portfolio ?? {}),
+            },
+            exchangeAvailability: {
+              ...(persistedState.autoTrader?.exchangeAvailability ?? {}),
+            },
+          },
+        };
+      },
     }
   )
 );

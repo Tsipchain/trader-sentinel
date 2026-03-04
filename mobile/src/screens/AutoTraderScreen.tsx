@@ -24,8 +24,15 @@ export default function AutoTraderScreen() {
 
   const isEnabled = autoTrader.enabled;
   const cfg = autoTrader.config;
-  const portfolio = autoTrader.portfolio;
-  const exchangeAvailability = autoTrader.exchangeAvailability;
+  const portfolio = autoTrader.portfolio ?? {
+    equity: 0,
+    balances: [],
+    positions: [],
+    usedMargin: 0,
+    maxLeverageBySymbol: {},
+    lastSyncTs: null,
+  };
+  const exchangeAvailability = autoTrader.exchangeAvailability ?? {};
 
   const refreshStatus = useCallback(async () => {
     setLoadingStatus(true);
