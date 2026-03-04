@@ -3,12 +3,15 @@ Polls the backend risk/technicals endpoints on a schedule and builds
 a structured text context that the LLM analyst can reason over.
 """
 import asyncio
+import logging
 import os
 import time
 from dataclasses import dataclass
 from typing import Optional
 
 import httpx
+
+log = logging.getLogger(__name__)
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8081")
 POLL_INTERVAL_S = int(os.getenv("POLL_INTERVAL_S", "300"))  # 5 min
@@ -64,14 +67,36 @@ class ContextManager:
     def age_seconds(self) -> float:
         return -1 if self._updated_at == 0 else time.time() - self._updated_at
 
-    async def _fetch(self) -> None:
+    async def _get_json(self, client: httpx.AsyncClient, url: str, params: dict[str, str]) -> Optional[dict]:
+        api_key = os.getenv("API_KEY", "")
+        headers = {"X-API-Key": api_key} if api_key else {}
+        r = await client.get(url, params=params, headers=headers, timeout=20)
+
+        if r.status_code != 200:
+            log.warning("Backend request failed status=%s body=%s", r.status_code, r.text[:200])
+            return None
+
+        try:
+            data = r.json()
+        except Exception:
+            log.warning("Non-JSON response %s: %s", r.status_code, r.text[:200])
+            return None
+
+        if not isinstance(data, dict):
+            log.warning("Unexpected payload type: %s", type(data))
+            return None
+        return data
+
+    async def refresh_once(self) -> None:
         async with httpx.AsyncClient(timeout=30) as client:
-            risk_resp, tech_resp = await asyncio.gather(
-                client.get(f"{BACKEND_URL}/api/sentinel/risk", params={"symbol": DEFAULT_SYMBOL}),
-                client.get(f"{BACKEND_URL}/api/sentinel/technicals", params={"symbol": DEFAULT_SYMBOL}),
+            risk, tech = await asyncio.gather(
+                self._get_json(client, f"{BACKEND_URL}/api/sentinel/risk", {"symbol": DEFAULT_SYMBOL}),
+                self._get_json(client, f"{BACKEND_URL}/api/sentinel/technicals", {"symbol": DEFAULT_SYMBOL}),
             )
-        risk = risk_resp.json()
-        tech = tech_resp.json()
+
+        if risk is None or tech is None:
+            log.warning("Skipping context refresh due to backend errors")
+            return
 
         scores = risk.get("scores", {})
         detail = risk.get("detail", {})
@@ -118,12 +143,13 @@ class ContextManager:
             active_events=active_events,
         )
         self._updated_at = time.time()
-        print(f"[context] updated — risk={self._context.risk_score:.1f} rec={self._context.recommendation}")
+        log.info("[context] updated — risk=%.1f rec=%s", self._context.risk_score, self._context.recommendation)
 
     async def run_loop(self) -> None:
+        await self.refresh_once()
         while True:
             try:
-                await self._fetch()
+                await self.refresh_once()
             except Exception as exc:
-                print(f"[context] fetch error: {exc}")
+                log.exception("[context] fetch error: %s", exc)
             await asyncio.sleep(POLL_INTERVAL_S)
