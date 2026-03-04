@@ -17,13 +17,28 @@ import * as Haptics from 'expo-haptics';
 
 type SignalType = 'all' | 'arbitrage' | 'alert' | 'opportunity';
 
+type TierSignalPolicy = {
+  directionalLimit: number;
+  allowNewCoinSignals: boolean;
+  refreshMs: number;
+};
+
+const SIGNAL_POLICY: Record<string, TierSignalPolicy> = {
+  free: { directionalLimit: 1, allowNewCoinSignals: false, refreshMs: 20000 },
+  starter: { directionalLimit: 2, allowNewCoinSignals: false, refreshMs: 15000 },
+  pro: { directionalLimit: 5, allowNewCoinSignals: true, refreshMs: 12000 },
+  elite: { directionalLimit: 10, allowNewCoinSignals: true, refreshMs: 9000 },
+  whale: { directionalLimit: 99, allowNewCoinSignals: true, refreshMs: 7000 },
+};
+
 export default function SignalsScreen() {
   const { signals, addSignal, clearSignals, watchlist, settings, subscription } = useStore();
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<SignalType>('all');
   const [autoRefresh, setAutoRefresh] = useState(true);
 
-  const canUseAdvancedSignals = ['pro', 'elite', 'whale'].includes(subscription);
+  const policy = SIGNAL_POLICY[subscription] ?? SIGNAL_POLICY.free;
+  const canUseAdvancedSignals = subscription !== 'free';
 
   const hasRecentDuplicate = useCallback((idPrefix: string) => {
     const now = Date.now();
@@ -51,7 +66,7 @@ export default function SignalsScreen() {
         }
 
         // Pro+ signal: πιθανή cross-exchange "listing / availability" ευκαιρία
-        if (canUseAdvancedSignals && !hasRecentDuplicate(`newcoin-${symbol}`)) {
+        if (policy.allowNewCoinSignals && !hasRecentDuplicate(`newcoin-${symbol}`)) {
           const listedVenue = arb.best_bid_venue || arb.best_ask_venue;
           const noVenue = !arb.best_bid_venue || !arb.best_ask_venue;
           if (listedVenue && noVenue) {
@@ -69,8 +84,9 @@ export default function SignalsScreen() {
 
       // Pro+ directional signals from composite risk framework
       if (canUseAdvancedSignals) {
+        const directionalSymbols = watchlist.slice(0, policy.directionalLimit);
         const riskSignals = await Promise.all(
-          watchlist.map(async (symbol) => {
+          directionalSymbols.map(async (symbol) => {
             const risk = await marketAPI.getRiskReport(symbol);
             return { symbol, risk };
           })
@@ -110,20 +126,20 @@ export default function SignalsScreen() {
     } catch (error) {
       console.error('Failed to fetch signals:', error);
     }
-  }, [watchlist, addSignal, settings.hapticFeedback, canUseAdvancedSignals, hasRecentDuplicate]);
+  }, [watchlist, addSignal, settings.hapticFeedback, canUseAdvancedSignals, hasRecentDuplicate, policy.allowNewCoinSignals, policy.directionalLimit]);
 
   useEffect(() => {
     fetchSignals();
     let interval: ReturnType<typeof setInterval>;
 
     if (autoRefresh) {
-      interval = setInterval(fetchSignals, 15000);
+      interval = setInterval(fetchSignals, policy.refreshMs);
     }
 
     return () => {
       if (interval) clearInterval(interval);
     };
-  }, [fetchSignals, autoRefresh]);
+  }, [fetchSignals, autoRefresh, policy.refreshMs]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -231,7 +247,16 @@ export default function SignalsScreen() {
         <View style={styles.subscriptionNotice}>
           <Ionicons name="lock-closed" size={16} color={COLORS.warning} />
           <Text style={styles.subscriptionNoticeText}>
-            Upgrade to Pro for advanced signals and faster updates
+            Free tier: 1 directional signal + arbitrage. Upgrade for more pairs/faster updates.
+          </Text>
+        </View>
+      )}
+
+      {subscription === 'starter' && (
+        <View style={styles.subscriptionNotice}>
+          <Ionicons name="information-circle-outline" size={16} color={COLORS.info} />
+          <Text style={styles.subscriptionNoticeText}>
+            Starter tier: up to 2 directional pairs. Upgrade to Pro+ for new-coin opportunities.
           </Text>
         </View>
       )}
