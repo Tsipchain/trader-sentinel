@@ -6,7 +6,7 @@ export const CONFIG = {
   API_URL: 'https://sentinel.thronoschain.org',
 
   // LLM Analyst service (Railway)
-  ANALYST_URL: 'https://alanisys.up.railway.app',
+  ANALYST_URL: 'https://sentinel-analyst.up.railway.app',
 
   // Neural Prediction Brain service (Railway)
   BRAIN_URL: 'https://alanisys.up.railway.app',
