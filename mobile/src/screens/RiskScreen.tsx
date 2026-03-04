@@ -15,7 +15,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { COLORS, SPACING, FONT_SIZES, BORDER_RADIUS } from '../constants/theme';
-import { marketAPI, analystAPI, type RiskReport, type AnalystBriefing } from '../services/api';
+import { marketAPI, analystAPI, type RiskReport, type AnalystBriefing, type AnalystWarmingUp } from '../services/api';
 
 const RISK_COLORS: Record<string, string> = {
   NEUTRAL: COLORS.success ?? '#22C55E',
@@ -47,6 +47,7 @@ export default function RiskScreen() {
   const [answer, setAnswer] = useState('');
   const [asking, setAsking] = useState(false);
   const [analystOnline, setAnalystOnline] = useState<boolean | null>(null);
+  const [warmingUp, setWarmingUp] = useState<AnalystWarmingUp | null>(null);
 
   const loadRisk = useCallback(async () => {
     try {
@@ -66,10 +67,18 @@ export default function RiskScreen() {
       setAnalystOnline(health.ok);
       if (health.ok) {
         const data = await analystAPI.getBriefing();
-        setBriefing(data);
+        if ('warming_up' in data && data.warming_up) {
+          setWarmingUp(data);
+          setBriefing(null);
+        } else {
+          setWarmingUp(null);
+          setBriefing(data as AnalystBriefing);
+        }
       }
     } catch {
       setAnalystOnline(false);
+      setWarmingUp(null);
+      setBriefing(null);
     } finally {
       setLoadingBriefing(false);
     }
@@ -92,7 +101,11 @@ export default function RiskScreen() {
     setAnswer('');
     try {
       const res = await analystAPI.ask(question.trim());
-      setAnswer(res.answer);
+      if (res.warming_up) {
+        setAnswer(`Analyst is warming up. Retry in ${res.retry_s ?? 15}s.`);
+      } else {
+        setAnswer(res.answer ?? 'No answer returned yet.');
+      }
     } catch {
       setAnswer('Could not reach the analyst service. Make sure the Railway URL is configured.');
     } finally {
@@ -196,6 +209,12 @@ export default function RiskScreen() {
               <Text style={styles.offlineText}>
                 Deploy sentinel-analyst on Railway and set{'\n'}ANALYST_URL in config.ts
               </Text>
+            </View>
+          ) : warmingUp ? (
+            <View style={styles.offlineCard}>
+              <Ionicons name="time-outline" size={28} color={COLORS.textMuted} />
+              <Text style={styles.offlineTitle}>Analyst Warming Up</Text>
+              <Text style={styles.offlineText}>Context is being prepared. Retry in about {warmingUp.retry_s}s.</Text>
             </View>
           ) : briefing ? (
             <View style={styles.briefingCard}>
