@@ -122,6 +122,12 @@ export interface AnalystBriefing {
   usage?: { input: number; output: number };
 }
 
+export interface AnalystWarmingUp {
+  ok: false;
+  warming_up: true;
+  retry_s: number;
+}
+
 export interface BrainPrediction {
   ok: boolean;
   prediction: 'profitable' | 'risky';
@@ -221,12 +227,12 @@ export const marketAPI = {
 // ── LLM Analyst API ──────────────────────────────────────────────────────────
 
 export const analystAPI = {
-  async getBriefing(): Promise<AnalystBriefing> {
+  async getBriefing(): Promise<AnalystBriefing | AnalystWarmingUp> {
     const response = await analystApi.get('/api/analyst/briefing');
     return response.data;
   },
 
-  async ask(question: string): Promise<{ ok: boolean; answer: string }> {
+  async ask(question: string): Promise<{ ok: boolean; answer?: string; warming_up?: boolean; retry_s?: number }> {
     const response = await analystApi.get('/api/analyst/ask', {
       params: { q: question },
     });
