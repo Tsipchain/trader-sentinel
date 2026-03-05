@@ -122,6 +122,12 @@ export interface AnalystBriefing {
   usage?: { input: number; output: number };
 }
 
+export interface AnalystWarmingUp {
+  ok: false;
+  warming_up: true;
+  retry_s: number;
+}
+
 export interface BrainPrediction {
   ok: boolean;
   prediction: 'profitable' | 'risky';
@@ -221,12 +227,12 @@ export const marketAPI = {
 // ── LLM Analyst API ──────────────────────────────────────────────────────────
 
 export const analystAPI = {
-  async getBriefing(): Promise<AnalystBriefing> {
+  async getBriefing(): Promise<AnalystBriefing | AnalystWarmingUp> {
     const response = await analystApi.get('/api/analyst/briefing');
     return response.data;
   },
 
-  async ask(question: string): Promise<{ ok: boolean; answer: string }> {
+  async ask(question: string): Promise<{ ok: boolean; answer?: string; warming_up?: boolean; retry_s?: number }> {
     const response = await analystApi.get('/api/analyst/ask', {
       params: { q: question },
     });
@@ -285,7 +291,35 @@ export interface AutoTraderStatus {
   log: string[];
 }
 
+export interface ExchangeAvailabilityFlag {
+  enabled: boolean;
+  reason?: string;
+}
+
+export interface PortfolioSnapshot {
+  equity: number;
+  balances: Array<{ asset: string; total: number; free: number; used: number }>;
+  positions: Array<{
+    symbol: string;
+    side: string;
+    contracts: number;
+    entryPrice: number;
+    markPrice: number;
+    unrealizedPnl: number;
+    leverage: number;
+    marginMode: string;
+  }>;
+  usedMargin: number;
+  maxLeverageBySymbol: Record<string, number>;
+  ts: number;
+}
+
 export const brainAPI = {
+  async checkHealth(): Promise<{ ok: boolean; ts?: number }> {
+    const response = await brainApi.get('/health');
+    return response.data;
+  },
+
   async predict(params: {
     user_id: string;
     rsi: number;
@@ -334,6 +368,11 @@ export const brainAPI = {
     take_profit_pct: number;
     max_position_pct: number;
     max_open_trades: number;
+    passphrase?: string;
+    margin_mode: "isolated" | "cross";
+    max_leverage: number;
+    risk_per_trade_pct: number;
+    max_total_exposure_pct: number;
   }): Promise<{ ok: boolean }> {
     const response = await brainApi.post('/api/brain/autotrader/enable', params);
     return response.data;
@@ -348,6 +387,27 @@ export const brainAPI = {
     const response = await brainApi.post('/api/brain/autotrader/close', { user_id: userId, trade_id: tradeId });
     return response.data;
   },
+
+  async getExchangeAvailability(): Promise<{ ok: boolean; exchanges: Record<string, ExchangeAvailabilityFlag> }> {
+    const response = await brainApi.get('/api/brain/exchange/availability');
+    return response.data;
+  },
+
+  async getExchangeSnapshot(params: {
+    exchange: string;
+    apiKey: string;
+    apiSecret: string;
+    passphrase?: string;
+  }): Promise<{ ok: boolean; snapshot: PortfolioSnapshot | null; exchanges?: Record<string, ExchangeAvailabilityFlag>; error?: string; blocked?: boolean }> {
+    const response = await brainApi.post('/api/brain/exchange/snapshot', {
+      exchange: params.exchange,
+      api_key: params.apiKey,
+      api_secret: params.apiSecret,
+      passphrase: params.passphrase,
+    });
+    return response.data;
+  },
+
 };
 
 export default api;

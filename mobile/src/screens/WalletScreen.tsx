@@ -74,7 +74,7 @@ export default function WalletScreen() {
       balance: parseFloat(wallet.balance) || 0,
       value: (parseFloat(wallet.balance) || 0) * 2450,
       change: -2.3,
-      icon: 'logo-ethereum',
+      icon: 'diamond-outline',
       color: '#627EEA',
     },
   ];
