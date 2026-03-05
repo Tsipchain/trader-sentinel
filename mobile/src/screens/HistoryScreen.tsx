@@ -43,7 +43,21 @@ export default function HistoryScreen() {
       await brainAPI.checkHealth();
       const serviceCheck = await brainAPI.checkServiceType();
       if (!serviceCheck.isBrain) {
-        console.warn('Brain service-type validation warning:', serviceCheck.reason || 'unknown');
+        const reason = serviceCheck.reason || 'unknown';
+        console.warn(
+          `Brain service-type validation warning (${CONFIG.BRAIN_URL}):`,
+          reason,
+        );
+        Alert.alert(
+          'Brain Service Misconfigured',
+          `BRAIN_URL is not a Sentinel Brain service.
+
+URL: ${CONFIG.BRAIN_URL}
+Reason: ${reason}
+
+Expected routes: /api/brain/sync and /api/brain/history`,
+        );
+        return;
       }
 
       // Sync & train model
