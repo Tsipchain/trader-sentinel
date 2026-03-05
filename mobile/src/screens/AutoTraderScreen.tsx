@@ -80,10 +80,21 @@ export default function AutoTraderScreen() {
     try {
       const serviceCheck = await brainAPI.checkServiceType();
       if (!serviceCheck.isBrain) {
+        const reason = serviceCheck.reason || 'unknown';
         console.warn(
           `Brain service-type validation warning (${CONFIG.BRAIN_URL}):`,
-          serviceCheck.reason || 'unknown',
+          reason,
         );
+        Alert.alert(
+          'Brain Service Misconfigured',
+          `BRAIN_URL is not a Sentinel Brain service.
+
+URL: ${CONFIG.BRAIN_URL}
+Reason: ${reason}
+
+Expected routes: /api/brain/exchange/availability and /api/brain/exchange/snapshot`,
+        );
+        return false;
       }
 
       const res = await brainAPI.getExchangeSnapshot({
