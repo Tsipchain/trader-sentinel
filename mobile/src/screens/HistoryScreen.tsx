@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
   ActivityIndicator, Alert, TextInput,
@@ -15,16 +15,24 @@ import type { TradeRecord } from '../services/api';
 const EXCHANGE_OPTIONS = ['binance', 'bybit', 'okx', 'mexc'];
 
 export default function HistoryScreen() {
-  const { user, tradeHistory, setTradeHistory, autoTrader, subscription } = useStore();
+  const { user, tradeHistory, setTradeHistory, autoTrader, setAutoTrader, subscription } = useStore();
 
   const [syncLoading, setSyncLoading] = useState(false);
   const [analysisLoading, setAnalysisLoading] = useState(false);
+  const hasShownBrainMisconfigAlert = useRef(false);
 
   // Exchange credentials for sync (re-use autoTrader config if available)
   const [exchange, setExchange] = useState(autoTrader.config.exchange);
   const [apiKey, setApiKey] = useState(autoTrader.config.apiKey);
   const [apiSecret, setApiSecret] = useState(autoTrader.config.apiSecret);
   const [showSetup, setShowSetup] = useState(false);
+
+  useEffect(() => {
+    // Keep History screen credentials in sync with shared AutoTrader config.
+    setExchange(autoTrader.config.exchange);
+    setApiKey(autoTrader.config.apiKey);
+    setApiSecret(autoTrader.config.apiSecret);
+  }, [autoTrader.config.exchange, autoTrader.config.apiKey, autoTrader.config.apiSecret]);
 
   const { trades, stats, lastSynced, aiAnalysis } = tradeHistory;
 
@@ -43,7 +51,17 @@ export default function HistoryScreen() {
       await brainAPI.checkHealth();
       const serviceCheck = await brainAPI.checkServiceType();
       if (!serviceCheck.isBrain) {
-        console.warn('Brain service-type validation warning:', serviceCheck.reason || 'unknown');
+        const reason = serviceCheck.reason || 'unknown';
+        if (!hasShownBrainMisconfigAlert.current) {
+          hasShownBrainMisconfigAlert.current = true;
+          console.warn(
+            `Brain service-type validation warning (${CONFIG.BRAIN_URL}):`,
+            reason,
+          );
+        }
+        // Do not hard-block here: continue and let the sync endpoint result decide.
+      } else {
+        hasShownBrainMisconfigAlert.current = false;
       }
 
       // Sync & train model
@@ -208,7 +226,10 @@ export default function HistoryScreen() {
                   <TouchableOpacity
                     key={ex}
                     style={[styles.chip, exchange === ex && styles.chipActive]}
-                    onPress={() => setExchange(ex)}
+                    onPress={() => {
+                      setExchange(ex);
+                      setAutoTrader({ config: { ...autoTrader.config, exchange: ex } });
+                    }}
                   >
                     <Text style={[styles.chipText, exchange === ex && styles.chipTextActive]}>
                       {ex.toUpperCase()}
@@ -220,7 +241,10 @@ export default function HistoryScreen() {
               <TextInput
                 style={styles.input}
                 value={apiKey}
-                onChangeText={setApiKey}
+                onChangeText={(value) => {
+                  setApiKey(value);
+                  setAutoTrader({ config: { ...autoTrader.config, apiKey: value } });
+                }}
                 placeholder="Read-only key"
                 placeholderTextColor={COLORS.textMuted}
                 secureTextEntry
@@ -229,7 +253,10 @@ export default function HistoryScreen() {
               <TextInput
                 style={styles.input}
                 value={apiSecret}
-                onChangeText={setApiSecret}
+                onChangeText={(value) => {
+                  setApiSecret(value);
+                  setAutoTrader({ config: { ...autoTrader.config, apiSecret: value } });
+                }}
                 placeholder="API secret"
                 placeholderTextColor={COLORS.textMuted}
                 secureTextEntry
