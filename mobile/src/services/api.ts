@@ -1,4 +1,4 @@
-import axios from 'axios';
+import axios, { AxiosError, AxiosRequestConfig } from 'axios';
 import { CONFIG } from '../config';
 import type { MarketData, Signal } from '../store/useStore';
 
@@ -23,6 +23,38 @@ const brainApi = axios.create({
   timeout: 30000,
   headers: _authHeaders,
 });
+
+const brainFallbackApi = axios.create({
+  baseURL: CONFIG.API_URL,
+  timeout: 30000,
+  headers: _authHeaders,
+});
+
+function _shouldFallbackToGateway(error: unknown): boolean {
+  const err = error as AxiosError;
+  const status = err?.response?.status;
+  // Fallback when dedicated Brain URL is misrouted/unavailable.
+  return !err?.response || status === 404 || status === 502 || status === 503;
+}
+
+async function _brainRequest<T = any>(config: AxiosRequestConfig): Promise<T> {
+  try {
+    const res = await brainApi.request<T>(config);
+    return res.data;
+  } catch (error) {
+    if (CONFIG.BRAIN_URL !== CONFIG.API_URL && _shouldFallbackToGateway(error)) {
+      const res = await brainFallbackApi.request<T>(config);
+      return res.data;
+    }
+    throw error;
+  }
+}
+
+const brainGet = <T = any>(url: string, config?: AxiosRequestConfig) =>
+  _brainRequest<T>({ ...(config ?? {}), method: 'GET', url });
+
+const brainPost = <T = any>(url: string, data?: any, config?: AxiosRequestConfig) =>
+  _brainRequest<T>({ ...(config ?? {}), method: 'POST', url, data });
 
 // ── React Native SSE client (XHR-based, no native EventSource needed) ────────
 export function createRNStream(
@@ -120,6 +152,12 @@ export interface AnalystBriefing {
   briefing: string;
   model: string;
   usage?: { input: number; output: number };
+}
+
+export interface AnalystWarmingUp {
+  ok: false;
+  warming_up: true;
+  retry_s: number;
 }
 
 export interface BrainPrediction {
@@ -221,12 +259,12 @@ export const marketAPI = {
 // ── LLM Analyst API ──────────────────────────────────────────────────────────
 
 export const analystAPI = {
-  async getBriefing(): Promise<AnalystBriefing> {
+  async getBriefing(): Promise<AnalystBriefing | AnalystWarmingUp> {
     const response = await analystApi.get('/api/analyst/briefing');
     return response.data;
   },
 
-  async ask(question: string): Promise<{ ok: boolean; answer: string }> {
+  async ask(question: string): Promise<{ ok: boolean; answer?: string; warming_up?: boolean; retry_s?: number }> {
     const response = await analystApi.get('/api/analyst/ask', {
       params: { q: question },
     });
@@ -285,7 +323,35 @@ export interface AutoTraderStatus {
   log: string[];
 }
 
+export interface ExchangeAvailabilityFlag {
+  enabled: boolean;
+  reason?: string;
+}
+
+export interface PortfolioSnapshot {
+  equity: number;
+  balances: Array<{ asset: string; total: number; free: number; used: number }>;
+  positions: Array<{
+    symbol: string;
+    side: string;
+    contracts: number;
+    entryPrice: number;
+    markPrice: number;
+    unrealizedPnl: number;
+    leverage: number;
+    marginMode: string;
+  }>;
+  usedMargin: number;
+  maxLeverageBySymbol: Record<string, number>;
+  ts: number;
+}
+
 export const brainAPI = {
+  async checkHealth(): Promise<{ ok: boolean; ts?: number }> {
+    const response = await brainGet('/health');
+    return response;
+  },
+
   async predict(params: {
     user_id: string;
     rsi: number;
@@ -293,8 +359,8 @@ export const brainAPI = {
     geo_score: number;
     calendar_score: number;
   }): Promise<BrainPrediction> {
-    const response = await brainApi.post('/api/brain/predict', params);
-    return response.data;
+    const response = await brainPost('/api/brain/predict', params);
+    return response;
   },
 
   async syncTrades(params: {
@@ -305,23 +371,23 @@ export const brainAPI = {
     symbol?: string;
     days?: number;
   }): Promise<{ ok: boolean; trained: boolean; trade_count?: number; model_accuracy?: number }> {
-    const response = await brainApi.post('/api/brain/sync', params);
-    return response.data;
+    const response = await brainPost('/api/brain/sync', params);
+    return response;
   },
 
   async getStats(userId: string): Promise<{ ok: boolean } & TradeStats> {
-    const response = await brainApi.get(`/api/brain/stats/${userId}`);
-    return response.data;
+    const response = await brainGet(`/api/brain/stats/${userId}`);
+    return response;
   },
 
   async getHistory(userId: string, limit: number = 50): Promise<{ ok: boolean; trades: TradeRecord[] }> {
-    const response = await brainApi.get(`/api/brain/history/${userId}`, { params: { limit } });
-    return response.data;
+    const response = await brainGet(`/api/brain/history/${userId}`, { params: { limit } });
+    return response;
   },
 
   async getAutoTraderStatus(userId: string): Promise<AutoTraderStatus> {
-    const response = await brainApi.get(`/api/brain/autotrader/${userId}`);
-    return response.data;
+    const response = await brainGet(`/api/brain/autotrader/${userId}`);
+    return response;
   },
 
   async enableAutoTrader(params: {
@@ -334,20 +400,46 @@ export const brainAPI = {
     take_profit_pct: number;
     max_position_pct: number;
     max_open_trades: number;
+    passphrase?: string;
+    margin_mode: "isolated" | "cross";
+    max_leverage: number;
+    risk_per_trade_pct: number;
+    max_total_exposure_pct: number;
   }): Promise<{ ok: boolean }> {
-    const response = await brainApi.post('/api/brain/autotrader/enable', params);
-    return response.data;
+    const response = await brainPost('/api/brain/autotrader/enable', params);
+    return response;
   },
 
   async disableAutoTrader(userId: string): Promise<{ ok: boolean }> {
-    const response = await brainApi.post('/api/brain/autotrader/disable', { user_id: userId });
-    return response.data;
+    const response = await brainPost('/api/brain/autotrader/disable', { user_id: userId });
+    return response;
   },
 
   async closeTrade(userId: string, tradeId: string): Promise<{ ok: boolean }> {
-    const response = await brainApi.post('/api/brain/autotrader/close', { user_id: userId, trade_id: tradeId });
-    return response.data;
+    const response = await brainPost('/api/brain/autotrader/close', { user_id: userId, trade_id: tradeId });
+    return response;
   },
+
+  async getExchangeAvailability(): Promise<{ ok: boolean; exchanges: Record<string, ExchangeAvailabilityFlag> }> {
+    const response = await brainGet('/api/brain/exchange/availability');
+    return response;
+  },
+
+  async getExchangeSnapshot(params: {
+    exchange: string;
+    apiKey: string;
+    apiSecret: string;
+    passphrase?: string;
+  }): Promise<{ ok: boolean; snapshot: PortfolioSnapshot | null; exchanges?: Record<string, ExchangeAvailabilityFlag>; error?: string; blocked?: boolean }> {
+    const response = await brainPost('/api/brain/exchange/snapshot', {
+      exchange: params.exchange,
+      api_key: params.apiKey,
+      api_secret: params.apiSecret,
+      passphrase: params.passphrase,
+    });
+    return response;
+  },
+
 };
 
 export default api;
