@@ -371,11 +371,23 @@ export const brainAPI = {
 
   async checkServiceType(): Promise<BrainServiceCheck> {
     try {
+      // Prefer direct inspection of the configured Brain host (no fallback) so we don't falsely reject valid deployments.
+      const openapi = await brainApi.get<{ paths?: Record<string, unknown> }>('/openapi.json');
+      const paths = Object.keys(openapi.data?.paths ?? {});
+      const hasBrainRoutes = paths.some((p) =>
+        p.startsWith('/api/brain/') || p === '/api/brain/sync' || p === '/api/brain/predict'
+      );
+      if (hasBrainRoutes) {
+        return { ok: true, isBrain: true };
+      }
+
+      // Compatibility: some deployments may not expose the full spec but still support storage route.
       const status = await brainGet<{ ok: boolean; disk_path?: string }>('/api/brain/storage/status');
       if (status?.ok) {
         return { ok: true, isBrain: true, storage: { disk_path: status.disk_path } };
       }
-      return { ok: false, isBrain: false, reason: 'Brain storage endpoint returned unexpected payload' };
+
+      return { ok: false, isBrain: false, reason: 'Configured BRAIN_URL does not expose expected /api/brain routes.' };
     } catch (error) {
       const err = error as AxiosError;
       const code = err?.response?.status;
@@ -383,7 +395,7 @@ export const brainAPI = {
         return {
           ok: false,
           isBrain: false,
-          reason: 'Configured BRAIN_URL points to a non-Brain service (missing /api/brain/* routes).',
+          reason: 'Configured BRAIN_URL points to a service without Brain routes.',
         };
       }
       return {
