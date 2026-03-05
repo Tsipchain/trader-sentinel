@@ -9,7 +9,7 @@ export const CONFIG = {
   ANALYST_URL: process.env.EXPO_PUBLIC_ANALYST_URL ?? 'https://sentinel-analyst.up.railway.app',
 
   // Neural Prediction Brain service (Railway)
-  BRAIN_URL: process.env.EXPO_PUBLIC_BRAIN_URL ?? 'https://sentinel-brain.up.railway.app',
+  BRAIN_URL: process.env.EXPO_PUBLIC_BRAIN_URL ?? 'https://alanisys.up.railway.app',
 
   // Thronos Gateway - Payment & Rewards
   THRONOS_GATEWAY_URL: 'https://gateway.thronos.io',

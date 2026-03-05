@@ -348,8 +348,8 @@ export interface PortfolioSnapshot {
 
 export const brainAPI = {
   async checkHealth(): Promise<{ ok: boolean; ts?: number }> {
-    const response = await brainGet('/health');
-    return response;
+    const response = await brainApi.get('/health');
+    return response.data;
   },
 
   async predict(params: {
@@ -421,8 +421,8 @@ export const brainAPI = {
   },
 
   async getExchangeAvailability(): Promise<{ ok: boolean; exchanges: Record<string, ExchangeAvailabilityFlag> }> {
-    const response = await brainGet('/api/brain/exchange/availability');
-    return response;
+    const response = await brainApi.get('/api/brain/exchange/availability');
+    return response.data;
   },
 
   async getExchangeSnapshot(params: {
@@ -437,7 +437,7 @@ export const brainAPI = {
       api_secret: params.apiSecret,
       passphrase: params.passphrase,
     });
-    return response;
+    return response.data;
   },
 
 };
