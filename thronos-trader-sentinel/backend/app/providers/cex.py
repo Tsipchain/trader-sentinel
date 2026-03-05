@@ -4,10 +4,26 @@ import re
 import time
 from dataclasses import dataclass
 
+import importlib
+import importlib.util
 import httpx
-import ccxt.async_support as ccxt
 
 log = logging.getLogger(__name__)
+
+_CCXT_MODULE = None
+
+
+def _ccxt_module():
+    global _CCXT_MODULE
+    if _CCXT_MODULE is False:
+        return None
+    if _CCXT_MODULE is None:
+        if importlib.util.find_spec("ccxt.async_support") is None:
+            log.warning("ccxt.async_support unavailable; CEXProvider will run with empty CEX set")
+            _CCXT_MODULE = False
+            return None
+        _CCXT_MODULE = importlib.import_module("ccxt.async_support")
+    return _CCXT_MODULE
 
 
 @dataclass
@@ -30,11 +46,16 @@ class CEXProvider:
     def __init__(self, venues: list[str], min_interval_ms: int = 600):
         self.venues = [v.strip().lower() for v in venues if v.strip()]
         self.min_interval_ms = max(0, int(min_interval_ms))
-        self._exchanges: dict[str, ccxt.Exchange] = {}
+        self._exchanges: dict[str, object] = {}
         self._last_fetch_ms: dict[str, int] = {}
         self._disabled_reason: dict[str, str] = {}
 
     async def start(self):
+        ccxt = _ccxt_module()
+        if ccxt is None:
+            self._exchanges = {}
+            return
+
         for v in self.venues:
             if v in self._exchanges:
                 continue

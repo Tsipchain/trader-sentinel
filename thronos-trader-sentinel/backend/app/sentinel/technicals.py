@@ -16,6 +16,8 @@ Score: 0.0 (calm/normal) → 10.0 (extreme — high RSI, high vol, at fib resist
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import logging
 import re
 import time
@@ -23,9 +25,24 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import httpx
-import ccxt.async_support as ccxt
 
 log = logging.getLogger(__name__)
+
+
+_CCXT_MODULE = None
+
+
+def _ccxt_module():
+    global _CCXT_MODULE
+    if _CCXT_MODULE is False:
+        return None
+    if _CCXT_MODULE is None:
+        if importlib.util.find_spec("ccxt.async_support") is None:
+            log.warning("ccxt.async_support unavailable; technical OHLCV will use HTTP fallback where possible")
+            _CCXT_MODULE = False
+            return None
+        _CCXT_MODULE = importlib.import_module("ccxt.async_support")
+    return _CCXT_MODULE
 
 
 # ── Fibonacci retracement levels (standard: 0.236, 0.382, 0.5, 0.618, 0.786) ─
@@ -86,6 +103,9 @@ _BLOCK_SECONDS = 1800
 async def _fetch_ohlcv_from(exchange_id: str, symbol: str,
                              timeframe: str, limit: int) -> list[list]:
     """Try one exchange; return candles or raise."""
+    ccxt = _ccxt_module()
+    if ccxt is None:
+        raise ValueError("ccxt async module unavailable")
     ex_class = getattr(ccxt, exchange_id, None)
     if ex_class is None:
         raise ValueError(f"Unknown exchange: {exchange_id}")
