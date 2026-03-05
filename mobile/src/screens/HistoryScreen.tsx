@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
   ActivityIndicator, Alert, TextInput,
@@ -19,6 +19,7 @@ export default function HistoryScreen() {
 
   const [syncLoading, setSyncLoading] = useState(false);
   const [analysisLoading, setAnalysisLoading] = useState(false);
+  const hasShownBrainMisconfigAlert = useRef(false);
 
   // Exchange credentials for sync (re-use autoTrader config if available)
   const [exchange, setExchange] = useState(autoTrader.config.exchange);
@@ -43,8 +44,26 @@ export default function HistoryScreen() {
       await brainAPI.checkHealth();
       const serviceCheck = await brainAPI.checkServiceType();
       if (!serviceCheck.isBrain) {
-        console.warn('Brain service-type validation warning:', serviceCheck.reason || 'unknown');
+        const reason = serviceCheck.reason || 'unknown';
+        if (!hasShownBrainMisconfigAlert.current) {
+          hasShownBrainMisconfigAlert.current = true;
+          console.warn(
+            `Brain service-type validation warning (${CONFIG.BRAIN_URL}):`,
+            reason,
+          );
+          Alert.alert(
+            'Brain Service Misconfigured',
+            `BRAIN_URL is not a Sentinel Brain service.
+
+URL: ${CONFIG.BRAIN_URL}
+Reason: ${reason}
+
+Expected routes: /api/brain/sync and /api/brain/history`,
+          );
+        }
+        return;
       }
+      hasShownBrainMisconfigAlert.current = false;
 
       // Sync & train model
       const syncResult = await brainAPI.syncTrades({

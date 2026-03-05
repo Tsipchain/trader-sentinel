@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, Switch, TouchableOpacity,
   Alert, TextInput, ActivityIndicator,
@@ -9,6 +9,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { COLORS, SPACING, FONT_SIZES, BORDER_RADIUS, SHADOWS } from '../constants/theme';
 import { useStore } from '../store/useStore';
 import { brainAPI } from '../services/api';
+import CONFIG from '../config';
 import type { ActiveTrade } from '../services/api';
 
 const SYMBOL_OPTIONS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT'];
@@ -21,6 +22,7 @@ export default function AutoTraderScreen() {
   const [loadingStatus, setLoadingStatus] = useState(false);
   const [closingId, setClosingId] = useState<string | null>(null);
   const [syncingPortfolio, setSyncingPortfolio] = useState(false);
+  const hasShownBrainMisconfigAlert = useRef(false);
 
   const isEnabled = autoTrader.enabled;
   const cfg = autoTrader.config;
@@ -79,8 +81,26 @@ export default function AutoTraderScreen() {
     try {
       const serviceCheck = await brainAPI.checkServiceType();
       if (!serviceCheck.isBrain) {
-        console.warn('Brain service-type validation warning:', serviceCheck.reason || 'unknown');
+        const reason = serviceCheck.reason || 'unknown';
+        if (!hasShownBrainMisconfigAlert.current) {
+          hasShownBrainMisconfigAlert.current = true;
+          console.warn(
+            `Brain service-type validation warning (${CONFIG.BRAIN_URL}):`,
+            reason,
+          );
+          Alert.alert(
+            'Brain Service Misconfigured',
+            `BRAIN_URL is not a Sentinel Brain service.
+
+URL: ${CONFIG.BRAIN_URL}
+Reason: ${reason}
+
+Expected routes: /api/brain/exchange/availability and /api/brain/exchange/snapshot`,
+          );
+        }
+        return false;
       }
+      hasShownBrainMisconfigAlert.current = false;
 
       const res = await brainAPI.getExchangeSnapshot({
         exchange: cfg.exchange,
