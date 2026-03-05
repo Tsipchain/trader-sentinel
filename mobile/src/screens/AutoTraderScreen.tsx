@@ -84,10 +84,12 @@ export default function AutoTraderScreen() {
         const reason = serviceCheck.reason || 'unknown';
         if (!hasShownBrainMisconfigAlert.current) {
           hasShownBrainMisconfigAlert.current = true;
-          console.warn(
-            `Brain service-type validation warning (${CONFIG.BRAIN_URL}):`,
-            reason,
-          );
+          if (__DEV__) {
+            console.info(
+              `Brain service-type validation warning (${CONFIG.BRAIN_URL}):`,
+              reason,
+            );
+          }
         }
         // Do not hard-block here: continue and let real API call/fallback decide.
       } else {

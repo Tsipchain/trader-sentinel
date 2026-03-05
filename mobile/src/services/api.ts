@@ -363,6 +363,9 @@ export interface PortfolioSnapshot {
   ts: number;
 }
 
+const _BRAIN_SERVICE_CHECK_TTL_MS = 60_000;
+let _brainServiceCheckCache: { at: number; value: BrainServiceCheck } | null = null;
+
 export const brainAPI = {
   async checkHealth(): Promise<{ ok: boolean; ts?: number }> {
     const response = await brainGet('/health');
@@ -370,6 +373,15 @@ export const brainAPI = {
   },
 
   async checkServiceType(): Promise<BrainServiceCheck> {
+    if (_brainServiceCheckCache && Date.now() - _brainServiceCheckCache.at < _BRAIN_SERVICE_CHECK_TTL_MS) {
+      return _brainServiceCheckCache.value;
+    }
+
+    const _cache = (value: BrainServiceCheck): BrainServiceCheck => {
+      _brainServiceCheckCache = { at: Date.now(), value };
+      return value;
+    };
+
     const _looksLikeBrain = (paths: string[]) =>
       paths.some((p) => p.startsWith('/api/brain/') || p === '/api/brain/sync' || p === '/api/brain/predict');
 
@@ -393,12 +405,12 @@ export const brainAPI = {
       const directOpenapi = await brainApi.get<{ paths?: Record<string, unknown> }>('/openapi.json');
       const directPaths = Object.keys(directOpenapi.data?.paths ?? {});
       if (_looksLikeBrain(directPaths)) {
-        return { ok: true, isBrain: true };
+        return _cache({ ok: true, isBrain: true });
       }
 
       const directStorage = await _probeStorage(brainApi);
       if (directStorage.ok) {
-        return { ok: true, isBrain: true, storage: { disk_path: directStorage.disk_path } };
+        return _cache({ ok: true, isBrain: true, storage: { disk_path: directStorage.disk_path } });
       }
 
       // 2) Compatibility path: API gateway may proxy /api/brain/* even when dedicated BRAIN_URL is mispointed.
@@ -407,12 +419,12 @@ export const brainAPI = {
           const gatewayOpenapi = await brainFallbackApi.get<{ paths?: Record<string, unknown> }>('/openapi.json');
           const gatewayPaths = Object.keys(gatewayOpenapi.data?.paths ?? {});
           if (_looksLikeBrain(gatewayPaths)) {
-            return { ok: true, isBrain: true };
+            return _cache({ ok: true, isBrain: true });
           }
 
           const gatewayStorage = await _probeStorage(brainFallbackApi);
           if (gatewayStorage.ok) {
-            return { ok: true, isBrain: true, storage: { disk_path: gatewayStorage.disk_path } };
+            return _cache({ ok: true, isBrain: true, storage: { disk_path: gatewayStorage.disk_path } });
           }
         } catch {
           // keep diagnostics from direct host below
@@ -420,29 +432,29 @@ export const brainAPI = {
       }
 
       if (_looksLikeMainBackend(directPaths)) {
-        return {
+        return _cache({
           ok: false,
           isBrain: false,
           reason: 'Configured BRAIN_URL appears to be the main backend (/api/sentinel/*), not Sentinel Brain (/api/brain/*).',
-        };
+        });
       }
 
-      return { ok: false, isBrain: false, reason: 'Configured BRAIN_URL does not expose expected /api/brain routes.' };
+      return _cache({ ok: false, isBrain: false, reason: 'Configured BRAIN_URL does not expose expected /api/brain routes.' });
     } catch (error) {
       const err = error as AxiosError;
       const code = err?.response?.status;
       if (code === 404) {
-        return {
+        return _cache({
           ok: false,
           isBrain: false,
           reason: 'Configured BRAIN_URL points to a service without Brain routes.',
-        };
+        });
       }
-      return {
+      return _cache({
         ok: false,
         isBrain: false,
         reason: err?.message ?? 'Unable to validate Brain service type',
-      };
+      });
     }
   },
 
