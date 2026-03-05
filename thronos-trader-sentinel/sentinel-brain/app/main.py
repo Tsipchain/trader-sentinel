@@ -10,6 +10,7 @@ import logging
 import os
 import time
 from datetime import datetime, timezone
+from hashlib import sha256
 from contextlib import asynccontextmanager
 
 from fastapi import Body, FastAPI, HTTPException, Security
@@ -91,6 +92,21 @@ class AnalysisSnapshotRequest(BaseModel):
     kind: str = Field(default="analyst", description="analysis type, e.g. analyst/briefing/risk")
     content: dict = Field(default_factory=dict, description="Arbitrary JSON payload to keep for comparison")
     symbol: str = Field(default="BTC/USDT")
+
+
+class SubscriptionRegisterRequest(BaseModel):
+    user_id: str
+    tier: str = Field(default="free")
+    source: str = Field(default="mobile")
+    wallet_address: str = Field(default="")
+
+
+class SecurityEventRequest(BaseModel):
+    user_id: str = Field(default="anonymous")
+    event_type: str
+    severity: str = Field(default="medium")
+    source_ip: str = Field(default="")
+    details: dict = Field(default_factory=dict)
 
 
 # ── Trade history helpers ─────────────────────────────────────────────────────
@@ -360,6 +376,57 @@ def get_analysis_history(user_id: str, limit: int = 30, _: str = Security(verify
         return {"ok": True, "entries": [], "updated_at": None}
     entries = memory.get("entries", [])[-limit:]
     return {"ok": True, "entries": entries, "updated_at": memory.get("updated_at")}
+
+
+@app.post("/api/brain/subscription/register")
+def register_subscription(req: SubscriptionRegisterRequest, _: str = Security(verify_api_key)):
+    """Persist a deterministic subscription fingerprint so free/paid records are traceable."""
+    material = f"{req.user_id}|{req.tier}|{req.source}|{req.wallet_address}".lower()
+    sub_hash = sha256(material.encode("utf-8")).hexdigest()
+    payload = {
+        "user_id": req.user_id,
+        "tier": req.tier,
+        "source": req.source,
+        "wallet_address": req.wallet_address,
+        "hash": sub_hash,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    store.save_subscription_fingerprint(sub_hash, payload)
+    return {"ok": True, "hash": sub_hash}
+
+
+@app.get("/api/brain/subscription/{sub_hash}")
+def get_subscription(sub_hash: str, _: str = Security(verify_api_key)):
+    data = store.load_subscription_fingerprint(sub_hash)
+    if not data:
+        return {"ok": False, "message": "not found"}
+    return {"ok": True, "subscription": data}
+
+
+@app.post("/api/brain/security/event")
+def record_security_event(req: SecurityEventRequest, _: str = Security(verify_api_key)):
+    """Defensive security telemetry (detection + response hints). No offensive actions."""
+    event = {
+        "event_type": req.event_type,
+        "severity": req.severity.lower(),
+        "source_ip": req.source_ip,
+        "details": req.details,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    store.append_security_event(req.user_id, event)
+    recent = store.load_security_events(req.user_id, limit=25)
+    high_count = sum(1 for e in recent if str(e.get("severity", "")).lower() in {"high", "critical"})
+    action = "monitor"
+    if high_count >= 3:
+        action = "throttle"
+    if high_count >= 6:
+        action = "block_temporarily"
+    return {"ok": True, "recommended_action": action, "recent_high_events": high_count}
+
+
+@app.get("/api/brain/security/events/{user_id}")
+def get_security_events(user_id: str, limit: int = 50, _: str = Security(verify_api_key)):
+    return {"ok": True, "events": store.load_security_events(user_id, limit=limit)}
 
 
 # ── AutoTrader endpoints ──────────────────────────────────────────────────────
