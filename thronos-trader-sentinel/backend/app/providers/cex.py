@@ -18,11 +18,21 @@ def _ccxt_module():
     if _CCXT_MODULE is False:
         return None
     if _CCXT_MODULE is None:
-        if importlib.util.find_spec("ccxt.async_support") is None:
-            log.warning("ccxt.async_support unavailable; CEXProvider will run with empty CEX set")
+        try:
+            # find_spec can import package metadata and fail on partially broken installs.
+            if importlib.util.find_spec("ccxt.async_support") is None:
+                log.warning("ccxt.async_support unavailable; CEXProvider will run with empty CEX set")
+                _CCXT_MODULE = False
+                return None
+            _CCXT_MODULE = importlib.import_module("ccxt.async_support")
+        except ModuleNotFoundError as exc:
+            log.warning("ccxt async support disabled due to missing dependency: %s", exc)
             _CCXT_MODULE = False
             return None
-        _CCXT_MODULE = importlib.import_module("ccxt.async_support")
+        except Exception as exc:
+            log.warning("ccxt async support disabled due to import failure: %s", exc)
+            _CCXT_MODULE = False
+            return None
     return _CCXT_MODULE
 
 
@@ -125,7 +135,13 @@ class CEXProvider:
         return VenueTick(venue=venue, kind="cex", last=None, bid=None, ask=None, ts=ts)
 
     async def snapshot(self, symbol: str) -> list[VenueTick]:
-        await self.start()
+        try:
+            await self.start()
+        except Exception as exc:
+            log.warning("CEXProvider start failed; returning empty snapshot: %s", exc)
+            self._exchanges = {}
+            return []
+
         tasks = [self.fetch_ticker(v, symbol) for v in self.venues if v in self._exchanges]
         if not tasks:
             return []

@@ -381,6 +381,16 @@ export const brainAPI = {
         return { ok: true, isBrain: true };
       }
 
+      // Compatibility: some deployments may not expose Brain paths in OpenAPI but still expose storage route.
+      try {
+        const status = await brainApi.get<{ ok: boolean; disk_path?: string }>('/api/brain/storage/status');
+        if (status.data?.ok) {
+          return { ok: true, isBrain: true, storage: { disk_path: status.data.disk_path } };
+        }
+      } catch {
+        // Continue to route-shape heuristics below.
+      }
+
       const hasSentinelRoutes = paths.some((p) => p.startsWith('/api/sentinel/') || p.startsWith('/api/market/'));
       if (hasSentinelRoutes) {
         return {
@@ -388,12 +398,6 @@ export const brainAPI = {
           isBrain: false,
           reason: 'Configured BRAIN_URL appears to be the main backend (/api/sentinel/*), not Sentinel Brain (/api/brain/*).',
         };
-      }
-
-      // Compatibility: some deployments may not expose the full spec but still support storage route.
-      const status = await brainGet<{ ok: boolean; disk_path?: string }>('/api/brain/storage/status');
-      if (status?.ok) {
-        return { ok: true, isBrain: true, storage: { disk_path: status.disk_path } };
       }
 
       return { ok: false, isBrain: false, reason: 'Configured BRAIN_URL does not expose expected /api/brain routes.' };
@@ -506,6 +510,18 @@ export const brainAPI = {
     symbol?: string;
   }): Promise<BrainAnalysisSnapshotResponse> {
     const response = await brainPost('/api/brain/analysis/snapshot', params);
+    return response;
+  },
+
+  async publishTelegramSignal(params: {
+    user_id: string;
+    tier: string;
+    signal_type: string;
+    symbol: string;
+    message: string;
+    timestamp: number;
+  }): Promise<{ ok: boolean; detail?: string }> {
+    const response = await brainPost('/api/brain/telegram/signal', params);
     return response;
   },
 

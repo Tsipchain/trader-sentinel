@@ -12,6 +12,7 @@ import time
 from datetime import datetime, timezone
 from hashlib import sha256
 from contextlib import asynccontextmanager
+from urllib import parse, request
 
 from fastapi import Body, FastAPI, HTTPException, Security
 from fastapi.middleware.cors import CORSMiddleware
@@ -107,6 +108,15 @@ class SecurityEventRequest(BaseModel):
     severity: str = Field(default="medium")
     source_ip: str = Field(default="")
     details: dict = Field(default_factory=dict)
+
+
+class TelegramSignalRequest(BaseModel):
+    user_id: str
+    tier: str = Field(default="free")
+    signal_type: str
+    symbol: str
+    message: str
+    timestamp: int
 
 
 # ── Trade history helpers ─────────────────────────────────────────────────────
@@ -427,6 +437,53 @@ def record_security_event(req: SecurityEventRequest, _: str = Security(verify_ap
 @app.get("/api/brain/security/events/{user_id}")
 def get_security_events(user_id: str, limit: int = 50, _: str = Security(verify_api_key)):
     return {"ok": True, "events": store.load_security_events(user_id, limit=limit)}
+
+
+def _send_telegram_paid_signal(payload: TelegramSignalRequest) -> tuple[bool, str]:
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_ids_raw = os.getenv("TELEGRAM_CHAT_IDS", "").strip()
+    if not token or not chat_ids_raw:
+        return False, "telegram_not_configured"
+
+    tier = (payload.tier or "").lower()
+    if tier == "free":
+        return False, "free_tier_no_telegram"
+
+    text = (
+        f"🔔 {payload.signal_type.upper()} signal\n"
+        f"Symbol: {payload.symbol}\n"
+        f"Tier: {payload.tier}\n"
+        f"User: {payload.user_id}\n"
+        f"{payload.message[:800]}"
+    )
+    endpoint = f"https://api.telegram.org/bot{token}/sendMessage"
+
+    chat_ids = [c.strip() for c in chat_ids_raw.split(",") if c.strip()]
+    sent = 0
+    for chat_id in chat_ids:
+        try:
+            body = parse.urlencode({
+                "chat_id": chat_id,
+                "text": text,
+                "disable_web_page_preview": "true",
+            }).encode("utf-8")
+            req = request.Request(endpoint, data=body, method="POST")
+            req.add_header("Content-Type", "application/x-www-form-urlencoded")
+            with request.urlopen(req, timeout=6) as resp:
+                if 200 <= getattr(resp, "status", 500) < 300:
+                    sent += 1
+        except Exception as exc:
+            log.warning("telegram send failed for chat_id=%s: %s", chat_id, exc)
+
+    if sent == 0:
+        return False, "telegram_send_failed"
+    return True, f"sent_to_{sent}_chat(s)"
+
+
+@app.post("/api/brain/telegram/signal")
+def telegram_signal(req: TelegramSignalRequest, _: str = Security(verify_api_key)):
+    ok, detail = _send_telegram_paid_signal(req)
+    return {"ok": ok, "detail": detail}
 
 
 # ── AutoTrader endpoints ──────────────────────────────────────────────────────
