@@ -3,13 +3,13 @@
 
 export const CONFIG = {
   // Backend API (Railway → custom domain sentinel.thronoschain.org)
-  API_URL: 'https://sentinel.thronoschain.org',
+  API_URL: process.env.EXPO_PUBLIC_API_URL ?? 'https://sentinel.thronoschain.org',
 
   // LLM Analyst service (Railway)
-  ANALYST_URL: 'https://alanisys.up.railway.app',
+  ANALYST_URL: process.env.EXPO_PUBLIC_ANALYST_URL ?? 'https://sentinel-analyst.up.railway.app',
 
   // Neural Prediction Brain service (Railway)
-  BRAIN_URL: 'https://alanisys.up.railway.app',
+  BRAIN_URL: process.env.EXPO_PUBLIC_BRAIN_URL ?? 'https://sentinel-brain.up.railway.app',
 
   // Thronos Gateway - Payment & Rewards
   THRONOS_GATEWAY_URL: 'https://gateway.thronos.io',
