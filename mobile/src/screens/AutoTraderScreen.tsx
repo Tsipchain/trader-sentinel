@@ -79,8 +79,7 @@ export default function AutoTraderScreen() {
     try {
       const serviceCheck = await brainAPI.checkServiceType();
       if (!serviceCheck.isBrain) {
-        Alert.alert('Sync Failed', serviceCheck.reason || 'Configured BRAIN_URL is not a Sentinel Brain service');
-        return false;
+        console.warn('Brain service-type validation warning:', serviceCheck.reason || 'unknown');
       }
 
       const res = await brainAPI.getExchangeSnapshot({

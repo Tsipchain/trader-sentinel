@@ -7,6 +7,7 @@ import {
   TouchableOpacity,
   RefreshControl,
   Switch,
+  Modal,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -14,6 +15,7 @@ import { COLORS, SPACING, FONT_SIZES, BORDER_RADIUS } from '../constants/theme';
 import { useStore, Signal } from '../store/useStore';
 import { marketAPI, analystAPI, type AnalystBriefing } from '../services/api';
 import * as Haptics from 'expo-haptics';
+import * as Notifications from 'expo-notifications';
 
 type SignalType = 'all' | 'arbitrage' | 'alert' | 'opportunity';
 
@@ -36,6 +38,8 @@ export default function SignalsScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<SignalType>('all');
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [selectedSignal, setSelectedSignal] = useState<Signal | null>(null);
+  const notificationReadyRef = useRef(false);
   const nextFetchAllowedAtRef = useRef(0);
   const nextAnalystSignalAtRef = useRef(0);
 
@@ -47,6 +51,38 @@ export default function SignalsScreen() {
     const currentSignals = useStore.getState().signals;
     return currentSignals.some((s) => s.id.startsWith(idPrefix) && now - s.timestamp < 10 * 60 * 1000);
   }, []);
+
+  const maybeNotify = useCallback(async (signal: Signal) => {
+    if (subscription === 'free' || !settings.notifications) return;
+    if (signal.type !== 'alert') return;
+
+    try {
+      if (!notificationReadyRef.current) {
+        const perm = await Notifications.requestPermissionsAsync();
+        if (!perm.granted) return;
+        notificationReadyRef.current = true;
+      }
+
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: `${signal.symbol} Alert`,
+          body: signal.message,
+          data: { signalId: signal.id },
+        },
+        trigger: null,
+      });
+    } catch {
+      // ignore notification failures to keep signals flow non-blocking
+    }
+  }, [settings.notifications, subscription]);
+
+  const addSignalWithFeedback = useCallback((signal: Signal) => {
+    addSignal(signal);
+    if (settings.hapticFeedback) {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    }
+    maybeNotify(signal);
+  }, [addSignal, maybeNotify, settings.hapticFeedback]);
 
   const fetchSignals = useCallback(async () => {
     if (Date.now() < nextFetchAllowedAtRef.current) {
@@ -68,9 +104,22 @@ export default function SignalsScreen() {
         if (result.status !== 'fulfilled') return;
         const { signal, symbol, arb } = result.value;
         if (signal && !hasRecentDuplicate(`arb-${symbol}`)) {
-          addSignal({ ...signal, id: `arb-${symbol}-${Date.now()}` });
-          if (settings.hapticFeedback) {
-            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+          addSignalWithFeedback({ ...signal, id: `arb-${symbol}-${Date.now()}` });
+        }
+
+        // Pro+ signal: πιθανή cross-exchange "listing / availability" ευκαιρία
+        if (tierPolicy.allowNewCoinSignals && !hasRecentDuplicate(`newcoin-${symbol}`)) {
+          const listedVenue = arb.best_bid_venue || arb.best_ask_venue;
+          const noVenue = !arb.best_bid_venue || !arb.best_ask_venue;
+          if (listedVenue && noVenue) {
+            addSignalWithFeedback({
+              id: `newcoin-${symbol}-${Date.now()}`,
+              type: 'opportunity',
+              symbol,
+              message: `${symbol} εμφανίζει περιορισμένη διαθεσιμότητα σε venues — πιθανό early listing edge.`,
+              timestamp: Date.now(),
+              venues: [listedVenue],
+            });
           }
         }
 
@@ -99,7 +148,7 @@ export default function SignalsScreen() {
         if (!hasRecentDuplicate(prefix)) {
           const risk = await marketAPI.getRiskReport(baseSymbol);
           const lowRisk = risk.composite_score <= 5.5;
-          addSignal({
+          addSignalWithFeedback({
             id: `${prefix}-${Date.now()}`,
             type: lowRisk ? 'opportunity' : 'alert',
             symbol: baseSymbol,
@@ -123,7 +172,7 @@ export default function SignalsScreen() {
             : (lower.includes('distribution') || lower.includes('bear') || lower.includes('short') ? 'SHORT/DEFENSIVE' : 'NEUTRAL');
           const prefix = `analyst-pattern-${trend}`;
           if (!hasRecentDuplicate(prefix)) {
-            addSignal({
+            addSignalWithFeedback({
               id: `${prefix}-${Date.now()}`,
               type: trend === 'SHORT/DEFENSIVE' ? 'alert' : 'opportunity',
               symbol: watchlist[0] ?? 'BTC/USDT',
@@ -153,7 +202,7 @@ export default function SignalsScreen() {
           if (hasRecentDuplicate(prefix)) return;
 
           if (action.includes('reduce') || action.includes('hedge') || level === 'CAUTION' || level === 'CRITICAL') {
-            addSignal({
+            addSignalWithFeedback({
               id: `${prefix}-${Date.now()}`,
               type: 'alert',
               symbol,
@@ -165,7 +214,7 @@ export default function SignalsScreen() {
           }
 
           if (level === 'NEUTRAL' || action.includes('accumulate') || action.includes('long')) {
-            addSignal({
+            addSignalWithFeedback({
               id: `${prefix}-${Date.now()}`,
               type: 'opportunity',
               symbol,
@@ -193,7 +242,38 @@ export default function SignalsScreen() {
         console.warn('Signals fetch failed:', (error as any)?.message ?? 'unknown error');
       }
     }
-  }, [watchlist, addSignal, settings.hapticFeedback, canUseAdvancedSignals, hasRecentDuplicate, tierPolicy.allowNewCoinSignals, tierPolicy.directionalLimit]);
+  }, [watchlist, addSignalWithFeedback, canUseAdvancedSignals, hasRecentDuplicate, tierPolicy.allowNewCoinSignals, tierPolicy.directionalLimit]);
+
+  const inferTradePlan = useCallback((signal: Signal) => {
+    const isShort = /short|defensive|bear/i.test(signal.message);
+    const base = Math.abs(signal.profit ?? 1.2);
+    const highVolatility = /critical|caution|warning|volatile|risk\s[7-9]|risk\s10/i.test(signal.message);
+    const liquidityTight = /limited|early listing|low liquidity|thin/i.test(signal.message);
+
+    const entry = highVolatility
+      ? 'Scale-in around key S/R zones (avoid full-size market entry)'
+      : 'Market / nearest support-resistance retest';
+    const sl = `${(isShort ? base * 0.8 : base).toFixed(2)}%`;
+    const tp1 = `${(base * 1.1).toFixed(2)}%`;
+    const tp2 = `${(base * 1.8).toFixed(2)}%`;
+    const leverage = liquidityTight ? '1x-2x' : (highVolatility ? '2x-3x' : '3x-5x');
+    const validationWindow = highVolatility ? '15-45 min' : '30-120 min';
+
+    return {
+      side: isShort ? 'SHORT bias' : 'LONG bias',
+      entry,
+      sl,
+      tp1,
+      tp2,
+      leverage,
+      validationWindow,
+      note: liquidityTight
+        ? 'Lower leverage due to thinner liquidity / higher slippage risk.'
+        : (highVolatility
+          ? 'Reduce size and tighten execution because volatility is elevated.'
+          : 'Standard risk profile; re-check structure before adding size.'),
+    };
+  }, []);
 
   useEffect(() => {
     fetchSignals();
@@ -247,7 +327,7 @@ export default function SignalsScreen() {
     const icon = getSignalIcon(item.type);
 
     return (
-      <TouchableOpacity style={styles.signalCard}>
+      <TouchableOpacity style={styles.signalCard} onPress={() => setSelectedSignal(item)}>
         <View style={[styles.signalIcon, { backgroundColor: icon.color + '20' }]}>
           <Ionicons name={icon.name as any} size={24} color={icon.color} />
         </View>
@@ -371,6 +451,41 @@ export default function SignalsScreen() {
           ) : null
         }
       />
+
+      <Modal visible={!!selectedSignal} transparent animationType="slide" onRequestClose={() => setSelectedSignal(null)}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            {selectedSignal && (
+              <>
+                <View style={styles.modalHeader}>
+                  <Text style={styles.modalTitle}>{selectedSignal.symbol}</Text>
+                  <TouchableOpacity onPress={() => setSelectedSignal(null)}>
+                    <Ionicons name="close" size={22} color={COLORS.textMuted} />
+                  </TouchableOpacity>
+                </View>
+                <Text style={styles.modalMessage}>{selectedSignal.message}</Text>
+                <View style={styles.planBox}>
+                  {(() => {
+                    const plan = inferTradePlan(selectedSignal);
+                    return (
+                      <>
+                        <Text style={styles.planTitle}>{plan.side}</Text>
+                        <Text style={styles.planLine}>Entry: {plan.entry}</Text>
+                        <Text style={styles.planLine}>SL: {plan.sl}</Text>
+                        <Text style={styles.planLine}>TP1: {plan.tp1}</Text>
+                        <Text style={styles.planLine}>TP2: {plan.tp2}</Text>
+                        <Text style={styles.planLine}>Leverage: {plan.leverage}</Text>
+                        <Text style={styles.planLine}>Validation window: {plan.validationWindow}</Text>
+                        <Text style={styles.planHint}>{plan.note}</Text>
+                      </>
+                    );
+                  })()}
+                </View>
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -547,5 +662,56 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     textAlign: 'center',
     lineHeight: 22,
+  },
+  modalOverlay: {
+    flex: 1,
+    justifyContent: 'flex-end',
+    backgroundColor: 'rgba(0,0,0,0.55)',
+  },
+  modalCard: {
+    backgroundColor: COLORS.surface,
+    borderTopLeftRadius: BORDER_RADIUS.xl,
+    borderTopRightRadius: BORDER_RADIUS.xl,
+    padding: SPACING.lg,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: SPACING.sm,
+  },
+  modalTitle: {
+    fontSize: FONT_SIZES.xl,
+    fontWeight: '700',
+    color: COLORS.text,
+  },
+  modalMessage: {
+    color: COLORS.textSecondary,
+    lineHeight: 22,
+    fontSize: FONT_SIZES.md,
+    marginBottom: SPACING.md,
+  },
+  planBox: {
+    backgroundColor: COLORS.backgroundCard,
+    borderRadius: BORDER_RADIUS.md,
+    padding: SPACING.md,
+  },
+  planTitle: {
+    color: COLORS.primary,
+    fontWeight: '700',
+    marginBottom: SPACING.xs,
+  },
+  planLine: {
+    color: COLORS.textSecondary,
+    fontSize: FONT_SIZES.sm,
+    marginBottom: 2,
+  },
+  planHint: {
+    color: COLORS.textMuted,
+    fontSize: FONT_SIZES.xs,
+    marginTop: SPACING.xs,
+    lineHeight: 16,
   },
 });

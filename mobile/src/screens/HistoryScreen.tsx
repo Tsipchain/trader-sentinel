@@ -43,7 +43,7 @@ export default function HistoryScreen() {
       await brainAPI.checkHealth();
       const serviceCheck = await brainAPI.checkServiceType();
       if (!serviceCheck.isBrain) {
-        throw new Error(serviceCheck.reason || 'Configured BRAIN_URL is not a Sentinel Brain service');
+        console.warn('Brain service-type validation warning:', serviceCheck.reason || 'unknown');
       }
 
       // Sync & train model
