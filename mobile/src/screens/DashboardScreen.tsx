@@ -52,25 +52,38 @@ export default function DashboardScreen() {
   const [arbitrageOpps, setArbitrageOpps] = useState<ArbitrageData[]>([]);
   const [loading, setLoading] = useState(true);
 
+  const arbitrageSignalOpps = signals
+    .filter((sig) => sig.type === 'arbitrage')
+    .slice(0, 3)
+    .map((sig) => ({
+      symbol: sig.symbol,
+      message: sig.message,
+      timestamp: sig.timestamp,
+    }));
+
   const fetchData = useCallback(async () => {
     try {
       const results = await Promise.all(
         watchlist.map(async (symbol) => {
           const arb = await marketAPI.getArbitrage(symbol);
-          const bestBid = _toNumber(arb.best_bid);
-          const bestAsk = _toNumber(arb.best_ask);
-          const spread = _toNumber(arb.spread);
+          const snapshot = await marketAPI.getSnapshot(symbol).catch(() => null);
+
+          const snapshotLast = snapshot?.venues?.find((v) => v.last !== null)?.last ?? null;
+          const dexLast = _toNumber(arb.dex_last, _toNumber(snapshotLast));
+          const bestBid = _toNumber(arb.best_bid, dexLast);
+          const bestAsk = _toNumber(arb.best_ask, dexLast);
+          const spread = _toNumber(arb.spread, bestBid && bestAsk ? bestBid - bestAsk : 0);
 
           return {
             ...arb,
             symbol,
-            price: bestBid,
+            price: bestBid || dexLast,
             change24h: 0,
             spread,
-            bestBid: arb.best_bid_venue || '-',
-            bestAsk: arb.best_ask_venue || '-',
-            best_bid: bestBid,
-            best_ask: bestAsk,
+            bestBid: arb.best_bid_venue || 'dex',
+            bestAsk: arb.best_ask_venue || 'dex',
+            best_bid: bestBid || dexLast,
+            best_ask: bestAsk || dexLast,
           };
         })
       );
@@ -265,6 +278,19 @@ export default function DashboardScreen() {
                     <Text style={styles.arbPrice}>${_toNumber(opp.best_bid).toFixed(2)}</Text>
                   </View>
                 </View>
+              </View>
+            ))
+          ) : arbitrageSignalOpps.length > 0 ? (
+            arbitrageSignalOpps.map((opp, index) => (
+              <View key={`signal-${index}`} style={styles.arbCard}>
+                <View style={styles.arbHeader}>
+                  <Text style={styles.arbSymbol}>{opp.symbol}</Text>
+                  <View style={styles.arbProfit}>
+                    <Ionicons name="flash" size={16} color={COLORS.primary} />
+                    <Text style={styles.arbProfitText}>Signal</Text>
+                  </View>
+                </View>
+                <Text style={styles.arbVenueLabel}>{opp.message}</Text>
               </View>
             ))
           ) : (

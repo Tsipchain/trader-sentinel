@@ -105,3 +105,35 @@ sh -c 'uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8083}'
 ```
 
 or leave Start Command empty and use the Dockerfile `CMD` (already shell-safe in sentinel-brain Dockerfile).
+
+
+## 7) If service is "Online" but `/api/brain/*` still returns 404
+
+If logs look like this:
+
+- `GET /health -> 200`
+- `GET /openapi.json -> 200`
+- `GET /api/brain/storage/status -> 404`
+- `POST /api/brain/sync -> 404`
+
+then your service is running, but **not the Sentinel Brain app**.
+
+### Quick diagnosis
+
+```bash
+curl -s https://<brain-host>/openapi.json
+```
+
+If `info.title` looks like `Thronos Trader Sentinel` (or paths mostly `/api/sentinel/*`, `/api/market/*`), you are running backend app, not brain app.
+
+For Brain, `openapi.json` should include `/api/brain/*` paths (e.g. `/api/brain/sync`, `/api/brain/storage/status`, `/api/brain/exchange/snapshot`).
+
+### Fix
+
+1. Railway service root directory must be `thronos-trader-sentinel/sentinel-brain`.
+2. Dockerfile must be `thronos-trader-sentinel/sentinel-brain/Dockerfile`.
+3. Start command should be empty (use Dockerfile CMD) **or**:
+   ```bash
+   sh -c 'uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8083}'
+   ```
+4. Redeploy and re-run the curl checks from section 4.
