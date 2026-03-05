@@ -19,10 +19,13 @@ class DexTick:
 class DexScreenerProvider:
     BASE = "https://api.dexscreener.com/latest/dex"
 
-    def __init__(self, enabled: bool = True, timeout_s: int = 10):
+    def __init__(self, enabled: bool = True, timeout_s: int = 10, cache_ttl_s: int = 20):
         self.enabled = enabled
         self.timeout_s = timeout_s
+        self.cache_ttl_s = max(1, int(cache_ttl_s))
         self._client = httpx.AsyncClient(timeout=timeout_s)
+        self._cache: dict[str, tuple[float, DexTick]] = {}
+        self._cooldown_until: float = 0
 
     async def close(self):
         try:
@@ -40,6 +43,16 @@ class DexScreenerProvider:
 
         q = _dex_query(symbol)
         ts = int(time.time())
+        now = time.time()
+
+        cached = self._cache.get(symbol)
+        if cached and (now - cached[0] < self.cache_ttl_s):
+            return cached[1]
+
+        if now < self._cooldown_until:
+            if cached:
+                return cached[1]
+            return DexTick(venue="dexscreener", kind="dex", last=None, pair=None, chain=None, dex=None, liquidity_usd=None, ts=ts)
 
         try:
             r = await self._client.get(f"{self.BASE}/search", params={"q": q})
@@ -68,8 +81,18 @@ class DexScreenerProvider:
             chain = best.get("chainId")
             dex = best.get("dexId")
 
-            return DexTick(venue="dexscreener", kind="dex", last=price, pair=pair, chain=chain, dex=dex, liquidity_usd=liq, ts=ts)
+            tick = DexTick(venue="dexscreener", kind="dex", last=price, pair=pair, chain=chain, dex=dex, liquidity_usd=liq, ts=ts)
+            self._cache[symbol] = (now, tick)
+            return tick
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429:
+                self._cooldown_until = now + 60
+            if cached:
+                return cached[1]
+            return DexTick(venue="dexscreener", kind="dex", last=None, pair=None, chain=None, dex=None, liquidity_usd=None, ts=ts)
         except Exception:
+            if cached:
+                return cached[1]
             return DexTick(venue="dexscreener", kind="dex", last=None, pair=None, chain=None, dex=None, liquidity_usd=None, ts=ts)
 
 

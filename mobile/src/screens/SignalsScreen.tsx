@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -17,48 +17,144 @@ import * as Haptics from 'expo-haptics';
 
 type SignalType = 'all' | 'arbitrage' | 'alert' | 'opportunity';
 
+type TierSignalPolicy = {
+  directionalLimit: number;
+  allowNewCoinSignals: boolean;
+  refreshMs: number;
+};
+
+const SIGNAL_POLICY: Record<string, TierSignalPolicy> = {
+  free: { directionalLimit: 1, allowNewCoinSignals: false, refreshMs: 20000 },
+  starter: { directionalLimit: 2, allowNewCoinSignals: false, refreshMs: 15000 },
+  pro: { directionalLimit: 5, allowNewCoinSignals: true, refreshMs: 12000 },
+  elite: { directionalLimit: 10, allowNewCoinSignals: true, refreshMs: 9000 },
+  whale: { directionalLimit: 99, allowNewCoinSignals: true, refreshMs: 7000 },
+};
+
 export default function SignalsScreen() {
   const { signals, addSignal, clearSignals, watchlist, settings, subscription } = useStore();
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<SignalType>('all');
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const nextFetchAllowedAtRef = useRef(0);
+
+  const tierPolicy = SIGNAL_POLICY[subscription] ?? SIGNAL_POLICY.free;
+  const canUseAdvancedSignals = subscription !== 'free';
+
+  const hasRecentDuplicate = useCallback((idPrefix: string) => {
+    const now = Date.now();
+    const currentSignals = useStore.getState().signals;
+    return currentSignals.some((s) => s.id.startsWith(idPrefix) && now - s.timestamp < 10 * 60 * 1000);
+  }, []);
 
   const fetchSignals = useCallback(async () => {
+    if (Date.now() < nextFetchAllowedAtRef.current) {
+      return;
+    }
+
     try {
       // Fetch arbitrage data for watchlist
       const results = await Promise.all(
         watchlist.map(async (symbol) => {
           const arb = await marketAPI.getArbitrage(symbol);
-          return marketAPI.detectArbitrageSignal(arb, 0.1);
+          const signal = marketAPI.detectArbitrageSignal(arb, 0.1);
+          return { symbol, arb, signal };
         })
       );
 
-      // Add new signals
-      results.forEach((signal) => {
-        if (signal) {
-          addSignal(signal);
+      // Add arbitrage signals
+      results.forEach(({ signal, symbol, arb }) => {
+        if (signal && !hasRecentDuplicate(`arb-${symbol}`)) {
+          addSignal({ ...signal, id: `arb-${symbol}-${Date.now()}` });
           if (settings.hapticFeedback) {
             Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
           }
         }
+
+        // Pro+ signal: πιθανή cross-exchange "listing / availability" ευκαιρία
+        if (tierPolicy.allowNewCoinSignals && !hasRecentDuplicate(`newcoin-${symbol}`)) {
+          const listedVenue = arb.best_bid_venue || arb.best_ask_venue;
+          const noVenue = !arb.best_bid_venue || !arb.best_ask_venue;
+          if (listedVenue && noVenue) {
+            addSignal({
+              id: `newcoin-${symbol}-${Date.now()}`,
+              type: 'opportunity',
+              symbol,
+              message: `${symbol} εμφανίζει περιορισμένη διαθεσιμότητα σε venues — πιθανό early listing edge.`,
+              timestamp: Date.now(),
+              venues: [listedVenue],
+            });
+          }
+        }
       });
+
+      // Pro+ directional signals from composite risk framework
+      if (canUseAdvancedSignals) {
+        const directionalSymbols = watchlist.slice(0, tierPolicy.directionalLimit);
+        const riskSignals = await Promise.all(
+          directionalSymbols.map(async (symbol) => {
+            const risk = await marketAPI.getRiskReport(symbol);
+            return { symbol, risk };
+          })
+        );
+
+        riskSignals.forEach(({ symbol, risk }) => {
+          const level = risk.recommendation?.level || 'UNKNOWN';
+          const action = (risk.recommendation?.action || '').toLowerCase();
+          const prefix = `dir-${symbol}-${level}`;
+
+          if (hasRecentDuplicate(prefix)) return;
+
+          if (action.includes('reduce') || action.includes('hedge') || level === 'CAUTION' || level === 'CRITICAL') {
+            addSignal({
+              id: `${prefix}-${Date.now()}`,
+              type: 'alert',
+              symbol,
+              message: `SHORT/DEFENSIVE bias: Risk ${risk.composite_score.toFixed(1)}/10 (${level}) — ${risk.recommendation.description}`,
+              timestamp: Date.now(),
+              venues: ['sentinel-risk'],
+            });
+            return;
+          }
+
+          if (level === 'NEUTRAL' || action.includes('accumulate') || action.includes('long')) {
+            addSignal({
+              id: `${prefix}-${Date.now()}`,
+              type: 'opportunity',
+              symbol,
+              message: `LONG/ACCUMULATE bias: Risk ${risk.composite_score.toFixed(1)}/10 (${level}) — ${risk.recommendation.description}`,
+              timestamp: Date.now(),
+              venues: ['sentinel-risk'],
+            });
+          }
+        });
+      }
     } catch (error) {
-      console.error('Failed to fetch signals:', error);
+      const status = (error as any)?.response?.status;
+      if (status === 429) {
+        // Client-side backoff to avoid hammering upstream when rate-limited
+        nextFetchAllowedAtRef.current = Date.now() + 60_000;
+      }
+      if (status === 429 || (error as any)?.message === 'Network Error') {
+        console.warn('Signals fetch backoff:', status ?? 'network');
+      } else {
+        console.error('Failed to fetch signals:', error);
+      }
     }
-  }, [watchlist, addSignal, settings.hapticFeedback]);
+  }, [watchlist, addSignal, settings.hapticFeedback, canUseAdvancedSignals, hasRecentDuplicate, tierPolicy.allowNewCoinSignals, tierPolicy.directionalLimit]);
 
   useEffect(() => {
     fetchSignals();
     let interval: ReturnType<typeof setInterval>;
 
     if (autoRefresh) {
-      interval = setInterval(fetchSignals, 5000);
+      interval = setInterval(fetchSignals, tierPolicy.refreshMs);
     }
 
     return () => {
       if (interval) clearInterval(interval);
     };
-  }, [fetchSignals, autoRefresh]);
+  }, [fetchSignals, autoRefresh, tierPolicy.refreshMs]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -166,7 +262,16 @@ export default function SignalsScreen() {
         <View style={styles.subscriptionNotice}>
           <Ionicons name="lock-closed" size={16} color={COLORS.warning} />
           <Text style={styles.subscriptionNoticeText}>
-            Upgrade to Pro for advanced signals and faster updates
+            Free tier: 1 directional signal + arbitrage. Upgrade for more pairs/faster updates.
+          </Text>
+        </View>
+      )}
+
+      {subscription === 'starter' && (
+        <View style={styles.subscriptionNotice}>
+          <Ionicons name="information-circle-outline" size={16} color={COLORS.info} />
+          <Text style={styles.subscriptionNoticeText}>
+            Starter tier: up to 2 directional pairs. Upgrade to Pro+ for new-coin opportunities.
           </Text>
         </View>
       )}
