@@ -54,7 +54,8 @@ export default function DashboardScreen() {
 
   const arbitrageSignalOpps = signals
     .filter((sig) => sig.type === 'arbitrage')
-    .slice(0, 3)
+    .sort((a, b) => b.timestamp - a.timestamp)
+    .slice(0, subscription === 'free' ? 1 : 3)
     .map((sig) => ({
       symbol: sig.symbol,
       message: sig.message,
@@ -63,32 +64,53 @@ export default function DashboardScreen() {
 
   const fetchData = useCallback(async () => {
     try {
-      const results = await Promise.all(
+      const settled = await Promise.allSettled(
         watchlist.map(async (symbol) => {
-          const arb = await marketAPI.getArbitrage(symbol);
-          const snapshot = await marketAPI.getSnapshot(symbol).catch(() => null);
+          const [arbResult, snapshotResult] = await Promise.allSettled([
+            marketAPI.getArbitrage(symbol),
+            marketAPI.getSnapshot(symbol),
+          ]);
+
+          const arb = arbResult.status === 'fulfilled' ? arbResult.value : null;
+          const snapshot = snapshotResult.status === 'fulfilled' ? snapshotResult.value : null;
 
           const snapshotLast = snapshot?.venues?.find((v) => v.last !== null)?.last ?? null;
-          const dexLast = _toNumber(arb.dex_last, _toNumber(snapshotLast));
-          const bestBid = _toNumber(arb.best_bid, dexLast);
-          const bestAsk = _toNumber(arb.best_ask, dexLast);
-          const spread = _toNumber(arb.spread, bestBid && bestAsk ? bestBid - bestAsk : 0);
+          const dexLast = _toNumber(arb?.dex_last, _toNumber(snapshotLast));
+          const bestBid = _toNumber(arb?.best_bid, dexLast);
+          const bestAsk = _toNumber(arb?.best_ask, dexLast);
+          const spread = _toNumber(arb?.spread, bestBid - bestAsk);
+
+          if (!bestBid && !bestAsk && !dexLast) {
+            return null;
+          }
 
           return {
             ...arb,
             symbol,
-            price: bestBid || dexLast,
+            price: bestBid || bestAsk || dexLast,
             change24h: 0,
             spread,
-            bestBid: arb.best_bid_venue || 'dex',
-            bestAsk: arb.best_ask_venue || 'dex',
+            bestBid: arb?.best_bid_venue || 'dex',
+            bestAsk: arb?.best_ask_venue || 'dex',
             best_bid: bestBid || dexLast,
             best_ask: bestAsk || dexLast,
+            best_bid_venue: arb?.best_bid_venue || 'dex',
+            best_ask_venue: arb?.best_ask_venue || 'dex',
+            dex_last: dexLast,
+            dex_minus_best_ask: _toNumber(arb?.dex_minus_best_ask, 0),
           };
         })
       );
+
+      const results = settled
+        .filter((result): result is PromiseFulfilledResult<PriceData & ArbitrageData> => result.status === 'fulfilled' && !!result.value)
+        .map((result) => result.value);
+
       setPrices(results);
-      const opps = results.filter((r) => _safePct(_toNumber(r.spread), _toNumber(r.price)) > 0.1);
+      const opps = results.filter((r) => {
+        const pct = _safePct(_toNumber(r.spread), _toNumber(r.best_ask || r.price));
+        return pct > 0.05 && r.bestBid !== r.bestAsk;
+      });
       setArbitrageOpps(opps as any);
     } catch (error) {
       console.error('Failed to fetch data:', error);
