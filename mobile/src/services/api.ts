@@ -1,4 +1,4 @@
-import axios from 'axios';
+import axios, { AxiosError, AxiosRequestConfig } from 'axios';
 import { CONFIG } from '../config';
 import type { MarketData, Signal } from '../store/useStore';
 
@@ -23,6 +23,38 @@ const brainApi = axios.create({
   timeout: 30000,
   headers: _authHeaders,
 });
+
+const brainFallbackApi = axios.create({
+  baseURL: CONFIG.API_URL,
+  timeout: 30000,
+  headers: _authHeaders,
+});
+
+function _shouldFallbackToGateway(error: unknown): boolean {
+  const err = error as AxiosError;
+  const status = err?.response?.status;
+  // Fallback when dedicated Brain URL is misrouted/unavailable.
+  return !err?.response || status === 404 || status === 502 || status === 503;
+}
+
+async function _brainRequest<T = any>(config: AxiosRequestConfig): Promise<T> {
+  try {
+    const res = await brainApi.request<T>(config);
+    return res.data;
+  } catch (error) {
+    if (CONFIG.BRAIN_URL !== CONFIG.API_URL && _shouldFallbackToGateway(error)) {
+      const res = await brainFallbackApi.request<T>(config);
+      return res.data;
+    }
+    throw error;
+  }
+}
+
+const brainGet = <T = any>(url: string, config?: AxiosRequestConfig) =>
+  _brainRequest<T>({ ...(config ?? {}), method: 'GET', url });
+
+const brainPost = <T = any>(url: string, data?: any, config?: AxiosRequestConfig) =>
+  _brainRequest<T>({ ...(config ?? {}), method: 'POST', url, data });
 
 // ── React Native SSE client (XHR-based, no native EventSource needed) ────────
 export function createRNStream(
@@ -327,8 +359,8 @@ export const brainAPI = {
     geo_score: number;
     calendar_score: number;
   }): Promise<BrainPrediction> {
-    const response = await brainApi.post('/api/brain/predict', params);
-    return response.data;
+    const response = await brainPost('/api/brain/predict', params);
+    return response;
   },
 
   async syncTrades(params: {
@@ -339,23 +371,23 @@ export const brainAPI = {
     symbol?: string;
     days?: number;
   }): Promise<{ ok: boolean; trained: boolean; trade_count?: number; model_accuracy?: number }> {
-    const response = await brainApi.post('/api/brain/sync', params);
-    return response.data;
+    const response = await brainPost('/api/brain/sync', params);
+    return response;
   },
 
   async getStats(userId: string): Promise<{ ok: boolean } & TradeStats> {
-    const response = await brainApi.get(`/api/brain/stats/${userId}`);
-    return response.data;
+    const response = await brainGet(`/api/brain/stats/${userId}`);
+    return response;
   },
 
   async getHistory(userId: string, limit: number = 50): Promise<{ ok: boolean; trades: TradeRecord[] }> {
-    const response = await brainApi.get(`/api/brain/history/${userId}`, { params: { limit } });
-    return response.data;
+    const response = await brainGet(`/api/brain/history/${userId}`, { params: { limit } });
+    return response;
   },
 
   async getAutoTraderStatus(userId: string): Promise<AutoTraderStatus> {
-    const response = await brainApi.get(`/api/brain/autotrader/${userId}`);
-    return response.data;
+    const response = await brainGet(`/api/brain/autotrader/${userId}`);
+    return response;
   },
 
   async enableAutoTrader(params: {
@@ -374,18 +406,18 @@ export const brainAPI = {
     risk_per_trade_pct: number;
     max_total_exposure_pct: number;
   }): Promise<{ ok: boolean }> {
-    const response = await brainApi.post('/api/brain/autotrader/enable', params);
-    return response.data;
+    const response = await brainPost('/api/brain/autotrader/enable', params);
+    return response;
   },
 
   async disableAutoTrader(userId: string): Promise<{ ok: boolean }> {
-    const response = await brainApi.post('/api/brain/autotrader/disable', { user_id: userId });
-    return response.data;
+    const response = await brainPost('/api/brain/autotrader/disable', { user_id: userId });
+    return response;
   },
 
   async closeTrade(userId: string, tradeId: string): Promise<{ ok: boolean }> {
-    const response = await brainApi.post('/api/brain/autotrader/close', { user_id: userId, trade_id: tradeId });
-    return response.data;
+    const response = await brainPost('/api/brain/autotrader/close', { user_id: userId, trade_id: tradeId });
+    return response;
   },
 
   async getExchangeAvailability(): Promise<{ ok: boolean; exchanges: Record<string, ExchangeAvailabilityFlag> }> {
@@ -399,7 +431,7 @@ export const brainAPI = {
     apiSecret: string;
     passphrase?: string;
   }): Promise<{ ok: boolean; snapshot: PortfolioSnapshot | null; exchanges?: Record<string, ExchangeAvailabilityFlag>; error?: string; blocked?: boolean }> {
-    const response = await brainApi.post('/api/brain/exchange/snapshot', {
+    const response = await brainPost('/api/brain/exchange/snapshot', {
       exchange: params.exchange,
       api_key: params.apiKey,
       api_secret: params.apiSecret,
