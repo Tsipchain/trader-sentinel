@@ -12,7 +12,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, SPACING, FONT_SIZES, BORDER_RADIUS } from '../constants/theme';
 import { useStore, Signal } from '../store/useStore';
-import { marketAPI } from '../services/api';
+import { marketAPI, analystAPI, type AnalystBriefing } from '../services/api';
 import * as Haptics from 'expo-haptics';
 
 type SignalType = 'all' | 'arbitrage' | 'alert' | 'opportunity';
@@ -37,6 +37,7 @@ export default function SignalsScreen() {
   const [filter, setFilter] = useState<SignalType>('all');
   const [autoRefresh, setAutoRefresh] = useState(true);
   const nextFetchAllowedAtRef = useRef(0);
+  const nextAnalystSignalAtRef = useRef(0);
 
   const tierPolicy = SIGNAL_POLICY[subscription] ?? SIGNAL_POLICY.free;
   const canUseAdvancedSignals = subscription !== 'free';
@@ -53,8 +54,8 @@ export default function SignalsScreen() {
     }
 
     try {
-      // Fetch arbitrage data for watchlist
-      const results = await Promise.all(
+      // Fetch arbitrage data for watchlist (per-symbol fault tolerance)
+      const results = await Promise.allSettled(
         watchlist.map(async (symbol) => {
           const arb = await marketAPI.getArbitrage(symbol);
           const signal = marketAPI.detectArbitrageSignal(arb, 0.1);
@@ -63,7 +64,9 @@ export default function SignalsScreen() {
       );
 
       // Add arbitrage signals
-      results.forEach(({ signal, symbol, arb }) => {
+      results.forEach((result) => {
+        if (result.status !== 'fulfilled') return;
+        const { signal, symbol, arb } = result.value;
         if (signal && !hasRecentDuplicate(`arb-${symbol}`)) {
           addSignal({ ...signal, id: `arb-${symbol}-${Date.now()}` });
           if (settings.hapticFeedback) {
@@ -88,6 +91,50 @@ export default function SignalsScreen() {
         }
       });
 
+
+      // Free-tier baseline directional hint so users don't wait "all day" for a signal.
+      if (!canUseAdvancedSignals && watchlist.length > 0) {
+        const baseSymbol = watchlist[0];
+        const prefix = `free-risk-${baseSymbol}`;
+        if (!hasRecentDuplicate(prefix)) {
+          const risk = await marketAPI.getRiskReport(baseSymbol);
+          const lowRisk = risk.composite_score <= 5.5;
+          addSignal({
+            id: `${prefix}-${Date.now()}`,
+            type: lowRisk ? 'opportunity' : 'alert',
+            symbol: baseSymbol,
+            message: lowRisk
+              ? `Baseline LONG watch: risk ${risk.composite_score.toFixed(1)}/10 (${risk.recommendation.level}).`
+              : `Baseline DEFENSIVE watch: risk ${risk.composite_score.toFixed(1)}/10 (${risk.recommendation.level}).`,
+            timestamp: Date.now(),
+            venues: ['sentinel-risk'],
+          });
+        }
+      }
+
+      // Analyst pattern signal (throttled) to surface potential market patterns.
+      if (Date.now() >= nextAnalystSignalAtRef.current) {
+        const analyst = await analystAPI.getBriefing();
+        if ((analyst as AnalystBriefing).briefing) {
+          const text = (analyst as AnalystBriefing).briefing;
+          const lower = text.toLowerCase();
+          const trend = lower.includes('accum') || lower.includes('bull') || lower.includes('long')
+            ? 'LONG/ACCUMULATE'
+            : (lower.includes('distribution') || lower.includes('bear') || lower.includes('short') ? 'SHORT/DEFENSIVE' : 'NEUTRAL');
+          const prefix = `analyst-pattern-${trend}`;
+          if (!hasRecentDuplicate(prefix)) {
+            addSignal({
+              id: `${prefix}-${Date.now()}`,
+              type: trend === 'SHORT/DEFENSIVE' ? 'alert' : 'opportunity',
+              symbol: watchlist[0] ?? 'BTC/USDT',
+              message: `Analyst pattern: ${trend} bias — ${text.slice(0, 160)}${text.length > 160 ? '…' : ''}`,
+              timestamp: Date.now(),
+              venues: ['sentinel-analyst'],
+            });
+          }
+          nextAnalystSignalAtRef.current = Date.now() + 10 * 60 * 1000;
+        }
+      }
       // Pro+ directional signals from composite risk framework
       if (canUseAdvancedSignals) {
         const directionalSymbols = watchlist.slice(0, tierPolicy.directionalLimit);

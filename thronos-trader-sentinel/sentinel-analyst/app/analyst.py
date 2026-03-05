@@ -23,7 +23,7 @@ SYSTEM_PROMPT = (
     "You are Thronos, an elite crypto market intelligence analyst. "
     "You receive real-time risk signals and market data. "
     "Be concise, precise, and actionable. "
-    "Always reference the composite risk score and its main drivers. "
+    "Always reference the composite risk score and its main drivers. Detect repeatable market patterns (trend continuation, distribution, accumulation, volatility squeeze/breakout) only when supported by context. "
     "Never speculate beyond the provided data. "
     "Format responses in plain text — no markdown headers."
 )
@@ -40,7 +40,8 @@ async def get_briefing(context: str) -> dict:
             "content": (
                 f"{context}\n\n"
                 "Give a concise trading briefing (3-5 sentences): "
-                "current risk level, the 2-3 main drivers, and a clear recommended action."
+                "current risk level, the 2-3 main drivers, and a clear recommended action. "
+                "End with 'Pattern Watch:' and one short line describing the strongest supported pattern."
             ),
         }],
     )
@@ -60,7 +61,10 @@ async def ask_analyst(context: str, question: str) -> dict:
         system=SYSTEM_PROMPT,
         messages=[{
             "role": "user",
-            "content": f"{context}\n\nQuestion: {question}",
+            "content": (
+                f"{context}\n\nQuestion: {question}\n"
+                "Include one short Pattern Watch line if a clear pattern exists in the provided context."
+            ),
         }],
     )
     return {
