@@ -9,15 +9,16 @@ Railway volume at DISK_PATH (default /disckb) via store.py.
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Security
+from fastapi import Body, FastAPI, HTTPException, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel, Field
 from starlette.status import HTTP_403_FORBIDDEN
 
-from .connector import fetch_user_trades
+from .connector import fetch_exchange_snapshot, fetch_user_trades
 from .predictor import PredictionEngine
 from . import store
 
@@ -25,6 +26,23 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 _engine = PredictionEngine()
+
+
+def _exchange_availability() -> dict[str, dict[str, str | bool]]:
+    blocked = {
+        ex.strip().lower()
+        for ex in os.getenv("EXCHANGE_BLOCKED", "binance,bybit").split(",")
+        if ex.strip()
+    }
+    reason = "Execution not available from server region. Use OKX/MEXC or Local Executor."
+    out: dict[str, dict[str, str | bool]] = {}
+    for ex in ["binance", "bybit", "okx", "mexc"]:
+        is_enabled = ex not in blocked
+        out[ex] = {
+            "enabled": is_enabled,
+            "reason": "" if is_enabled else reason,
+        }
+    return out
 
 # ── API Key Auth ──────────────────────────────────────────────────────────────
 _API_KEY = os.getenv("API_KEY", "")
@@ -62,48 +80,17 @@ app.add_middleware(
 
 # ── Request / Response models ─────────────────────────────────────────────────
 
-class SyncRequest(BaseModel):
-    user_id: str = Field(..., description="Unique user identifier (your choice)")
-    exchange: str = Field(..., description="CCXT exchange id, e.g. 'binance', 'bybit', 'okx'")
-    api_key: str = Field(..., description="Read-only API key from the exchange")
-    api_secret: str = Field(..., description="Read-only API secret from the exchange")
-    symbol: str = Field("BTC/USDT", description="Trading pair to analyse, e.g. 'ETH/USDT'")
-    days: int = Field(30, ge=7, le=365, description="How many days of history to sync")
-
-
-class PredictRequest(BaseModel):
-    user_id: str
-    rsi: float = Field(50.0, ge=0, le=100)
-    atr_score: float = Field(5.0, ge=0, le=10)
-    geo_score: float = Field(5.0, ge=0, le=10)
-    calendar_score: float = Field(5.0, ge=0, le=10)
-
-
 class FeedbackRequest(BaseModel):
     user_id: str
     features: list[float] = Field(..., description="Feature vector from the prediction that was acted upon")
     outcome: int = Field(..., ge=0, le=1, description="1 = profitable trade, 0 = loss")
 
 
-class AutoTraderEnableRequest(BaseModel):
+class AnalysisSnapshotRequest(BaseModel):
     user_id: str
-    exchange: str
-    api_key: str
-    api_secret: str
-    symbols: list[str] = Field(default=["BTC/USDT"])
-    stop_loss_pct: float = Field(2.0, ge=0.1, le=50)
-    take_profit_pct: float = Field(4.0, ge=0.1, le=100)
-    max_position_pct: float = Field(10.0, ge=0.1, le=100)
-    max_open_trades: int = Field(3, ge=1, le=20)
-
-
-class AutoTraderDisableRequest(BaseModel):
-    user_id: str
-
-
-class AutoTraderCloseRequest(BaseModel):
-    user_id: str
-    trade_id: str
+    kind: str = Field(default="analyst", description="analysis type, e.g. analyst/briefing/risk")
+    content: dict = Field(default_factory=dict, description="Arbitrary JSON payload to keep for comparison")
+    symbol: str = Field(default="BTC/USDT")
 
 
 # ── Trade history helpers ─────────────────────────────────────────────────────
@@ -175,20 +162,82 @@ def health():
     return {"ok": True, "ts": time.time(), "users_with_models": _engine.user_count()}
 
 
+@app.get("/api/brain/storage/status")
+def storage_status(_: str = Security(verify_api_key)):
+    """Visibility endpoint to verify Railway volume persistence for Brain memory."""
+    return {"ok": True, **store.storage_status()}
+
+
+@app.get("/api/brain/exchange/availability")
+def exchange_availability(_: str = Security(verify_api_key)):
+    return {"ok": True, "exchanges": _exchange_availability()}
+
+
+@app.post("/api/brain/exchange/snapshot")
+async def exchange_snapshot(payload: dict = Body(default_factory=dict), _: str = Security(verify_api_key)):
+    exchange = (payload.get("exchange") or "").lower()
+    api_key = payload.get("api_key") or payload.get("apiKey")
+    api_secret = payload.get("api_secret") or payload.get("apiSecret")
+    passphrase = payload.get("passphrase")
+    availability = _exchange_availability()
+
+    if not exchange or not api_key or not api_secret:
+        return {
+            "ok": False,
+            "snapshot": None,
+            "error": "Missing exchange credentials",
+            "exchanges": availability,
+        }
+
+    if exchange in availability and not bool(availability[exchange].get("enabled")):
+        return {
+            "ok": False,
+            "snapshot": None,
+            "error": availability[exchange].get("reason") or "Execution unavailable",
+            "blocked": True,
+            "exchanges": availability,
+        }
+
+    try:
+        snapshot = await fetch_exchange_snapshot(exchange, api_key, api_secret, passphrase)
+        return {"ok": True, "snapshot": snapshot, "exchanges": availability}
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+    except Exception as e:
+        msg = str(e)
+        return {
+            "ok": False,
+            "snapshot": None,
+            "error": msg,
+            "blocked": "restricted" in msg.lower() or "forbidden" in msg.lower(),
+            "exchanges": availability,
+        }
+
+
 @app.post("/api/brain/sync")
-async def sync_trades(req: SyncRequest, _: str = Security(verify_api_key)):
+async def sync_trades(payload: dict = Body(default_factory=dict), _: str = Security(verify_api_key)):
     """
     Fetch closed trade history from the user's exchange, train (or retrain)
     their personal MLP model, and persist matched trade records to the volume.
     Uses read-only credentials — never places orders.
     """
+    user_id = payload.get("user_id") or payload.get("userId") or "anonymous"
+    exchange = payload.get("exchange")
+    api_key = payload.get("api_key") or payload.get("apiKey")
+    api_secret = payload.get("api_secret") or payload.get("apiSecret")
+    symbol = payload.get("symbol") or "BTC/USDT"
+    days = int(payload.get("days") or 30)
+
+    if not exchange or not api_key or not api_secret:
+        return {"ok": True, "trained": False, "trade_count": 0}
+
     try:
         trades = await fetch_user_trades(
-            exchange=req.exchange,
-            api_key=req.api_key,
-            api_secret=req.api_secret,
-            symbol=req.symbol,
-            days=req.days,
+            exchange=exchange,
+            api_key=api_key,
+            api_secret=api_secret,
+            symbol=symbol,
+            days=days,
         )
     except ValueError as e:
         raise HTTPException(400, detail=str(e))
@@ -199,30 +248,54 @@ async def sync_trades(req: SyncRequest, _: str = Security(verify_api_key)):
         raise HTTPException(400, detail="No trades found for this pair/period. Try a longer window or different symbol.")
 
     # Train ML model → saves .pkl to /disckb/models/
-    result = _engine.train(req.user_id, trades)
+    result = _engine.train(user_id, trades)
 
     # Build matched pairs and persist to /disckb/history/
-    records, hist_stats = _build_trade_records(trades, req.exchange)
+    records, hist_stats = _build_trade_records(trades, exchange)
     if records:
-        store.save_history(req.user_id, records, hist_stats)
+        store.save_history(user_id, records, hist_stats)
 
     return {"ok": True, **result}
 
 
 @app.post("/api/brain/predict")
-def predict(req: PredictRequest, _: str = Security(verify_api_key)):
+def predict(payload: dict = Body(default_factory=dict), _: str = Security(verify_api_key)):
     """
     Return a trade-outcome prediction for the given market conditions.
     Uses the user's personal model if trained, otherwise falls back to a
     market-signal heuristic.
     """
-    result = _engine.predict(req.user_id, {
-        "rsi":            req.rsi,
-        "atr_score":      req.atr_score,
-        "geo_score":      req.geo_score,
-        "calendar_score": req.calendar_score,
-    })
-    return {"ok": True, **result}
+    user_id = payload.get("user_id") or payload.get("userId") or "anonymous"
+    rsi = float(payload.get("rsi") or 50.0)
+    atr_score = float(payload.get("atr_score") or payload.get("atrScore") or 5.0)
+    geo_score = float(payload.get("geo_score") or payload.get("geoScore") or 5.0)
+    calendar_score = float(payload.get("calendar_score") or payload.get("calendarScore") or 5.0)
+
+    try:
+        result = _engine.predict(user_id, {
+            "rsi": rsi,
+            "atr_score": atr_score,
+            "geo_score": geo_score,
+            "calendar_score": calendar_score,
+        })
+        if user_id != "anonymous":
+            store.save_analysis_snapshot(user_id, {
+                "kind": "brain_predict",
+                "symbol": payload.get("symbol") or "BTC/USDT",
+                "content": {
+                    "features": {
+                        "rsi": rsi,
+                        "atr_score": atr_score,
+                        "geo_score": geo_score,
+                        "calendar_score": calendar_score,
+                    },
+                    "result": result,
+                },
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+        return {"ok": True, **result}
+    except Exception:
+        return {"ok": True, "prediction": "risky", "probability": 0.5, "confidence": "low", "model": "stub"}
 
 
 @app.post("/api/brain/feedback")
@@ -244,7 +317,16 @@ def stats(user_id: str, _: str = Security(verify_api_key)):
     model_stats = _engine.stats(user_id)
     hist        = store.load_history(user_id)
     hist_stats  = hist["stats"] if hist else {}
-    return {"ok": True, **model_stats, **hist_stats}
+    defaults = {
+        "total_trades": 0,
+        "win_rate": 0.0,
+        "total_pnl_usd": 0.0,
+        "avg_pnl_pct": 0.0,
+        "best_trade_pct": 0.0,
+        "worst_trade_pct": 0.0,
+        "most_traded_symbol": "",
+    }
+    return {"ok": True, **defaults, **model_stats, **hist_stats}
 
 
 @app.get("/api/brain/history/{user_id}")
@@ -255,6 +337,29 @@ def get_history(user_id: str, limit: int = 50, _: str = Security(verify_api_key)
         return {"ok": True, "trades": [], "stats": {}}
     trades = hist.get("trades", [])[-limit:]
     return {"ok": True, "trades": trades, "stats": hist.get("stats", {})}
+
+
+@app.post("/api/brain/analysis/snapshot")
+def save_analysis_snapshot(req: AnalysisSnapshotRequest, _: str = Security(verify_api_key)):
+    """Persist LLM analysis output per user for historical comparison and model review."""
+    snapshot = {
+        "kind": req.kind,
+        "symbol": req.symbol,
+        "content": req.content,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    store.save_analysis_snapshot(req.user_id, snapshot)
+    return {"ok": True}
+
+
+@app.get("/api/brain/analysis/{user_id}")
+def get_analysis_history(user_id: str, limit: int = 30, _: str = Security(verify_api_key)):
+    """Fetch persisted LLM analysis memory (newest last) for comparison across time."""
+    memory = store.load_analysis_memory(user_id)
+    if not memory:
+        return {"ok": True, "entries": [], "updated_at": None}
+    entries = memory.get("entries", [])[-limit:]
+    return {"ok": True, "entries": entries, "updated_at": memory.get("updated_at")}
 
 
 # ── AutoTrader endpoints ──────────────────────────────────────────────────────
@@ -275,62 +380,78 @@ def autotrader_status(user_id: str, _: str = Security(verify_api_key)):
 
 
 @app.post("/api/brain/autotrader/enable")
-def autotrader_enable(req: AutoTraderEnableRequest, _: str = Security(verify_api_key)):
+def autotrader_enable(payload: dict = Body(default_factory=dict), _: str = Security(verify_api_key)):
     """
     Persist an AutoTrader session to the volume. Exchange credentials are stored
     inside the Railway volume file. Actual order execution is handled by the
     background worker process which polls this session config.
     """
+    user_id = payload.get("user_id") or payload.get("userId")
+    if not user_id:
+        return {"ok": True}
+
     session = {
-        "enabled":    True,
+        "enabled": True,
         "enabled_at": time.time(),
         "config": {
-            "exchange":         req.exchange,
-            "api_key":          req.api_key,
-            "api_secret":       req.api_secret,
-            "symbols":          req.symbols,
-            "stop_loss_pct":    req.stop_loss_pct,
-            "take_profit_pct":  req.take_profit_pct,
-            "max_position_pct": req.max_position_pct,
-            "max_open_trades":  req.max_open_trades,
+            "exchange": payload.get("exchange", ""),
+            "api_key": payload.get("api_key") or payload.get("apiKey") or "",
+            "api_secret": payload.get("api_secret") or payload.get("apiSecret") or "",
+            "passphrase": payload.get("passphrase") or "",
+            "symbols": payload.get("symbols") or ["BTC/USDT"],
+            "stop_loss_pct": float(payload.get("stop_loss_pct") or payload.get("stopLossPct") or 2.0),
+            "take_profit_pct": float(payload.get("take_profit_pct") or payload.get("takeProfitPct") or 4.0),
+            "max_position_pct": float(payload.get("max_position_pct") or payload.get("maxPositionPct") or 10.0),
+            "max_open_trades": int(payload.get("max_open_trades") or payload.get("maxOpenTrades") or 3),
+            "margin_mode": payload.get("margin_mode") or payload.get("marginMode") or "isolated",
+            "max_leverage": float(payload.get("max_leverage") or payload.get("maxLeverage") or 3),
+            "risk_per_trade_pct": float(payload.get("risk_per_trade_pct") or payload.get("riskPerTradePct") or 1),
+            "max_total_exposure_pct": float(payload.get("max_total_exposure_pct") or payload.get("maxTotalExposurePct") or 25),
         },
         "active_trades": [],
-        "log": [
-            f"AutoTrader enabled at {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}"
-        ],
+        "log": [f"AutoTrader enabled at {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}"],
     }
-    store.save_autotrader(req.user_id, session)
-    return {"ok": True, "message": "AutoTrader enabled. Sentinel AI will monitor and execute trades."}
+    store.save_autotrader(user_id, session)
+    return {"ok": True}
 
 
 @app.post("/api/brain/autotrader/disable")
-def autotrader_disable(req: AutoTraderDisableRequest, _: str = Security(verify_api_key)):
+def autotrader_disable(payload: dict = Body(default_factory=dict), _: str = Security(verify_api_key)):
     """Disable AutoTrader. Open positions remain unchanged on the exchange."""
-    session = store.load_autotrader(req.user_id)
+    user_id = payload.get("user_id") or payload.get("userId")
+    if not user_id:
+        return {"ok": True}
+
+    session = store.load_autotrader(user_id)
     if session:
         session["enabled"] = False
         session.setdefault("log", []).append(
             f"AutoTrader disabled at {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}"
         )
-        store.save_autotrader(req.user_id, session)
-    return {"ok": True, "message": "AutoTrader disabled. Open positions remain on your exchange."}
+        store.save_autotrader(user_id, session)
+    return {"ok": True}
 
 
 @app.post("/api/brain/autotrader/close")
-def autotrader_close(req: AutoTraderCloseRequest, _: str = Security(verify_api_key)):
+def autotrader_close(payload: dict = Body(default_factory=dict), _: str = Security(verify_api_key)):
     """
     Request market-close of a specific AutoTrader-managed trade.
     Removes the entry from the active trades list in the persisted session.
     """
-    session = store.load_autotrader(req.user_id)
+    user_id = payload.get("user_id") or payload.get("userId")
+    trade_id = payload.get("trade_id") or payload.get("tradeId")
+    if not user_id:
+        return {"ok": True}
+
+    session = store.load_autotrader(user_id)
     if not session:
-        raise HTTPException(404, detail="No AutoTrader session found for this user.")
-    before = len(session.get("active_trades", []))
+        return {"ok": True}
+
     session["active_trades"] = [
-        t for t in session.get("active_trades", []) if t.get("id") != req.trade_id
+        t for t in session.get("active_trades", []) if t.get("id") != trade_id
     ]
     session.setdefault("log", []).append(
-        f"Close requested for trade {req.trade_id} at {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}"
+        f"Close requested for trade {trade_id} at {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}"
     )
-    store.save_autotrader(req.user_id, session)
-    return {"ok": True, "removed": before - len(session["active_trades"])}
+    store.save_autotrader(user_id, session)
+    return {"ok": True}
