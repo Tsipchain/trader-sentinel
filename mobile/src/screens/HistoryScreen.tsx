@@ -43,7 +43,10 @@ export default function HistoryScreen() {
       await brainAPI.checkHealth();
       const serviceCheck = await brainAPI.checkServiceType();
       if (!serviceCheck.isBrain) {
-        console.warn('Brain service-type validation warning:', serviceCheck.reason || 'unknown');
+        console.warn(
+          `Brain service-type validation warning (${CONFIG.BRAIN_URL}):`,
+          serviceCheck.reason || 'unknown',
+        );
       }
 
       // Sync & train model
