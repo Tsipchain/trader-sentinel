@@ -39,8 +39,12 @@ export default function HistoryScreen() {
     }
     setSyncLoading(true);
     try {
-      // Preflight check to detect wrong Brain URL early.
+      // Preflight checks to detect wrong Brain deployment early.
       await brainAPI.checkHealth();
+      const serviceCheck = await brainAPI.checkServiceType();
+      if (!serviceCheck.isBrain) {
+        throw new Error(serviceCheck.reason || 'Configured BRAIN_URL is not a Sentinel Brain service');
+      }
 
       // Sync & train model
       const syncResult = await brainAPI.syncTrades({

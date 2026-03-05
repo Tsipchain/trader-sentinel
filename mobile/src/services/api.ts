@@ -330,6 +330,13 @@ export interface ExchangeAvailabilityFlag {
 
 
 
+
+export interface BrainServiceCheck {
+  ok: boolean;
+  isBrain: boolean;
+  reason?: string;
+  storage?: { disk_path?: string };
+}
 export interface BrainSubscriptionFingerprintResponse {
   ok: boolean;
   hash?: string;
@@ -360,6 +367,31 @@ export const brainAPI = {
   async checkHealth(): Promise<{ ok: boolean; ts?: number }> {
     const response = await brainGet('/health');
     return response;
+  },
+
+  async checkServiceType(): Promise<BrainServiceCheck> {
+    try {
+      const status = await brainGet<{ ok: boolean; disk_path?: string }>('/api/brain/storage/status');
+      if (status?.ok) {
+        return { ok: true, isBrain: true, storage: { disk_path: status.disk_path } };
+      }
+      return { ok: false, isBrain: false, reason: 'Brain storage endpoint returned unexpected payload' };
+    } catch (error) {
+      const err = error as AxiosError;
+      const code = err?.response?.status;
+      if (code === 404) {
+        return {
+          ok: false,
+          isBrain: false,
+          reason: 'Configured BRAIN_URL points to a non-Brain service (missing /api/brain/* routes).',
+        };
+      }
+      return {
+        ok: false,
+        isBrain: false,
+        reason: err?.message ?? 'Unable to validate Brain service type',
+      };
+    }
   },
 
   async predict(params: {
