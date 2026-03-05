@@ -9,6 +9,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { COLORS, SPACING, FONT_SIZES, BORDER_RADIUS, SHADOWS } from '../constants/theme';
 import { useStore } from '../store/useStore';
 import { brainAPI } from '../services/api';
+import CONFIG from '../config';
 import type { ActiveTrade } from '../services/api';
 
 const SYMBOL_OPTIONS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT'];
@@ -79,7 +80,10 @@ export default function AutoTraderScreen() {
     try {
       const serviceCheck = await brainAPI.checkServiceType();
       if (!serviceCheck.isBrain) {
-        console.warn('Brain service-type validation warning:', serviceCheck.reason || 'unknown');
+        console.warn(
+          `Brain service-type validation warning (${CONFIG.BRAIN_URL}):`,
+          serviceCheck.reason || 'unknown',
+        );
       }
 
       const res = await brainAPI.getExchangeSnapshot({
