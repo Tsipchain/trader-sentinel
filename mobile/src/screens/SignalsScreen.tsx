@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -36,6 +36,16 @@ export default function SignalsScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<SignalType>('all');
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const nextFetchAllowedAtRef = useRef(0);
+
+  const policy = SIGNAL_POLICY[subscription] ?? SIGNAL_POLICY.free;
+  const canUseAdvancedSignals = subscription !== 'free';
+
+  const hasRecentDuplicate = useCallback((idPrefix: string) => {
+    const now = Date.now();
+    const currentSignals = useStore.getState().signals;
+    return currentSignals.some((s) => s.id.startsWith(idPrefix) && now - s.timestamp < 10 * 60 * 1000);
+  }, []);
 
   const policy = SIGNAL_POLICY[subscription] ?? SIGNAL_POLICY.free;
   const canUseAdvancedSignals = subscription !== 'free';
@@ -46,6 +56,10 @@ export default function SignalsScreen() {
   }, [signals]);
 
   const fetchSignals = useCallback(async () => {
+    if (Date.now() < nextFetchAllowedAtRef.current) {
+      return;
+    }
+
     try {
       // Fetch arbitrage data for watchlist
       const results = await Promise.all(
@@ -124,7 +138,16 @@ export default function SignalsScreen() {
         });
       }
     } catch (error) {
-      console.error('Failed to fetch signals:', error);
+      const status = (error as any)?.response?.status;
+      if (status === 429) {
+        // Client-side backoff to avoid hammering upstream when rate-limited
+        nextFetchAllowedAtRef.current = Date.now() + 60_000;
+      }
+      if (status === 429 || (error as any)?.message === 'Network Error') {
+        console.warn('Signals fetch backoff:', status ?? 'network');
+      } else {
+        console.error('Failed to fetch signals:', error);
+      }
     }
   }, [watchlist, addSignal, settings.hapticFeedback, canUseAdvancedSignals, hasRecentDuplicate, policy.allowNewCoinSignals, policy.directionalLimit]);
 
