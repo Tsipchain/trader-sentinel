@@ -231,16 +231,31 @@ export default function SignalsScreen() {
   const inferTradePlan = useCallback((signal: Signal) => {
     const isShort = /short|defensive|bear/i.test(signal.message);
     const base = Math.abs(signal.profit ?? 1.2);
-    const entry = 'Market / nearest support-resistance retest';
+    const highVolatility = /critical|caution|warning|volatile|risk\s[7-9]|risk\s10/i.test(signal.message);
+    const liquidityTight = /limited|early listing|low liquidity|thin/i.test(signal.message);
+
+    const entry = highVolatility
+      ? 'Scale-in around key S/R zones (avoid full-size market entry)'
+      : 'Market / nearest support-resistance retest';
     const sl = `${(isShort ? base * 0.8 : base).toFixed(2)}%`;
     const tp1 = `${(base * 1.1).toFixed(2)}%`;
     const tp2 = `${(base * 1.8).toFixed(2)}%`;
+    const leverage = liquidityTight ? '1x-2x' : (highVolatility ? '2x-3x' : '3x-5x');
+    const validationWindow = highVolatility ? '15-45 min' : '30-120 min';
+
     return {
       side: isShort ? 'SHORT bias' : 'LONG bias',
       entry,
       sl,
       tp1,
       tp2,
+      leverage,
+      validationWindow,
+      note: liquidityTight
+        ? 'Lower leverage due to thinner liquidity / higher slippage risk.'
+        : (highVolatility
+          ? 'Reduce size and tighten execution because volatility is elevated.'
+          : 'Standard risk profile; re-check structure before adding size.'),
     };
   }, []);
 
@@ -443,6 +458,9 @@ export default function SignalsScreen() {
                         <Text style={styles.planLine}>SL: {plan.sl}</Text>
                         <Text style={styles.planLine}>TP1: {plan.tp1}</Text>
                         <Text style={styles.planLine}>TP2: {plan.tp2}</Text>
+                        <Text style={styles.planLine}>Leverage: {plan.leverage}</Text>
+                        <Text style={styles.planLine}>Validation window: {plan.validationWindow}</Text>
+                        <Text style={styles.planHint}>{plan.note}</Text>
                       </>
                     );
                   })()}
@@ -673,5 +691,11 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondary,
     fontSize: FONT_SIZES.sm,
     marginBottom: 2,
+  },
+  planHint: {
+    color: COLORS.textMuted,
+    fontSize: FONT_SIZES.xs,
+    marginTop: SPACING.xs,
+    lineHeight: 16,
   },
 });
