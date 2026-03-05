@@ -34,7 +34,7 @@ const SIGNAL_POLICY: Record<string, TierSignalPolicy> = {
 };
 
 export default function SignalsScreen() {
-  const { signals, addSignal, clearSignals, watchlist, settings, subscription } = useStore();
+  const { signals, addSignal, clearSignals, watchlist, settings, subscription, marketData } = useStore();
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<SignalType>('all');
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -113,22 +113,6 @@ export default function SignalsScreen() {
           const noVenue = !arb.best_bid_venue || !arb.best_ask_venue;
           if (listedVenue && noVenue) {
             addSignalWithFeedback({
-              id: `newcoin-${symbol}-${Date.now()}`,
-              type: 'opportunity',
-              symbol,
-              message: `${symbol} εμφανίζει περιορισμένη διαθεσιμότητα σε venues — πιθανό early listing edge.`,
-              timestamp: Date.now(),
-              venues: [listedVenue],
-            });
-          }
-        }
-
-        // Pro+ signal: πιθανή cross-exchange "listing / availability" ευκαιρία
-        if (tierPolicy.allowNewCoinSignals && !hasRecentDuplicate(`newcoin-${symbol}`)) {
-          const listedVenue = arb.best_bid_venue || arb.best_ask_venue;
-          const noVenue = !arb.best_bid_venue || !arb.best_ask_venue;
-          if (listedVenue && noVenue) {
-            addSignal({
               id: `newcoin-${symbol}-${Date.now()}`,
               type: 'opportunity',
               symbol,
@@ -253,18 +237,30 @@ export default function SignalsScreen() {
     const entry = highVolatility
       ? 'Scale-in around key S/R zones (avoid full-size market entry)'
       : 'Market / nearest support-resistance retest';
-    const sl = `${(isShort ? base * 0.8 : base).toFixed(2)}%`;
-    const tp1 = `${(base * 1.1).toFixed(2)}%`;
-    const tp2 = `${(base * 1.8).toFixed(2)}%`;
+    const sl = (isShort ? base * 0.8 : base);
+    const tp1 = (base * 1.1);
+    const tp2 = (base * 1.8);
     const leverage = liquidityTight ? '1x-2x' : (highVolatility ? '2x-3x' : '3x-5x');
     const validationWindow = highVolatility ? '15-45 min' : '30-120 min';
+
+    const symbolMarket = marketData[signal.symbol];
+    const refPrice = symbolMarket?.bestAsk || symbolMarket?.bestBid || symbolMarket?.prices?.[0]?.price;
+    const toAbsPrice = (pct: number) => {
+      if (!refPrice) return null;
+      const factor = pct / 100;
+      return isShort ? refPrice * (1 - factor) : refPrice * (1 + factor);
+    };
 
     return {
       side: isShort ? 'SHORT bias' : 'LONG bias',
       entry,
-      sl,
-      tp1,
-      tp2,
+      entryPrice: refPrice ? refPrice.toFixed(4) : 'N/A',
+      sl: `${sl.toFixed(2)}%`,
+      tp1: `${tp1.toFixed(2)}%`,
+      tp2: `${tp2.toFixed(2)}%`,
+      slPrice: toAbsPrice(sl),
+      tp1Price: toAbsPrice(tp1),
+      tp2Price: toAbsPrice(tp2),
       leverage,
       validationWindow,
       note: liquidityTight
@@ -273,7 +269,7 @@ export default function SignalsScreen() {
           ? 'Reduce size and tighten execution because volatility is elevated.'
           : 'Standard risk profile; re-check structure before adding size.'),
     };
-  }, []);
+  }, [marketData]);
 
   useEffect(() => {
     fetchSignals();
@@ -471,12 +467,14 @@ export default function SignalsScreen() {
                       <>
                         <Text style={styles.planTitle}>{plan.side}</Text>
                         <Text style={styles.planLine}>Entry: {plan.entry}</Text>
-                        <Text style={styles.planLine}>SL: {plan.sl}</Text>
-                        <Text style={styles.planLine}>TP1: {plan.tp1}</Text>
-                        <Text style={styles.planLine}>TP2: {plan.tp2}</Text>
+                        <Text style={styles.planLine}>Entry ref price: {plan.entryPrice}</Text>
+                        <Text style={styles.planLine}>SL: {plan.sl}{plan.slPrice ? ` (${plan.slPrice.toFixed(4)})` : ''}</Text>
+                        <Text style={styles.planLine}>TP1: {plan.tp1}{plan.tp1Price ? ` (${plan.tp1Price.toFixed(4)})` : ''}</Text>
+                        <Text style={styles.planLine}>TP2: {plan.tp2}{plan.tp2Price ? ` (${plan.tp2Price.toFixed(4)})` : ''}</Text>
                         <Text style={styles.planLine}>Leverage: {plan.leverage}</Text>
                         <Text style={styles.planLine}>Validation window: {plan.validationWindow}</Text>
                         <Text style={styles.planHint}>{plan.note}</Text>
+                        <Text style={styles.planHint}>Generated: {new Date(selectedSignal.timestamp).toLocaleString()}</Text>
                       </>
                     );
                   })()}

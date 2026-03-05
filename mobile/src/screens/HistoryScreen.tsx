@@ -95,7 +95,7 @@ export default function HistoryScreen() {
       if (status === 404) {
         Alert.alert(
           'Sync Failed',
-          `Brain endpoint not found (404). Confirm BRAIN_URL points to Sentinel Brain service.\nCurrent: ${CONFIG.BRAIN_URL}`,
+          `Brain route returned 404. Deploy latest sentinel-brain code and verify /api/brain/* routes exist.\nCurrent BRAIN_URL: ${CONFIG.BRAIN_URL}\nAlso verify DISK_PATH points to a writable mounted volume (e.g. /disk).`,
         );
       } else {
         Alert.alert('Sync Failed', detail ? `Could not sync with Brain. ${detail}` : 'Could not reach the Brain service. Check your API keys and try again.');
