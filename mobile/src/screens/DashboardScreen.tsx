@@ -27,7 +27,22 @@ interface PriceData {
   spread: number;
   bestBid: string;
   bestAsk: string;
+  best_bid: number;
+  best_ask: number;
 }
+
+
+const _toNumber = (value: unknown, fallback: number = 0): number => {
+  const num = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(num) ? num : fallback;
+};
+
+const _safePct = (numerator: number, denominator: number): number => {
+  if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator <= 0) {
+    return 0;
+  }
+  return (numerator / denominator) * 100;
+};
 
 export default function DashboardScreen() {
   const navigation = useNavigation<NavigationProp>();
@@ -42,19 +57,25 @@ export default function DashboardScreen() {
       const results = await Promise.all(
         watchlist.map(async (symbol) => {
           const arb = await marketAPI.getArbitrage(symbol);
+          const bestBid = _toNumber(arb.best_bid);
+          const bestAsk = _toNumber(arb.best_ask);
+          const spread = _toNumber(arb.spread);
+
           return {
-            symbol,
-            price: arb.best_bid,
-            change24h: 0,
-            spread: arb.spread,
-            bestBid: arb.best_bid_venue,
-            bestAsk: arb.best_ask_venue,
             ...arb,
+            symbol,
+            price: bestBid,
+            change24h: 0,
+            spread,
+            bestBid: arb.best_bid_venue || '-',
+            bestAsk: arb.best_ask_venue || '-',
+            best_bid: bestBid,
+            best_ask: bestAsk,
           };
         })
       );
       setPrices(results);
-      const opps = results.filter((r) => (r.spread / r.price) * 100 > 0.1);
+      const opps = results.filter((r) => _safePct(_toNumber(r.spread), _toNumber(r.price)) > 0.1);
       setArbitrageOpps(opps as any);
     } catch (error) {
       console.error('Failed to fetch data:', error);
@@ -227,7 +248,7 @@ export default function DashboardScreen() {
                   <View style={styles.arbProfit}>
                     <Ionicons name="trending-up" size={16} color={COLORS.success} />
                     <Text style={styles.arbProfitText}>
-                      {((opp.spread / opp.best_ask) * 100).toFixed(3)}%
+                      {_safePct(_toNumber(opp.spread), _toNumber(opp.best_ask)).toFixed(3)}%
                     </Text>
                   </View>
                 </View>
@@ -235,13 +256,13 @@ export default function DashboardScreen() {
                   <View style={styles.arbVenue}>
                     <Text style={styles.arbVenueLabel}>Buy on</Text>
                     <Text style={styles.arbVenueName}>{opp.best_ask_venue}</Text>
-                    <Text style={styles.arbPrice}>${opp.best_ask.toFixed(2)}</Text>
+                    <Text style={styles.arbPrice}>${_toNumber(opp.best_ask).toFixed(2)}</Text>
                   </View>
                   <Ionicons name="arrow-forward" size={20} color={COLORS.textMuted} />
                   <View style={styles.arbVenue}>
                     <Text style={styles.arbVenueLabel}>Sell on</Text>
                     <Text style={styles.arbVenueName}>{opp.best_bid_venue}</Text>
-                    <Text style={styles.arbPrice}>${opp.best_bid.toFixed(2)}</Text>
+                    <Text style={styles.arbPrice}>${_toNumber(opp.best_bid).toFixed(2)}</Text>
                   </View>
                 </View>
               </View>
