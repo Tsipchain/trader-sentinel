@@ -16,15 +16,33 @@ Score: 0.0 (calm/normal) → 10.0 (extreme — high RSI, high vol, at fib resist
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Optional
 
 import httpx
-import ccxt.async_support as ccxt
 
 log = logging.getLogger(__name__)
+
+
+_CCXT_MODULE = None
+
+
+def _ccxt_module():
+    global _CCXT_MODULE
+    if _CCXT_MODULE is False:
+        return None
+    if _CCXT_MODULE is None:
+        if importlib.util.find_spec("ccxt.async_support") is None:
+            log.warning("ccxt.async_support unavailable; technical OHLCV will use HTTP fallback where possible")
+            _CCXT_MODULE = False
+            return None
+        _CCXT_MODULE = importlib.import_module("ccxt.async_support")
+    return _CCXT_MODULE
 
 
 # ── Fibonacci retracement levels (standard: 0.236, 0.382, 0.5, 0.618, 0.786) ─
@@ -78,11 +96,16 @@ class TechnicalResult:
 
 
 _FALLBACK_EXCHANGES = ["binance", "bybit", "okx"]
+_BLOCKED_EXCHANGES_UNTIL: dict[str, float] = {}
+_BLOCK_SECONDS = 1800
 
 
 async def _fetch_ohlcv_from(exchange_id: str, symbol: str,
                              timeframe: str, limit: int) -> list[list]:
     """Try one exchange; return candles or raise."""
+    ccxt = _ccxt_module()
+    if ccxt is None:
+        raise ValueError("ccxt async module unavailable")
     ex_class = getattr(ccxt, exchange_id, None)
     if ex_class is None:
         raise ValueError(f"Unknown exchange: {exchange_id}")
@@ -127,11 +150,17 @@ async def _fetch_ohlcv(symbol: str, exchange_id: str = "binance",
     """
     order = [exchange_id] + [e for e in _FALLBACK_EXCHANGES if e != exchange_id]
     for ex_id in order:
+        blocked_until = _BLOCKED_EXCHANGES_UNTIL.get(ex_id, 0)
+        if blocked_until > time.time():
+            continue
         try:
             candles = await _fetch_ohlcv_from(ex_id, symbol, timeframe, limit)
             if candles:
                 return candles
         except Exception as exc:
+            if _is_geo_block(exc):
+                _BLOCKED_EXCHANGES_UNTIL[ex_id] = time.time() + _BLOCK_SECONDS
+                log.warning("OHLCV venue temporarily disabled for %ss due to geo block: %s", _BLOCK_SECONDS, ex_id)
             log.warning("OHLCV fetch failed on %s for %s: %s", ex_id, symbol, exc)
 
     # All CCXT paths failed — try direct OKX REST as last resort
@@ -165,6 +194,18 @@ def _rsi(closes: list[float], period: int = 14) -> float | None:
         return 100.0
     rs = avg_gain / avg_loss
     return round(100 - (100 / (1 + rs)), 2)
+
+
+def _is_geo_block(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    patterns = [
+        r"restricted location",
+        r"block access from your country",
+        r"cloudfront distribution is configured to block",
+        r"service unavailable from a restricted location",
+        r"\b451\b",
+    ]
+    return any(re.search(p, msg) for p in patterns)
 
 
 def _atr(candles: list[list], period: int = 14) -> float | None:
