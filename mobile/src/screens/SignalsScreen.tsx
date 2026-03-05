@@ -13,7 +13,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, SPACING, FONT_SIZES, BORDER_RADIUS } from '../constants/theme';
 import { useStore, Signal } from '../store/useStore';
-import { marketAPI, analystAPI, type AnalystBriefing } from '../services/api';
+import { marketAPI } from '../services/api';
 import * as Haptics from 'expo-haptics';
 import * as Notifications from 'expo-notifications';
 
@@ -42,7 +42,6 @@ export default function SignalsScreen() {
   const [modalRefPrice, setModalRefPrice] = useState<number | null>(null);
   const notificationReadyRef = useRef(false);
   const nextFetchAllowedAtRef = useRef(0);
-  const nextAnalystSignalAtRef = useRef(0);
 
   const tierPolicy = SIGNAL_POLICY[subscription] ?? SIGNAL_POLICY.free;
   const canUseAdvancedSignals = subscription !== 'free';
@@ -51,6 +50,11 @@ export default function SignalsScreen() {
     const now = Date.now();
     const currentSignals = useStore.getState().signals;
     return currentSignals.some((s) => s.id.startsWith(idPrefix) && now - s.timestamp < 10 * 60 * 1000);
+  }, []);
+
+  const hasAnySignalPrefix = useCallback((idPrefix: string) => {
+    const currentSignals = useStore.getState().signals;
+    return currentSignals.some((s) => s.id.startsWith(idPrefix));
   }, []);
 
   const maybeNotify = useCallback(async (signal: Signal) => {
@@ -130,7 +134,7 @@ export default function SignalsScreen() {
       if (!canUseAdvancedSignals && watchlist.length > 0) {
         const baseSymbol = watchlist[0];
         const prefix = `free-risk-${baseSymbol}`;
-        if (!hasRecentDuplicate(prefix)) {
+        if (!hasAnySignalPrefix(prefix)) {
           const risk = await marketAPI.getRiskReport(baseSymbol);
           const lowRisk = risk.composite_score <= 5.5;
           addSignalWithFeedback({
@@ -146,29 +150,6 @@ export default function SignalsScreen() {
         }
       }
 
-      // Analyst pattern signal (throttled) to surface potential market patterns.
-      if (Date.now() >= nextAnalystSignalAtRef.current) {
-        const analyst = await analystAPI.getBriefing();
-        if ((analyst as AnalystBriefing).briefing) {
-          const text = (analyst as AnalystBriefing).briefing;
-          const lower = text.toLowerCase();
-          const trend = lower.includes('accum') || lower.includes('bull') || lower.includes('long')
-            ? 'LONG/ACCUMULATE'
-            : (lower.includes('distribution') || lower.includes('bear') || lower.includes('short') ? 'SHORT/DEFENSIVE' : 'NEUTRAL');
-          const prefix = `analyst-pattern-${trend}`;
-          if (!hasRecentDuplicate(prefix)) {
-            addSignalWithFeedback({
-              id: `${prefix}-${Date.now()}`,
-              type: trend === 'SHORT/DEFENSIVE' ? 'alert' : 'opportunity',
-              symbol: watchlist[0] ?? 'BTC/USDT',
-              message: `Analyst pattern: ${trend} bias — ${text.slice(0, 160)}${text.length > 160 ? '…' : ''}`,
-              timestamp: Date.now(),
-              venues: ['sentinel-analyst'],
-            });
-          }
-          nextAnalystSignalAtRef.current = Date.now() + 10 * 60 * 1000;
-        }
-      }
       // Pro+ directional signals from composite risk framework
       if (canUseAdvancedSignals) {
         const directionalSymbols = watchlist.slice(0, tierPolicy.directionalLimit);
@@ -227,7 +208,7 @@ export default function SignalsScreen() {
         console.warn('Signals fetch failed:', (error as any)?.message ?? 'unknown error');
       }
     }
-  }, [watchlist, addSignalWithFeedback, canUseAdvancedSignals, hasRecentDuplicate, tierPolicy.allowNewCoinSignals, tierPolicy.directionalLimit]);
+  }, [watchlist, addSignalWithFeedback, canUseAdvancedSignals, hasRecentDuplicate, hasAnySignalPrefix, tierPolicy.allowNewCoinSignals, tierPolicy.directionalLimit]);
 
 
   useEffect(() => {
@@ -278,9 +259,12 @@ export default function SignalsScreen() {
 
     const symbolMarket = marketData[signal.symbol];
     const refPrice = modalRefPrice || symbolMarket?.bestAsk || symbolMarket?.bestBid || symbolMarket?.prices?.[0]?.price;
-    const toAbsPrice = (pct: number) => {
+    const toAbsPrice = (pct: number, target: 'sl' | 'tp') => {
       if (!refPrice) return null;
       const factor = pct / 100;
+      if (target === 'sl') {
+        return isShort ? refPrice * (1 + factor) : refPrice * (1 - factor);
+      }
       return isShort ? refPrice * (1 - factor) : refPrice * (1 + factor);
     };
 
@@ -291,9 +275,9 @@ export default function SignalsScreen() {
       sl: `${sl.toFixed(2)}%`,
       tp1: `${tp1.toFixed(2)}%`,
       tp2: `${tp2.toFixed(2)}%`,
-      slPrice: toAbsPrice(sl),
-      tp1Price: toAbsPrice(tp1),
-      tp2Price: toAbsPrice(tp2),
+      slPrice: toAbsPrice(sl, 'sl'),
+      tp1Price: toAbsPrice(tp1, 'tp'),
+      tp2Price: toAbsPrice(tp2, 'tp'),
       leverage,
       validationWindow,
       note: liquidityTight
