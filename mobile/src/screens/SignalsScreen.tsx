@@ -39,6 +39,7 @@ export default function SignalsScreen() {
   const [filter, setFilter] = useState<SignalType>('all');
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [selectedSignal, setSelectedSignal] = useState<Signal | null>(null);
+  const [modalRefPrice, setModalRefPrice] = useState<number | null>(null);
   const notificationReadyRef = useRef(false);
   const nextFetchAllowedAtRef = useRef(0);
   const nextAnalystSignalAtRef = useRef(0);
@@ -228,6 +229,38 @@ export default function SignalsScreen() {
     }
   }, [watchlist, addSignalWithFeedback, canUseAdvancedSignals, hasRecentDuplicate, tierPolicy.allowNewCoinSignals, tierPolicy.directionalLimit]);
 
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadModalRefPrice = async () => {
+      if (!selectedSignal) {
+        setModalRefPrice(null);
+        return;
+      }
+
+      const cached = marketData[selectedSignal.symbol];
+      const cachedRef = cached?.bestAsk || cached?.bestBid || cached?.prices?.[0]?.price || null;
+      if (cachedRef) {
+        setModalRefPrice(cachedRef);
+        return;
+      }
+
+      try {
+        const snapshot = await marketAPI.getSnapshot(selectedSignal.symbol);
+        const fresh = snapshot.venues.find((v) => v.last !== null)?.last ?? null;
+        if (!cancelled) setModalRefPrice(fresh);
+      } catch {
+        if (!cancelled) setModalRefPrice(null);
+      }
+    };
+
+    loadModalRefPrice();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedSignal, marketData]);
+
   const inferTradePlan = useCallback((signal: Signal) => {
     const isShort = /short|defensive|bear/i.test(signal.message);
     const base = Math.abs(signal.profit ?? 1.2);
@@ -244,7 +277,7 @@ export default function SignalsScreen() {
     const validationWindow = highVolatility ? '15-45 min' : '30-120 min';
 
     const symbolMarket = marketData[signal.symbol];
-    const refPrice = symbolMarket?.bestAsk || symbolMarket?.bestBid || symbolMarket?.prices?.[0]?.price;
+    const refPrice = modalRefPrice || symbolMarket?.bestAsk || symbolMarket?.bestBid || symbolMarket?.prices?.[0]?.price;
     const toAbsPrice = (pct: number) => {
       if (!refPrice) return null;
       const factor = pct / 100;
@@ -269,7 +302,7 @@ export default function SignalsScreen() {
           ? 'Reduce size and tighten execution because volatility is elevated.'
           : 'Standard risk profile; re-check structure before adding size.'),
     };
-  }, [marketData]);
+  }, [marketData, modalRefPrice]);
 
   useEffect(() => {
     fetchSignals();
