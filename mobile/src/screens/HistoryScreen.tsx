@@ -51,17 +51,10 @@ export default function HistoryScreen() {
             `Brain service-type validation warning (${CONFIG.BRAIN_URL}):`,
             reason,
           );
-          Alert.alert(
-            'Brain Service Misconfigured',
-            `BRAIN_URL is not a Sentinel Brain service.
-
-URL: ${CONFIG.BRAIN_URL}
-Reason: ${reason}
-
-Expected routes: /api/brain/sync and /api/brain/history`,
-          );
         }
-        return;
+        // Do not hard-block here: continue and let the sync endpoint result decide.
+      } else {
+        hasShownBrainMisconfigAlert.current = false;
       }
       hasShownBrainMisconfigAlert.current = false;
 

@@ -88,17 +88,10 @@ export default function AutoTraderScreen() {
             `Brain service-type validation warning (${CONFIG.BRAIN_URL}):`,
             reason,
           );
-          Alert.alert(
-            'Brain Service Misconfigured',
-            `BRAIN_URL is not a Sentinel Brain service.
-
-URL: ${CONFIG.BRAIN_URL}
-Reason: ${reason}
-
-Expected routes: /api/brain/exchange/availability and /api/brain/exchange/snapshot`,
-          );
         }
-        return false;
+        // Do not hard-block here: continue and let real API call/fallback decide.
+      } else {
+        hasShownBrainMisconfigAlert.current = false;
       }
       hasShownBrainMisconfigAlert.current = false;
 
