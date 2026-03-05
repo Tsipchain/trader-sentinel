@@ -93,6 +93,7 @@ export default function AutoTraderScreen() {
       } else {
         hasShownBrainMisconfigAlert.current = false;
       }
+      hasShownBrainMisconfigAlert.current = false;
 
       const res = await brainAPI.getExchangeSnapshot({
         exchange: cfg.exchange,

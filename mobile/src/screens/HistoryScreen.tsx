@@ -63,6 +63,7 @@ export default function HistoryScreen() {
       } else {
         hasShownBrainMisconfigAlert.current = false;
       }
+      hasShownBrainMisconfigAlert.current = false;
 
       // Sync & train model
       const syncResult = await brainAPI.syncTrades({
