@@ -36,10 +36,28 @@ const WALLET_OPTIONS: WalletOption[] = [
   { id: 'phantom', name: 'Phantom (Solana)', icon: 'flash', color: '#AB9FF2' },
 ];
 
+const _mockAddressFromWallet = (walletId: string): string => {
+  // Deterministic demo-only address so testers keep the same identity across reconnects.
+  let hash = 0x811c9dc5;
+  const seed = `trader-sentinel-demo:${walletId.toLowerCase()}`;
+  for (let i = 0; i < seed.length; i += 1) {
+    hash ^= seed.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+
+  let hex = '';
+  for (let i = 0; i < 5; i += 1) {
+    const part = (Math.imul(hash ^ (i * 0x9e3779b1), 0x85ebca6b) >>> 0).toString(16).padStart(8, '0');
+    hex += part;
+  }
+
+  return `0x${hex.slice(0, 40)}`;
+};
+
 export default function ConnectWalletScreen() {
   const navigation = useNavigation<NavigationProp>();
   const [connecting, setConnecting] = useState<string | null>(null);
-  const { setWallet, setUser } = useStore();
+  const { setWallet, setUser, wallet, user } = useStore();
 
   const handleConnect = async (walletId: string) => {
     setConnecting(walletId);
@@ -49,24 +67,24 @@ export default function ConnectWalletScreen() {
       // In production, this would use WalletConnect or native wallet SDKs
       await new Promise((resolve) => setTimeout(resolve, 2000));
 
-      // Mock connected wallet data
-      const mockAddress = '0x' + Math.random().toString(16).slice(2, 42);
+      // Demo wallet connection (deterministic mock until WalletConnect SDK integration is added).
+      const mockAddress = wallet.address ?? user?.walletAddress ?? _mockAddressFromWallet(walletId);
 
       setWallet({
         isConnected: true,
         address: mockAddress,
         chainId: 1,
-        balance: '0.5',
+        balance: wallet.balance || '0.5',
       });
 
       setUser({
-        id: mockAddress,
+        id: user?.id || mockAddress,
         walletAddress: mockAddress,
-        subscription: 'free',
-        thronosBalance: 0,
-        rewardsBalance: 0,
-        referralCode: mockAddress.slice(0, 8).toUpperCase(),
-        createdAt: new Date().toISOString(),
+        subscription: user?.subscription || 'free',
+        thronosBalance: user?.thronosBalance || 0,
+        rewardsBalance: user?.rewardsBalance || 0,
+        referralCode: user?.referralCode || mockAddress.slice(2, 10).toUpperCase(),
+        createdAt: user?.createdAt || new Date().toISOString(),
       });
 
       // Navigate to main app
@@ -104,6 +122,9 @@ export default function ConnectWalletScreen() {
           <Text style={styles.descTitle}>Choose your wallet</Text>
           <Text style={styles.descText}>
             Connect your wallet to access Trader Sentinel and start earning Thronos rewards
+          </Text>
+          <Text style={styles.descNote}>
+            Demo build: wallet connection is simulated (no real on-chain transaction signing yet).
           </Text>
         </View>
 
@@ -227,6 +248,12 @@ const styles = StyleSheet.create({
     fontSize: FONT_SIZES.md,
     color: COLORS.textSecondary,
     lineHeight: 22,
+  },
+  descNote: {
+    marginTop: SPACING.xs,
+    fontSize: FONT_SIZES.sm,
+    color: COLORS.warning,
+    lineHeight: 18,
   },
   walletList: {
     flex: 1,
