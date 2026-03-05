@@ -9,7 +9,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Query, Security
+from fastapi import FastAPI, Query, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
 from starlette.status import HTTP_403_FORBIDDEN
@@ -71,7 +71,7 @@ async def briefing(_: str = Security(verify_api_key)):
     """
     ctx = _ctx.latest()
     if not ctx:
-        raise HTTPException(503, detail="Context not ready — backend poll pending")
+        return {"ok": False, "warming_up": True, "retry_s": 15}
     return await get_briefing(ctx)
 
 
@@ -83,7 +83,7 @@ async def ask(q: str = Query(..., description="Natural-language question about c
     """
     ctx = _ctx.latest()
     if not ctx:
-        raise HTTPException(503, detail="Context not ready — backend poll pending")
+        return {"ok": False, "warming_up": True, "retry_s": 15}
     return await ask_analyst(ctx, q)
 
 

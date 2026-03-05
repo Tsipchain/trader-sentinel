@@ -9,12 +9,13 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { COLORS, SPACING, FONT_SIZES, BORDER_RADIUS, SHADOWS } from '../constants/theme';
 import { useStore } from '../store/useStore';
 import { brainAPI, analystAPI } from '../services/api';
+import CONFIG from '../config';
 import type { TradeRecord } from '../services/api';
 
 const EXCHANGE_OPTIONS = ['binance', 'bybit', 'okx', 'mexc'];
 
 export default function HistoryScreen() {
-  const { user, tradeHistory, setTradeHistory, autoTrader } = useStore();
+  const { user, tradeHistory, setTradeHistory, autoTrader, subscription } = useStore();
 
   const [syncLoading, setSyncLoading] = useState(false);
   const [analysisLoading, setAnalysisLoading] = useState(false);
@@ -38,6 +39,13 @@ export default function HistoryScreen() {
     }
     setSyncLoading(true);
     try {
+      // Preflight checks to detect wrong Brain deployment early.
+      await brainAPI.checkHealth();
+      const serviceCheck = await brainAPI.checkServiceType();
+      if (!serviceCheck.isBrain) {
+        console.warn('Brain service-type validation warning:', serviceCheck.reason || 'unknown');
+      }
+
       // Sync & train model
       const syncResult = await brainAPI.syncTrades({
         user_id: user.id,
@@ -67,18 +75,35 @@ export default function HistoryScreen() {
         lastSynced: new Date().toISOString(),
       });
 
+      // Persist subscription fingerprint for lifecycle analytics (best effort).
+      await brainAPI.registerSubscription({
+        user_id: user.id,
+        tier: subscription,
+        source: 'mobile-history-sync',
+        wallet_address: user.walletAddress ?? '',
+      }).catch(() => {});
+
       Alert.alert(
         'Sync Complete',
         syncResult.trade_count
           ? `${syncResult.trade_count} trades synced. Model accuracy: ${((syncResult.model_accuracy ?? 0) * 100).toFixed(1)}%`
           : 'Trade history updated.',
       );
-    } catch (err) {
-      Alert.alert('Sync Failed', 'Could not reach the Brain service. Check your API keys and try again.');
+    } catch (err: any) {
+      const status = err?.response?.status;
+      const detail = err?.response?.data?.detail || err?.response?.data?.message || err?.message;
+      if (status === 404) {
+        Alert.alert(
+          'Sync Failed',
+          `Brain route returned 404. Deploy latest sentinel-brain code and verify /api/brain/* routes exist.\nCurrent BRAIN_URL: ${CONFIG.BRAIN_URL}\nAlso verify DISK_PATH points to a writable mounted volume (e.g. /disk).`,
+        );
+      } else {
+        Alert.alert('Sync Failed', detail ? `Could not sync with Brain. ${detail}` : 'Could not reach the Brain service. Check your API keys and try again.');
+      }
     } finally {
       setSyncLoading(false);
     }
-  }, [user?.id, exchange, apiKey, apiSecret]);
+  }, [user?.id, user?.walletAddress, exchange, apiKey, apiSecret, subscription]);
 
   const handleAnalyze = useCallback(async () => {
     if (!stats) {
@@ -95,13 +120,27 @@ export default function HistoryScreen() {
         `Identify 3 specific weaknesses in this strategy and give concrete improvement suggestions in 5 sentences max.`;
 
       const result = await analystAPI.ask(prompt);
-      setTradeHistory({ aiAnalysis: result.answer });
+      const advice = result.answer ?? '';
+      setTradeHistory({ aiAnalysis: advice });
+
+      // Persist strategy analysis snapshot in Brain for historical comparisons (best effort).
+      await brainAPI.saveAnalysisSnapshot({
+        user_id: user?.id ?? 'anonymous',
+        kind: 'strategy_advice',
+        symbol: stats.most_traded_symbol || 'BTC/USDT',
+        content: {
+          prompt,
+          advice,
+          stats,
+          generated_at: new Date().toISOString(),
+        },
+      }).catch(() => {});
     } catch {
       Alert.alert('Analysis Failed', 'Could not reach the AI analyst. Try again.');
     } finally {
       setAnalysisLoading(false);
     }
-  }, [stats]);
+  }, [stats, user?.id]);
 
   const winRate = stats ? (stats.win_rate * 100).toFixed(1) : '–';
   const totalPnl = stats?.total_pnl_usd ?? null;

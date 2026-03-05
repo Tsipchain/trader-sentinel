@@ -1,12 +1,29 @@
 import asyncio
 import logging
+import re
 import time
 from dataclasses import dataclass
 
+import importlib
+import importlib.util
 import httpx
-import ccxt.async_support as ccxt
 
 log = logging.getLogger(__name__)
+
+_CCXT_MODULE = None
+
+
+def _ccxt_module():
+    global _CCXT_MODULE
+    if _CCXT_MODULE is False:
+        return None
+    if _CCXT_MODULE is None:
+        if importlib.util.find_spec("ccxt.async_support") is None:
+            log.warning("ccxt.async_support unavailable; CEXProvider will run with empty CEX set")
+            _CCXT_MODULE = False
+            return None
+        _CCXT_MODULE = importlib.import_module("ccxt.async_support")
+    return _CCXT_MODULE
 
 
 @dataclass
@@ -29,10 +46,16 @@ class CEXProvider:
     def __init__(self, venues: list[str], min_interval_ms: int = 600):
         self.venues = [v.strip().lower() for v in venues if v.strip()]
         self.min_interval_ms = max(0, int(min_interval_ms))
-        self._exchanges: dict[str, ccxt.Exchange] = {}
+        self._exchanges: dict[str, object] = {}
         self._last_fetch_ms: dict[str, int] = {}
+        self._disabled_reason: dict[str, str] = {}
 
     async def start(self):
+        ccxt = _ccxt_module()
+        if ccxt is None:
+            self._exchanges = {}
+            return
+
         for v in self.venues:
             if v in self._exchanges:
                 continue
@@ -63,6 +86,9 @@ class CEXProvider:
 
     async def fetch_ticker(self, venue: str, symbol: str) -> VenueTick:
         ts = int(time.time())
+        if venue in self._disabled_reason:
+            return VenueTick(venue=venue, kind="cex", last=None, bid=None, ask=None, ts=ts)
+
         ex = self._exchanges.get(venue)
         if not ex:
             return VenueTick(venue=venue, kind="cex", last=None, bid=None, ask=None, ts=ts)
@@ -76,6 +102,16 @@ class CEXProvider:
             ask = _to_float(t.get("ask"))
             return VenueTick(venue=venue, kind="cex", last=last, bid=bid, ask=ask, ts=ts)
         except Exception as exc:
+            if _is_geo_block(exc):
+                reason = str(exc)
+                self._disabled_reason[venue] = reason[:200]
+                try:
+                    await ex.close()
+                except Exception:
+                    pass
+                self._exchanges.pop(venue, None)
+                log.warning("CEX venue disabled due to geo block: %s (%s)", venue, self._disabled_reason[venue])
+                return VenueTick(venue=venue, kind="cex", last=None, bid=None, ask=None, ts=ts)
             log.warning("CCXT ticker failed for %s/%s: %s", venue, symbol, exc)
 
         # CCXT failed — try OKX REST directly (geo-robust)
@@ -120,3 +156,15 @@ def _to_float(x):
         return float(x)
     except Exception:
         return None
+
+
+def _is_geo_block(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    patterns = [
+        r"restricted location",
+        r"block access from your country",
+        r"cloudfront distribution is configured to block",
+        r"service unavailable from a restricted location",
+        r"\b451\b",
+    ]
+    return any(re.search(p, msg) for p in patterns)
