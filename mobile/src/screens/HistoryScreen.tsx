@@ -15,7 +15,7 @@ import type { TradeRecord } from '../services/api';
 const EXCHANGE_OPTIONS = ['binance', 'bybit', 'okx', 'mexc'];
 
 export default function HistoryScreen() {
-  const { user, tradeHistory, setTradeHistory, autoTrader } = useStore();
+  const { user, tradeHistory, setTradeHistory, autoTrader, subscription } = useStore();
 
   const [syncLoading, setSyncLoading] = useState(false);
   const [analysisLoading, setAnalysisLoading] = useState(false);
@@ -39,8 +39,12 @@ export default function HistoryScreen() {
     }
     setSyncLoading(true);
     try {
-      // Preflight check to detect wrong Brain URL early.
+      // Preflight checks to detect wrong Brain deployment early.
       await brainAPI.checkHealth();
+      const serviceCheck = await brainAPI.checkServiceType();
+      if (!serviceCheck.isBrain) {
+        throw new Error(serviceCheck.reason || 'Configured BRAIN_URL is not a Sentinel Brain service');
+      }
 
       // Sync & train model
       const syncResult = await brainAPI.syncTrades({
@@ -71,6 +75,14 @@ export default function HistoryScreen() {
         lastSynced: new Date().toISOString(),
       });
 
+      // Persist subscription fingerprint for lifecycle analytics (best effort).
+      await brainAPI.registerSubscription({
+        user_id: user.id,
+        tier: subscription,
+        source: 'mobile-history-sync',
+        wallet_address: user.walletAddress ?? '',
+      }).catch(() => {});
+
       Alert.alert(
         'Sync Complete',
         syncResult.trade_count
@@ -91,7 +103,7 @@ export default function HistoryScreen() {
     } finally {
       setSyncLoading(false);
     }
-  }, [user?.id, exchange, apiKey, apiSecret]);
+  }, [user?.id, user?.walletAddress, exchange, apiKey, apiSecret, subscription]);
 
   const handleAnalyze = useCallback(async () => {
     if (!stats) {
@@ -108,13 +120,27 @@ export default function HistoryScreen() {
         `Identify 3 specific weaknesses in this strategy and give concrete improvement suggestions in 5 sentences max.`;
 
       const result = await analystAPI.ask(prompt);
-      setTradeHistory({ aiAnalysis: result.answer });
+      const advice = result.answer ?? '';
+      setTradeHistory({ aiAnalysis: advice });
+
+      // Persist strategy analysis snapshot in Brain for historical comparisons (best effort).
+      await brainAPI.saveAnalysisSnapshot({
+        user_id: user?.id ?? 'anonymous',
+        kind: 'strategy_advice',
+        symbol: stats.most_traded_symbol || 'BTC/USDT',
+        content: {
+          prompt,
+          advice,
+          stats,
+          generated_at: new Date().toISOString(),
+        },
+      }).catch(() => {});
     } catch {
       Alert.alert('Analysis Failed', 'Could not reach the AI analyst. Try again.');
     } finally {
       setAnalysisLoading(false);
     }
-  }, [stats]);
+  }, [stats, user?.id]);
 
   const winRate = stats ? (stats.win_rate * 100).toFixed(1) : '–';
   const totalPnl = stats?.total_pnl_usd ?? null;

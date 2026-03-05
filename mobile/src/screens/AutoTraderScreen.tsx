@@ -77,6 +77,12 @@ export default function AutoTraderScreen() {
 
     setSyncingPortfolio(true);
     try {
+      const serviceCheck = await brainAPI.checkServiceType();
+      if (!serviceCheck.isBrain) {
+        Alert.alert('Sync Failed', serviceCheck.reason || 'Configured BRAIN_URL is not a Sentinel Brain service');
+        return false;
+      }
+
       const res = await brainAPI.getExchangeSnapshot({
         exchange: cfg.exchange,
         apiKey: cfg.apiKey,

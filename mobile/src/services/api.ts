@@ -328,6 +328,23 @@ export interface ExchangeAvailabilityFlag {
   reason?: string;
 }
 
+
+
+
+export interface BrainServiceCheck {
+  ok: boolean;
+  isBrain: boolean;
+  reason?: string;
+  storage?: { disk_path?: string };
+}
+export interface BrainSubscriptionFingerprintResponse {
+  ok: boolean;
+  hash?: string;
+}
+
+export interface BrainAnalysisSnapshotResponse {
+  ok: boolean;
+}
 export interface PortfolioSnapshot {
   equity: number;
   balances: Array<{ asset: string; total: number; free: number; used: number }>;
@@ -348,8 +365,33 @@ export interface PortfolioSnapshot {
 
 export const brainAPI = {
   async checkHealth(): Promise<{ ok: boolean; ts?: number }> {
-    const response = await brainApi.get('/health');
-    return response.data;
+    const response = await brainGet('/health');
+    return response;
+  },
+
+  async checkServiceType(): Promise<BrainServiceCheck> {
+    try {
+      const status = await brainGet<{ ok: boolean; disk_path?: string }>('/api/brain/storage/status');
+      if (status?.ok) {
+        return { ok: true, isBrain: true, storage: { disk_path: status.disk_path } };
+      }
+      return { ok: false, isBrain: false, reason: 'Brain storage endpoint returned unexpected payload' };
+    } catch (error) {
+      const err = error as AxiosError;
+      const code = err?.response?.status;
+      if (code === 404) {
+        return {
+          ok: false,
+          isBrain: false,
+          reason: 'Configured BRAIN_URL points to a non-Brain service (missing /api/brain/* routes).',
+        };
+      }
+      return {
+        ok: false,
+        isBrain: false,
+        reason: err?.message ?? 'Unable to validate Brain service type',
+      };
+    }
   },
 
   async predict(params: {
@@ -421,8 +463,29 @@ export const brainAPI = {
   },
 
   async getExchangeAvailability(): Promise<{ ok: boolean; exchanges: Record<string, ExchangeAvailabilityFlag> }> {
-    const response = await brainApi.get('/api/brain/exchange/availability');
-    return response.data;
+    const response = await brainGet('/api/brain/exchange/availability');
+    return response;
+  },
+
+
+  async registerSubscription(params: {
+    user_id: string;
+    tier: string;
+    source?: string;
+    wallet_address?: string;
+  }): Promise<BrainSubscriptionFingerprintResponse> {
+    const response = await brainPost('/api/brain/subscription/register', params);
+    return response;
+  },
+
+  async saveAnalysisSnapshot(params: {
+    user_id: string;
+    kind: string;
+    content: Record<string, unknown>;
+    symbol?: string;
+  }): Promise<BrainAnalysisSnapshotResponse> {
+    const response = await brainPost('/api/brain/analysis/snapshot', params);
+    return response;
   },
 
   async getExchangeSnapshot(params: {
@@ -437,7 +500,7 @@ export const brainAPI = {
       api_secret: params.apiSecret,
       passphrase: params.passphrase,
     });
-    return response.data;
+    return response;
   },
 
 };
