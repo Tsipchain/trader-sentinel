@@ -13,7 +13,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, SPACING, FONT_SIZES, BORDER_RADIUS } from '../constants/theme';
 import { useStore, Signal } from '../store/useStore';
-import { marketAPI } from '../services/api';
+import { marketAPI, brainAPI } from '../services/api';
 import * as Haptics from 'expo-haptics';
 import * as Notifications from 'expo-notifications';
 
@@ -34,7 +34,7 @@ const SIGNAL_POLICY: Record<string, TierSignalPolicy> = {
 };
 
 export default function SignalsScreen() {
-  const { signals, addSignal, clearSignals, watchlist, settings, subscription, marketData } = useStore();
+  const { signals, addSignal, clearSignals, watchlist, settings, subscription, marketData, user } = useStore();
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<SignalType>('all');
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -87,7 +87,20 @@ export default function SignalsScreen() {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     }
     maybeNotify(signal);
-  }, [addSignal, maybeNotify, settings.hapticFeedback]);
+
+    if (subscription !== 'free' && user?.id) {
+      brainAPI.publishTelegramSignal({
+        user_id: user.id,
+        tier: subscription,
+        signal_type: signal.type,
+        symbol: signal.symbol,
+        message: signal.message,
+        timestamp: signal.timestamp,
+      }).catch(() => {
+        // best-effort relay; in-app signals should continue even if Telegram is down
+      });
+    }
+  }, [addSignal, maybeNotify, settings.hapticFeedback, subscription, user?.id]);
 
   const fetchSignals = useCallback(async () => {
     if (Date.now() < nextFetchAllowedAtRef.current) {
