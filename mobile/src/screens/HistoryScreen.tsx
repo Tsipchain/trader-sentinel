@@ -9,6 +9,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { COLORS, SPACING, FONT_SIZES, BORDER_RADIUS, SHADOWS } from '../constants/theme';
 import { useStore } from '../store/useStore';
 import { brainAPI, analystAPI } from '../services/api';
+import CONFIG from '../config';
 import type { TradeRecord } from '../services/api';
 
 const EXCHANGE_OPTIONS = ['binance', 'bybit', 'okx', 'mexc'];
@@ -38,6 +39,9 @@ export default function HistoryScreen() {
     }
     setSyncLoading(true);
     try {
+      // Preflight check to detect wrong Brain URL early.
+      await brainAPI.checkHealth();
+
       // Sync & train model
       const syncResult = await brainAPI.syncTrades({
         user_id: user.id,
@@ -73,8 +77,17 @@ export default function HistoryScreen() {
           ? `${syncResult.trade_count} trades synced. Model accuracy: ${((syncResult.model_accuracy ?? 0) * 100).toFixed(1)}%`
           : 'Trade history updated.',
       );
-    } catch (err) {
-      Alert.alert('Sync Failed', 'Could not reach the Brain service. Check your API keys and try again.');
+    } catch (err: any) {
+      const status = err?.response?.status;
+      const detail = err?.response?.data?.detail || err?.response?.data?.message || err?.message;
+      if (status === 404) {
+        Alert.alert(
+          'Sync Failed',
+          `Brain endpoint not found (404). Confirm BRAIN_URL points to Sentinel Brain service.\nCurrent: ${CONFIG.BRAIN_URL}`,
+        );
+      } else {
+        Alert.alert('Sync Failed', detail ? `Could not sync with Brain. ${detail}` : 'Could not reach the Brain service. Check your API keys and try again.');
+      }
     } finally {
       setSyncLoading(false);
     }

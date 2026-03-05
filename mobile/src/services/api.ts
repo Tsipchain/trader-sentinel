@@ -315,6 +315,11 @@ export interface PortfolioSnapshot {
 }
 
 export const brainAPI = {
+  async checkHealth(): Promise<{ ok: boolean; ts?: number }> {
+    const response = await brainApi.get('/health');
+    return response.data;
+  },
+
   async predict(params: {
     user_id: string;
     rsi: number;
