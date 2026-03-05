@@ -131,14 +131,19 @@ export default function SignalsScreen() {
       }
     } catch (error) {
       const status = (error as any)?.response?.status;
+      const isNetworkError = (error as any)?.message === 'Network Error';
       if (status === 429) {
         // Client-side backoff to avoid hammering upstream when rate-limited
         nextFetchAllowedAtRef.current = Date.now() + 60_000;
+      } else if (isNetworkError) {
+        // transient network issue: short cooldown to avoid retry storms
+        nextFetchAllowedAtRef.current = Date.now() + 15_000;
       }
-      if (status === 429 || (error as any)?.message === 'Network Error') {
+
+      if (status === 429 || isNetworkError) {
         console.warn('Signals fetch backoff:', status ?? 'network');
       } else {
-        console.error('Failed to fetch signals:', error);
+        console.warn('Signals fetch failed:', (error as any)?.message ?? 'unknown error');
       }
     }
   }, [watchlist, addSignal, settings.hapticFeedback, canUseAdvancedSignals, hasRecentDuplicate, tierPolicy.allowNewCoinSignals, tierPolicy.directionalLimit]);
