@@ -122,6 +122,22 @@ export default function SignalsScreen() {
             });
           }
         }
+
+        // Pro+ signal: πιθανή cross-exchange "listing / availability" ευκαιρία
+        if (tierPolicy.allowNewCoinSignals && !hasRecentDuplicate(`newcoin-${symbol}`)) {
+          const listedVenue = arb.best_bid_venue || arb.best_ask_venue;
+          const noVenue = !arb.best_bid_venue || !arb.best_ask_venue;
+          if (listedVenue && noVenue) {
+            addSignal({
+              id: `newcoin-${symbol}-${Date.now()}`,
+              type: 'opportunity',
+              symbol,
+              message: `${symbol} εμφανίζει περιορισμένη διαθεσιμότητα σε venues — πιθανό early listing edge.`,
+              timestamp: Date.now(),
+              venues: [listedVenue],
+            });
+          }
+        }
       });
 
 
