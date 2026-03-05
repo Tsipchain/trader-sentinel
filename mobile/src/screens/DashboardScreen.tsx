@@ -300,7 +300,7 @@ export default function DashboardScreen() {
                 </Text>
               </View>
               <View style={styles.watchlistRight}>
-                <Text style={styles.watchlistPrice}>${item.price.toLocaleString()}</Text>
+                <Text style={styles.watchlistPrice}>${_toNumber(item.price).toLocaleString()}</Text>
                 <Text
                   style={[
                     styles.watchlistChange,
