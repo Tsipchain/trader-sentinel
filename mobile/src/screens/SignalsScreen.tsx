@@ -38,7 +38,7 @@ export default function SignalsScreen() {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const nextFetchAllowedAtRef = useRef(0);
 
-  const policy = SIGNAL_POLICY[subscription] ?? SIGNAL_POLICY.free;
+  const tierPolicy = SIGNAL_POLICY[subscription] ?? SIGNAL_POLICY.free;
   const canUseAdvancedSignals = subscription !== 'free';
 
   const hasRecentDuplicate = useCallback((idPrefix: string) => {
@@ -46,14 +46,6 @@ export default function SignalsScreen() {
     const currentSignals = useStore.getState().signals;
     return currentSignals.some((s) => s.id.startsWith(idPrefix) && now - s.timestamp < 10 * 60 * 1000);
   }, []);
-
-  const policy = SIGNAL_POLICY[subscription] ?? SIGNAL_POLICY.free;
-  const canUseAdvancedSignals = subscription !== 'free';
-
-  const hasRecentDuplicate = useCallback((idPrefix: string) => {
-    const now = Date.now();
-    return signals.some((s) => s.id.startsWith(idPrefix) && now - s.timestamp < 10 * 60 * 1000);
-  }, [signals]);
 
   const fetchSignals = useCallback(async () => {
     if (Date.now() < nextFetchAllowedAtRef.current) {
@@ -80,7 +72,7 @@ export default function SignalsScreen() {
         }
 
         // Pro+ signal: πιθανή cross-exchange "listing / availability" ευκαιρία
-        if (policy.allowNewCoinSignals && !hasRecentDuplicate(`newcoin-${symbol}`)) {
+        if (tierPolicy.allowNewCoinSignals && !hasRecentDuplicate(`newcoin-${symbol}`)) {
           const listedVenue = arb.best_bid_venue || arb.best_ask_venue;
           const noVenue = !arb.best_bid_venue || !arb.best_ask_venue;
           if (listedVenue && noVenue) {
@@ -98,7 +90,7 @@ export default function SignalsScreen() {
 
       // Pro+ directional signals from composite risk framework
       if (canUseAdvancedSignals) {
-        const directionalSymbols = watchlist.slice(0, policy.directionalLimit);
+        const directionalSymbols = watchlist.slice(0, tierPolicy.directionalLimit);
         const riskSignals = await Promise.all(
           directionalSymbols.map(async (symbol) => {
             const risk = await marketAPI.getRiskReport(symbol);
@@ -149,20 +141,20 @@ export default function SignalsScreen() {
         console.error('Failed to fetch signals:', error);
       }
     }
-  }, [watchlist, addSignal, settings.hapticFeedback, canUseAdvancedSignals, hasRecentDuplicate, policy.allowNewCoinSignals, policy.directionalLimit]);
+  }, [watchlist, addSignal, settings.hapticFeedback, canUseAdvancedSignals, hasRecentDuplicate, tierPolicy.allowNewCoinSignals, tierPolicy.directionalLimit]);
 
   useEffect(() => {
     fetchSignals();
     let interval: ReturnType<typeof setInterval>;
 
     if (autoRefresh) {
-      interval = setInterval(fetchSignals, policy.refreshMs);
+      interval = setInterval(fetchSignals, tierPolicy.refreshMs);
     }
 
     return () => {
       if (interval) clearInterval(interval);
     };
-  }, [fetchSignals, autoRefresh, policy.refreshMs]);
+  }, [fetchSignals, autoRefresh, tierPolicy.refreshMs]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
