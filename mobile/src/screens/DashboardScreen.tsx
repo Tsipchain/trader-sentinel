@@ -85,6 +85,7 @@ export default function DashboardScreen() {
           }
 
           return {
+            ...arb,
             symbol,
             price: bestBid || bestAsk || dexLast,
             change24h: 0,
