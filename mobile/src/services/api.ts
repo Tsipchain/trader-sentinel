@@ -381,6 +381,15 @@ export const brainAPI = {
         return { ok: true, isBrain: true };
       }
 
+      const hasSentinelRoutes = paths.some((p) => p.startsWith('/api/sentinel/') || p.startsWith('/api/market/'));
+      if (hasSentinelRoutes) {
+        return {
+          ok: false,
+          isBrain: false,
+          reason: 'Configured BRAIN_URL appears to be the main backend (/api/sentinel/*), not Sentinel Brain (/api/brain/*).',
+        };
+      }
+
       // Compatibility: some deployments may not expose the full spec but still support storage route.
       const status = await brainGet<{ ok: boolean; disk_path?: string }>('/api/brain/storage/status');
       if (status?.ok) {
