@@ -16,19 +16,19 @@ These warnings mean the **Brain service URL points to the wrong runtime** (usual
 
 ### Sentinel Backend (market/sentinel)
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8081}
+sh -c 'uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8081}'
 ```
 Working directory: `thronos-trader-sentinel/backend`
 
 ### Sentinel Analyst
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8082}
+sh -c 'uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8082}'
 ```
 Working directory: `thronos-trader-sentinel/sentinel-analyst`
 
 ### Sentinel Brain
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8083}
+sh -c 'uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8083}'
 ```
 Working directory: `thronos-trader-sentinel/sentinel-brain`
 
@@ -82,3 +82,26 @@ Expected: brain host includes `/api/brain/*` routes and does **not** look like o
 The mobile warning is correct: it appears when `BRAIN_URL` resolves to a service whose OpenAPI shape is backend-like (`/api/sentinel/*`, `/api/market/*`) instead of brain-like (`/api/brain/*`).
 
 Fixing build context + start command + `EXPO_PUBLIC_BRAIN_URL` removes the warning and allows AutoTrader sync to hit real Brain endpoints.
+
+
+## 6) Fix for `Invalid value for --port: $PORT`
+
+If Railway Start Command is set as:
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port $PORT
+```
+
+`$PORT` may be passed literally (no shell interpolation), and Uvicorn fails with:
+
+```
+Error: Invalid value for --port: "$PORT" is not a valid integer.
+```
+
+Use one of these instead:
+
+```bash
+sh -c 'uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8083}'
+```
+
+or leave Start Command empty and use the Dockerfile `CMD` (already shell-safe in sentinel-brain Dockerfile).

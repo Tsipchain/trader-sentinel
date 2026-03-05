@@ -171,6 +171,14 @@ export default function AutoTraderScreen() {
               const ok = await ensureFreshSnapshot();
               if (!ok) return;
 
+              if ((portfolio.equity || 0) < 50) {
+                Alert.alert(
+                  'Minimum Balance Required',
+                  'AutoTrader requires at least 50 USDT equity in your trading account before activation.',
+                );
+                return;
+              }
+
               await brainAPI.enableAutoTrader({
                 user_id: user.id,
                 exchange: cfg.exchange,
