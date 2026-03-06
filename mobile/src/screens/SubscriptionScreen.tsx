@@ -31,10 +31,10 @@ interface Package {
 }
 
 const packages: Package[] = [
-  { ...CONFIG.PACKAGES.STARTER },
-  { ...CONFIG.PACKAGES.PRO, popular: true },
-  { ...CONFIG.PACKAGES.ELITE },
-  { ...CONFIG.PACKAGES.WHALE },
+  { ...CONFIG.PACKAGES.STARTER, priceTHR: CONFIG.PACKAGES.STARTER.priceTHR ?? 25 },
+  { ...CONFIG.PACKAGES.PRO, popular: true, priceTHR: CONFIG.PACKAGES.PRO.priceTHR ?? 79 },
+  { ...CONFIG.PACKAGES.ELITE, priceTHR: CONFIG.PACKAGES.ELITE.priceTHR ?? 229 },
+  { ...CONFIG.PACKAGES.WHALE, priceTHR: CONFIG.PACKAGES.WHALE.priceTHR ?? 749 },
 ];
 
 export default function SubscriptionScreen() {
