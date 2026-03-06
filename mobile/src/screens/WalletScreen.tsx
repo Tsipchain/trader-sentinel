@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -6,6 +6,8 @@ import {
   ScrollView,
   TouchableOpacity,
   Share,
+  RefreshControl,
+  ActivityIndicator,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -17,13 +19,137 @@ import { RootStackParamList } from '../../App';
 import { COLORS, SPACING, FONT_SIZES, BORDER_RADIUS } from '../constants/theme';
 import { useStore } from '../store/useStore';
 import { CONFIG } from '../config';
+import {
+  fetchETHBalance,
+  fetchTokenPrices,
+  fetchThronosBalances,
+  isValidThronosAddress,
+} from '../services/walletConnect';
 
 type NavigationProp = NativeStackNavigationProp<RootStackParamList>;
 
+interface TokenDisplay {
+  symbol: string;
+  name: string;
+  balance: number;
+  value: number;
+  change: number;
+  icon: keyof typeof Ionicons.glyphMap;
+  color: string;
+}
+
 export default function WalletScreen() {
   const navigation = useNavigation<NavigationProp>();
-  const { wallet, user, rewards, subscription } = useStore();
+  const { wallet, user, rewards, subscription, setWallet } = useStore();
   const [copied, setCopied] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [tokens, setTokens] = useState<TokenDisplay[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [prices, setPrices] = useState<Record<string, number>>({});
+
+  const isThronosWallet = wallet.address?.startsWith('THR') ?? false;
+
+  const loadBalances = useCallback(async () => {
+    if (!wallet.address) return;
+
+    try {
+      const priceData = await fetchTokenPrices();
+      setPrices(priceData);
+
+      const tokenList: TokenDisplay[] = [];
+
+      if (isThronosWallet) {
+        // Fetch Thronos chain balances
+        const data = await fetchThronosBalances(wallet.address);
+        if (data.tokens && data.tokens.length > 0) {
+          for (const t of data.tokens) {
+            if (t.balance > 0 || t.symbol === 'THR') {
+              tokenList.push({
+                symbol: t.symbol,
+                name: t.name || t.symbol,
+                balance: t.balance,
+                value: t.symbol === 'THR' ? t.balance * 0.85 : t.balance, // THR price TBD
+                change: 0,
+                icon: t.symbol === 'THR' ? 'planet' : 'cube',
+                color: t.symbol === 'THR' ? COLORS.thronosGold : COLORS.accent,
+              });
+            }
+          }
+        }
+
+        // Always show THR if not in list
+        if (!tokenList.find((t) => t.symbol === 'THR')) {
+          tokenList.unshift({
+            symbol: 'THR',
+            name: 'Thronos',
+            balance: user?.thronosBalance || 0,
+            value: (user?.thronosBalance || 0) * 0.85,
+            change: 0,
+            icon: 'planet',
+            color: COLORS.thronosGold,
+          });
+        }
+      } else {
+        // EVM wallet - fetch ETH balance
+        const ethBalance = await fetchETHBalance(wallet.address, wallet.chainId || 1);
+        const ethPrice = priceData.ETH || 0;
+
+        // Update stored balance
+        setWallet({ balance: ethBalance });
+
+        tokenList.push({
+          symbol: 'ETH',
+          name: 'Ethereum',
+          balance: parseFloat(ethBalance) || 0,
+          value: (parseFloat(ethBalance) || 0) * ethPrice,
+          change: 0,
+          icon: 'diamond-outline',
+          color: '#627EEA',
+        });
+
+        // Show THRONOS rewards balance
+        if (user?.thronosBalance && user.thronosBalance > 0) {
+          tokenList.push({
+            symbol: 'THRONOS',
+            name: 'Thronos Token',
+            balance: user.thronosBalance,
+            value: user.thronosBalance * 0.85,
+            change: 0,
+            icon: 'star',
+            color: COLORS.thronosGold,
+          });
+        }
+      }
+
+      setTokens(tokenList);
+    } catch (error) {
+      console.warn('Failed to load balances:', error);
+      // Show fallback data from store
+      setTokens([
+        {
+          symbol: isThronosWallet ? 'THR' : 'ETH',
+          name: isThronosWallet ? 'Thronos' : 'Ethereum',
+          balance: parseFloat(wallet.balance) || 0,
+          value: 0,
+          change: 0,
+          icon: isThronosWallet ? 'planet' : 'diamond-outline',
+          color: isThronosWallet ? COLORS.thronosGold : '#627EEA',
+        },
+      ]);
+    } finally {
+      setLoading(false);
+    }
+  }, [wallet.address, wallet.chainId, isThronosWallet, user?.thronosBalance]);
+
+  useEffect(() => {
+    loadBalances();
+  }, [loadBalances]);
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await loadBalances();
+    setRefreshing(false);
+  }, [loadBalances]);
 
   const copyAddress = async () => {
     if (wallet.address) {
@@ -42,48 +168,43 @@ export default function WalletScreen() {
   };
 
   const shortenAddress = (address: string) => {
+    if (address.startsWith('THR')) {
+      return `${address.slice(0, 10)}...${address.slice(-6)}`;
+    }
     return `${address.slice(0, 10)}...${address.slice(-8)}`;
   };
 
   const getSubscriptionColor = () => {
     switch (subscription) {
-      case 'whale':
-        return COLORS.thronosGold;
-      case 'elite':
-        return COLORS.thronosPurple;
-      case 'pro':
-        return COLORS.primary;
-      default:
-        return COLORS.textMuted;
+      case 'whale': return COLORS.thronosGold;
+      case 'elite': return COLORS.thronosPurple;
+      case 'pro': return COLORS.primary;
+      default: return COLORS.textMuted;
     }
   };
 
-  const tokens = [
-    {
-      symbol: 'THRONOS',
-      name: 'Thronos Token',
-      balance: user?.thronosBalance || 0,
-      value: (user?.thronosBalance || 0) * 0.85,
-      change: 12.5,
-      icon: 'star',
-      color: COLORS.thronosGold,
-    },
-    {
-      symbol: 'ETH',
-      name: 'Ethereum',
-      balance: parseFloat(wallet.balance) || 0,
-      value: (parseFloat(wallet.balance) || 0) * 2450,
-      change: -2.3,
-      icon: 'diamond-outline',
-      color: '#627EEA',
-    },
-  ];
+  const getNetworkName = () => {
+    if (isThronosWallet) return 'Thronos Chain';
+    const chain = Object.values(CONFIG.SUPPORTED_CHAINS).find(
+      (c) => c.chainId === wallet.chainId,
+    );
+    return chain?.name || 'Ethereum';
+  };
+
+  const totalValue = tokens.reduce((acc, t) => acc + t.value, 0);
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <ScrollView
         style={styles.scrollView}
         showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor={COLORS.primary}
+          />
+        }
       >
         {/* Header */}
         <View style={styles.header}>
@@ -95,17 +216,15 @@ export default function WalletScreen() {
 
         {/* Wallet Card */}
         <LinearGradient
-          colors={[COLORS.primary, COLORS.primaryDark]}
+          colors={isThronosWallet ? [COLORS.thronosGold, '#DAA520'] : [COLORS.primary, COLORS.primaryDark]}
           style={styles.walletCard}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
         >
           <View style={styles.walletCardHeader}>
             <View style={styles.networkBadge}>
-              <View style={styles.networkDot} />
-              <Text style={styles.networkText}>
-                {CONFIG.SUPPORTED_CHAINS.ETHEREUM.name}
-              </Text>
+              <View style={[styles.networkDot, isThronosWallet && { backgroundColor: COLORS.thronosGold }]} />
+              <Text style={styles.networkText}>{getNetworkName()}</Text>
             </View>
             <View
               style={[
@@ -121,21 +240,27 @@ export default function WalletScreen() {
 
           <Text style={styles.walletLabel}>Connected Wallet</Text>
           <TouchableOpacity onPress={copyAddress} style={styles.addressRow}>
-            <Text style={styles.walletAddress}>
+            <Text style={[styles.walletAddress, isThronosWallet && { color: COLORS.background }]}>
               {wallet.address ? shortenAddress(wallet.address) : 'Not connected'}
             </Text>
             <Ionicons
               name={copied ? 'checkmark' : 'copy-outline'}
               size={18}
-              color={COLORS.text}
+              color={isThronosWallet ? COLORS.background : COLORS.text}
             />
           </TouchableOpacity>
 
           <View style={styles.totalBalance}>
-            <Text style={styles.totalBalanceLabel}>Total Balance</Text>
-            <Text style={styles.totalBalanceValue}>
-              ${tokens.reduce((acc, t) => acc + t.value, 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            <Text style={[styles.totalBalanceLabel, isThronosWallet && { color: 'rgba(0,0,0,0.6)' }]}>
+              Total Balance
             </Text>
+            {loading ? (
+              <ActivityIndicator color={isThronosWallet ? COLORS.background : COLORS.text} />
+            ) : (
+              <Text style={[styles.totalBalanceValue, isThronosWallet && { color: COLORS.background }]}>
+                ${totalValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </Text>
+            )}
           </View>
         </LinearGradient>
 
@@ -212,32 +337,36 @@ export default function WalletScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Assets</Text>
 
-          {tokens.map((token, index) => (
-            <View key={index} style={styles.tokenItem}>
-              <View style={[styles.tokenIcon, { backgroundColor: token.color + '20' }]}>
-                <Ionicons name={token.icon as any} size={24} color={token.color} />
-              </View>
-              <View style={styles.tokenInfo}>
-                <Text style={styles.tokenName}>{token.name}</Text>
-                <Text style={styles.tokenBalance}>
-                  {token.balance.toFixed(4)} {token.symbol}
-                </Text>
-              </View>
-              <View style={styles.tokenValue}>
-                <Text style={styles.tokenValueUsd}>
-                  ${token.value.toFixed(2)}
-                </Text>
-                <Text
-                  style={[
-                    styles.tokenChange,
-                    { color: token.change >= 0 ? COLORS.success : COLORS.error },
-                  ]}
-                >
-                  {token.change >= 0 ? '+' : ''}{token.change.toFixed(1)}%
-                </Text>
-              </View>
+          {loading ? (
+            <View style={styles.loadingContainer}>
+              <ActivityIndicator size="small" color={COLORS.primary} />
+              <Text style={styles.loadingText}>Fetching balances...</Text>
             </View>
-          ))}
+          ) : tokens.length === 0 ? (
+            <View style={styles.emptyActivity}>
+              <Ionicons name="wallet-outline" size={48} color={COLORS.textMuted} />
+              <Text style={styles.emptyActivityText}>No tokens found</Text>
+            </View>
+          ) : (
+            tokens.map((token, index) => (
+              <View key={index} style={styles.tokenItem}>
+                <View style={[styles.tokenIcon, { backgroundColor: token.color + '20' }]}>
+                  <Ionicons name={token.icon as any} size={24} color={token.color} />
+                </View>
+                <View style={styles.tokenInfo}>
+                  <Text style={styles.tokenName}>{token.name}</Text>
+                  <Text style={styles.tokenBalance}>
+                    {token.balance.toFixed(4)} {token.symbol}
+                  </Text>
+                </View>
+                <View style={styles.tokenValue}>
+                  <Text style={styles.tokenValueUsd}>
+                    ${token.value.toFixed(2)}
+                  </Text>
+                </View>
+              </View>
+            ))
+          )}
         </View>
 
         {/* Referral Card */}
@@ -477,6 +606,17 @@ const styles = StyleSheet.create({
     color: COLORS.primary,
     fontWeight: '500',
   },
+  loadingContainer: {
+    alignItems: 'center',
+    padding: SPACING.xl,
+    backgroundColor: COLORS.surface,
+    borderRadius: BORDER_RADIUS.lg,
+    gap: SPACING.sm,
+  },
+  loadingText: {
+    fontSize: FONT_SIZES.sm,
+    color: COLORS.textMuted,
+  },
   tokenItem: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -514,10 +654,6 @@ const styles = StyleSheet.create({
     fontSize: FONT_SIZES.md,
     fontWeight: '600',
     color: COLORS.text,
-  },
-  tokenChange: {
-    fontSize: FONT_SIZES.sm,
-    fontWeight: '500',
   },
   referralCard: {
     flexDirection: 'row',
