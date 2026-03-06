@@ -1,13 +1,16 @@
 // Thronos Integration Service
-// Handles wallet connection, payments, rewards, and liquidity
+// Routes ALL subscription payments through the Thronos blockchain
+// Supports: THR native payments, EVM crosschain via treasury, Fiat via Stripe
 
 import { ethers } from 'ethers';
 import { CONFIG } from '../config';
 
-// Types
+// ── Types ─────────────────────────────────────────────────────────────────────
+
 export interface PaymentRequest {
   packageId: string;
-  chainId: number;
+  chainId: number | string;
+  tokenSymbol: string;
   tokenAddress: string;
   amount: string;
   userAddress: string;
@@ -16,6 +19,7 @@ export interface PaymentRequest {
 export interface PaymentResult {
   success: boolean;
   txHash?: string;
+  blockchainRef?: string; // Thronos chain reference for verification
   error?: string;
 }
 
@@ -39,152 +43,219 @@ export interface LiquidityPosition {
   apr: number;
 }
 
-// Thronos Gateway ABI (simplified)
-const THRONOS_GATEWAY_ABI = [
-  'function paySubscription(address token, uint256 amount, string packageId) payable returns (bool)',
-  'function claimRewards() external returns (uint256)',
-  'function getPendingRewards(address user) view returns (uint256)',
-  'function getSubscription(address user) view returns (string, uint256, uint256)',
-  'function addLiquidity(address tokenA, address tokenB, uint256 amountA, uint256 amountB) external returns (uint256)',
-  'function removeLiquidity(uint256 lpAmount) external returns (uint256, uint256)',
-  'function stake(uint256 amount) external',
-  'function unstake(uint256 amount) external',
-  'function getStakingInfo(address user) view returns (uint256, uint256, uint256)',
-];
+export interface SubscriptionStatus {
+  tier: string;
+  expiresAt: number;
+  autoRenew: boolean;
+  blockchainRef: string;
+  paymentChain: string;
+  lastPaymentTx: string;
+}
 
-// ERC20 ABI
+// ── EVM ABIs ──────────────────────────────────────────────────────────────────
+
 const ERC20_ABI = [
   'function approve(address spender, uint256 amount) returns (bool)',
   'function allowance(address owner, address spender) view returns (uint256)',
   'function balanceOf(address account) view returns (uint256)',
+  'function transfer(address to, uint256 amount) returns (bool)',
   'function decimals() view returns (uint8)',
   'function symbol() view returns (string)',
 ];
 
+// ── Thronos Service ───────────────────────────────────────────────────────────
+
 class ThronosService {
   private provider: ethers.BrowserProvider | null = null;
   private signer: ethers.Signer | null = null;
-  private gatewayContract: ethers.Contract | null = null;
 
-  // Initialize with wallet provider
+  // Initialize with wallet provider (EVM chains)
   async initialize(walletProvider: any): Promise<void> {
     this.provider = new ethers.BrowserProvider(walletProvider);
     this.signer = await this.provider.getSigner();
-
-    // Initialize gateway contract (address would be from config)
-    const gatewayAddress = '0x...'; // Thronos Gateway Contract Address
-    this.gatewayContract = new ethers.Contract(
-      gatewayAddress,
-      THRONOS_GATEWAY_ABI,
-      this.signer
-    );
   }
 
-  // Get connected wallet address
   async getAddress(): Promise<string> {
     if (!this.signer) throw new Error('Wallet not connected');
     return this.signer.getAddress();
   }
 
-  // Get token balance
   async getTokenBalance(tokenAddress: string, userAddress: string): Promise<string> {
     if (!this.provider) throw new Error('Provider not initialized');
-
-    const tokenContract = new ethers.Contract(
-      tokenAddress,
-      ERC20_ABI,
-      this.provider
-    );
-
+    const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, this.provider);
     const balance = await tokenContract.balanceOf(userAddress);
     const decimals = await tokenContract.decimals();
-
     return ethers.formatUnits(balance, decimals);
   }
 
-  // Check and approve token spending
-  async approveToken(
-    tokenAddress: string,
-    spenderAddress: string,
-    amount: string
-  ): Promise<string> {
-    if (!this.signer) throw new Error('Wallet not connected');
+  // ─── BLOCKCHAIN-VERIFIED SUBSCRIPTION PAYMENT ──────────────────────────────
+  // All payments route through the Thronos blockchain for verification.
+  // Flow: User pays → recorded on payment chain → Thronos chain records subscription → verified
 
-    const tokenContract = new ethers.Contract(
-      tokenAddress,
-      ERC20_ABI,
-      this.signer
-    );
+  /**
+   * Process subscription payment through Thronos blockchain.
+   * 1. If THR native: direct transfer to sentinel treasury on Thronos chain
+   * 2. If EVM token: transfer to chain-specific treasury, then register on Thronos chain
+   */
+  async processPayment(request: PaymentRequest): Promise<PaymentResult> {
+    const { chainId, tokenSymbol, packageId, amount, userAddress } = request;
 
-    const decimals = await tokenContract.decimals();
-    const amountWei = ethers.parseUnits(amount, decimals);
+    // THR native payment on Thronos chain
+    if (chainId === 'thronos' || tokenSymbol === 'THR' && request.tokenAddress === 'native') {
+      return this.processTHRPayment(packageId, amount, userAddress);
+    }
 
-    const tx = await tokenContract.approve(spenderAddress, amountWei);
-    await tx.wait();
-
-    return tx.hash;
+    // EVM crosschain payment — send to treasury, then register on Thronos chain
+    return this.processEVMPayment(request);
   }
 
-  // Process subscription payment
-  async processPayment(request: PaymentRequest): Promise<PaymentResult> {
-    if (!this.signer || !this.gatewayContract) {
-      return { success: false, error: 'Wallet not connected' };
+  /**
+   * THR native payment — goes directly through the Thronos blockchain.
+   * Calls /api/sentinel/subscribe on the Thronos chain node.
+   */
+  private async processTHRPayment(
+    packageId: string,
+    amount: string,
+    userAddress: string,
+  ): Promise<PaymentResult> {
+    try {
+      const response = await fetch(`${CONFIG.THRONOS_CHAIN_URL}/api/sentinel/subscribe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          subscriber: userAddress,
+          package_id: packageId,
+          amount: parseFloat(amount),
+          token: 'THR',
+          payment_chain: 'thronos',
+        }),
+      });
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        return { success: false, error: err.message || `Payment failed (${response.status})` };
+      }
+
+      const data = await response.json();
+      return {
+        success: true,
+        txHash: data.tx_hash,
+        blockchainRef: data.blockchain_ref,
+      };
+    } catch (error: any) {
+      return { success: false, error: error.message || 'THR payment failed' };
+    }
+  }
+
+  /**
+   * EVM payment — transfer token to treasury address for that chain,
+   * then register the subscription on the Thronos blockchain.
+   */
+  private async processEVMPayment(request: PaymentRequest): Promise<PaymentResult> {
+    if (!this.signer) {
+      return { success: false, error: 'EVM wallet not connected' };
     }
 
     try {
-      const tokenContract = new ethers.Contract(
-        request.tokenAddress,
-        ERC20_ABI,
-        this.signer
-      );
+      const { tokenAddress, amount, userAddress, chainId, packageId, tokenSymbol } = request;
 
-      const decimals = await tokenContract.decimals();
-      const amountWei = ethers.parseUnits(request.amount, decimals);
+      // Find treasury address for this chain
+      const chainKey = Object.entries(CONFIG.SUPPORTED_CHAINS).find(
+        ([, v]) => v.chainId === chainId,
+      )?.[0] as keyof typeof CONFIG.TREASURY_ADDRESSES | undefined;
 
-      // Check allowance
-      const gatewayAddress = await this.gatewayContract.getAddress();
-      const allowance = await tokenContract.allowance(request.userAddress, gatewayAddress);
+      const treasuryAddress = chainKey
+        ? CONFIG.TREASURY_ADDRESSES[chainKey]
+        : '';
 
-      if (allowance < amountWei) {
-        // Approve first
-        const approveTx = await tokenContract.approve(gatewayAddress, amountWei);
-        await approveTx.wait();
+      if (!treasuryAddress) {
+        return { success: false, error: 'Treasury address not configured for this network' };
       }
 
-      // Process payment
-      const tx = await this.gatewayContract.paySubscription(
-        request.tokenAddress,
-        amountWei,
-        request.packageId
-      );
+      // ERC-20 transfer to treasury
+      const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, this.signer);
+      const decimals = await tokenContract.decimals();
+      const amountWei = ethers.parseUnits(amount, decimals);
 
+      // Send tokens to chain-specific treasury
+      const tx = await tokenContract.transfer(treasuryAddress, amountWei);
       const receipt = await tx.wait();
+
+      // Register subscription on Thronos blockchain for verification
+      const regResult = await this.registerSubscriptionOnChain({
+        subscriber: userAddress,
+        packageId,
+        amount: parseFloat(amount),
+        token: tokenSymbol,
+        paymentChain: chainKey || 'unknown',
+        paymentTxHash: receipt.hash,
+        paymentChainId: chainId,
+        treasuryAddress,
+      });
 
       return {
         success: true,
         txHash: receipt.hash,
+        blockchainRef: regResult.blockchainRef,
       };
     } catch (error: any) {
-      return {
-        success: false,
-        error: error.message || 'Payment failed',
-      };
+      return { success: false, error: error.message || 'EVM payment failed' };
     }
   }
 
-  // Process fiat payment via Thronos Gateway
+  /**
+   * Register a crosschain subscription payment on the Thronos blockchain.
+   * This creates a verifiable record that the user paid.
+   */
+  private async registerSubscriptionOnChain(params: {
+    subscriber: string;
+    packageId: string;
+    amount: number;
+    token: string;
+    paymentChain: string;
+    paymentTxHash: string;
+    paymentChainId: number | string;
+    treasuryAddress: string;
+  }): Promise<{ blockchainRef: string }> {
+    try {
+      const response = await fetch(`${CONFIG.THRONOS_CHAIN_URL}/api/sentinel/subscribe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          subscriber: params.subscriber,
+          package_id: params.packageId,
+          amount: params.amount,
+          token: params.token,
+          payment_chain: params.paymentChain,
+          payment_tx_hash: params.paymentTxHash,
+          payment_chain_id: params.paymentChainId,
+          treasury_address: params.treasuryAddress,
+        }),
+      });
+
+      const data = await response.json();
+      return { blockchainRef: data.blockchain_ref || data.tx_hash || '' };
+    } catch {
+      // Payment already sent — blockchain registration failed but user paid
+      return { blockchainRef: 'pending_verification' };
+    }
+  }
+
+  // ─── FIAT PAYMENT ──────────────────────────────────────────────────────────
+
   async processFiatPayment(
     packageId: string,
     email: string,
-    currency: string = 'USD'
+    currency: string = 'USD',
   ): Promise<{ redirectUrl: string }> {
-    const response = await fetch(`${CONFIG.THRONOS_GATEWAY_URL}/api/fiat/create-session`, {
+    const response = await fetch(`${CONFIG.THRONOS_GATEWAY_URL}/api/sentinel/fiat/create-session`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         packageId,
         email,
         currency,
+        product: 'sentinel',
         successUrl: 'tradersentinel://payment-success',
         cancelUrl: 'tradersentinel://payment-cancel',
       }),
@@ -194,151 +265,195 @@ class ThronosService {
     return { redirectUrl: data.url };
   }
 
-  // Get user rewards
-  async getRewards(userAddress: string): Promise<RewardsInfo> {
-    // This would call the Thronos API to get rewards info
+  // ─── SUBSCRIPTION STATUS (blockchain-verified) ─────────────────────────────
+
+  async getSubscriptionStatus(userAddress: string): Promise<SubscriptionStatus> {
     const response = await fetch(
-      `${CONFIG.THRONOS_GATEWAY_URL}/api/rewards/${userAddress}`
+      `${CONFIG.THRONOS_CHAIN_URL}/api/sentinel/subscription/${userAddress}`,
     );
     return response.json();
   }
 
-  // Claim pending rewards
-  async claimRewards(): Promise<PaymentResult> {
-    if (!this.gatewayContract) {
-      return { success: false, error: 'Contract not initialized' };
-    }
-
+  async verifySubscription(userAddress: string): Promise<boolean> {
     try {
-      const tx = await this.gatewayContract.claimRewards();
-      const receipt = await tx.wait();
-
-      return {
-        success: true,
-        txHash: receipt.hash,
-      };
-    } catch (error: any) {
-      return {
-        success: false,
-        error: error.message || 'Claim failed',
-      };
+      const status = await this.getSubscriptionStatus(userAddress);
+      return status.tier !== 'free' && status.expiresAt > Date.now() / 1000;
+    } catch {
+      return false;
     }
   }
 
-  // Get subscription status
-  async getSubscriptionStatus(userAddress: string): Promise<{
-    tier: string;
-    expiresAt: number;
-    autoRenew: boolean;
-  }> {
+  // ─── REWARDS ───────────────────────────────────────────────────────────────
+
+  async getRewards(userAddress: string): Promise<RewardsInfo> {
     const response = await fetch(
-      `${CONFIG.THRONOS_GATEWAY_URL}/api/subscription/${userAddress}`
+      `${CONFIG.THRONOS_CHAIN_URL}/api/sentinel/rewards/${userAddress}`,
     );
     return response.json();
   }
 
-  // Add liquidity to Thronos pool
+  async claimRewards(userAddress: string): Promise<PaymentResult> {
+    try {
+      const response = await fetch(`${CONFIG.THRONOS_CHAIN_URL}/api/sentinel/rewards/claim`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address: userAddress }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        return { success: false, error: data.message || 'Claim failed' };
+      }
+      return { success: true, txHash: data.tx_hash, blockchainRef: data.blockchain_ref };
+    } catch (error: any) {
+      return { success: false, error: error.message || 'Claim failed' };
+    }
+  }
+
+  // ─── LIQUIDITY (USDT/THR and other pools) ──────────────────────────────────
+
   async addLiquidity(
     tokenA: string,
     tokenB: string,
     amountA: string,
-    amountB: string
+    amountB: string,
+    userAddress: string,
   ): Promise<PaymentResult> {
-    if (!this.signer || !this.gatewayContract) {
-      return { success: false, error: 'Wallet not connected' };
-    }
-
     try {
-      // Approve both tokens
-      const tokenAContract = new ethers.Contract(tokenA, ERC20_ABI, this.signer);
-      const tokenBContract = new ethers.Contract(tokenB, ERC20_ABI, this.signer);
+      const response = await fetch(`${CONFIG.THRONOS_CHAIN_URL}/api/v1/pools/add_liquidity`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: userAddress,
+          token_a: tokenA,
+          token_b: tokenB,
+          amount_a: parseFloat(amountA),
+          amount_b: parseFloat(amountB),
+        }),
+      });
 
-      const decimalsA = await tokenAContract.decimals();
-      const decimalsB = await tokenBContract.decimals();
-
-      const amountAWei = ethers.parseUnits(amountA, decimalsA);
-      const amountBWei = ethers.parseUnits(amountB, decimalsB);
-
-      const gatewayAddress = await this.gatewayContract.getAddress();
-
-      // Approve tokens
-      await (await tokenAContract.approve(gatewayAddress, amountAWei)).wait();
-      await (await tokenBContract.approve(gatewayAddress, amountBWei)).wait();
-
-      // Add liquidity
-      const tx = await this.gatewayContract.addLiquidity(
-        tokenA,
-        tokenB,
-        amountAWei,
-        amountBWei
-      );
-
-      const receipt = await tx.wait();
-
-      return {
-        success: true,
-        txHash: receipt.hash,
-      };
+      const data = await response.json();
+      if (!response.ok) {
+        return { success: false, error: data.message || 'Failed to add liquidity' };
+      }
+      return { success: true, txHash: data.tx_hash, blockchainRef: data.pool_id };
     } catch (error: any) {
-      return {
-        success: false,
-        error: error.message || 'Failed to add liquidity',
-      };
+      return { success: false, error: error.message || 'Failed to add liquidity' };
     }
   }
 
-  // Get liquidity positions
+  async removeLiquidity(
+    poolId: string,
+    shares: string,
+    userAddress: string,
+  ): Promise<PaymentResult> {
+    try {
+      const response = await fetch(`${CONFIG.THRONOS_CHAIN_URL}/api/v1/pools/remove_liquidity`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: userAddress,
+          pool_id: poolId,
+          shares: parseFloat(shares),
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        return { success: false, error: data.message || 'Failed to remove liquidity' };
+      }
+      return { success: true, txHash: data.tx_hash };
+    } catch (error: any) {
+      return { success: false, error: error.message || 'Failed to remove liquidity' };
+    }
+  }
+
   async getLiquidityPositions(userAddress: string): Promise<LiquidityPosition[]> {
-    const response = await fetch(
-      `${CONFIG.THRONOS_GATEWAY_URL}/api/liquidity/${userAddress}`
-    );
-    return response.json();
-  }
-
-  // Stake THRONOS tokens
-  async stake(amount: string): Promise<PaymentResult> {
-    if (!this.gatewayContract) {
-      return { success: false, error: 'Contract not initialized' };
-    }
-
     try {
-      const amountWei = ethers.parseUnits(amount, 18);
-      const tx = await this.gatewayContract.stake(amountWei);
-      const receipt = await tx.wait();
-
-      return {
-        success: true,
-        txHash: receipt.hash,
-      };
-    } catch (error: any) {
-      return {
-        success: false,
-        error: error.message || 'Staking failed',
-      };
+      const response = await fetch(
+        `${CONFIG.THRONOS_CHAIN_URL}/api/v1/pools/positions/${userAddress}`,
+      );
+      const data = await response.json();
+      return data.positions || [];
+    } catch {
+      return [];
     }
   }
 
-  // Get staking info
+  // ─── STAKING ───────────────────────────────────────────────────────────────
+
+  async stake(amount: string, userAddress: string): Promise<PaymentResult> {
+    try {
+      const response = await fetch(`${CONFIG.THRONOS_CHAIN_URL}/api/sentinel/stake`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address: userAddress, amount: parseFloat(amount) }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        return { success: false, error: data.message || 'Staking failed' };
+      }
+      return { success: true, txHash: data.tx_hash };
+    } catch (error: any) {
+      return { success: false, error: error.message || 'Staking failed' };
+    }
+  }
+
+  async unstake(amount: string, userAddress: string): Promise<PaymentResult> {
+    try {
+      const response = await fetch(`${CONFIG.THRONOS_CHAIN_URL}/api/sentinel/unstake`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address: userAddress, amount: parseFloat(amount) }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        return { success: false, error: data.message || 'Unstaking failed' };
+      }
+      return { success: true, txHash: data.tx_hash };
+    } catch (error: any) {
+      return { success: false, error: error.message || 'Unstaking failed' };
+    }
+  }
+
   async getStakingInfo(userAddress: string): Promise<{
     stakedAmount: string;
     pendingRewards: string;
     apr: number;
   }> {
-    const response = await fetch(
-      `${CONFIG.THRONOS_GATEWAY_URL}/api/staking/${userAddress}`
-    );
-    return response.json();
+    try {
+      const response = await fetch(
+        `${CONFIG.THRONOS_CHAIN_URL}/api/sentinel/staking/${userAddress}`,
+      );
+      return await response.json();
+    } catch {
+      return { stakedAmount: '0', pendingRewards: '0', apr: CONFIG.REWARDS.STAKING_APY * 100 };
+    }
   }
 
-  // Generate referral link
+  // ─── TREASURY INFO ─────────────────────────────────────────────────────────
+
+  async getTreasuryBalances(): Promise<Record<string, { address: string; balance: number }>> {
+    try {
+      const response = await fetch(`${CONFIG.THRONOS_CHAIN_URL}/api/sentinel/treasury/balances`);
+      return await response.json();
+    } catch {
+      return {};
+    }
+  }
+
+  // ─── REFERRAL ──────────────────────────────────────────────────────────────
+
   async generateReferralLink(userAddress: string): Promise<string> {
     const response = await fetch(
-      `${CONFIG.THRONOS_GATEWAY_URL}/api/referral/generate`,
+      `${CONFIG.THRONOS_CHAIN_URL}/api/sentinel/referral/generate`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ address: userAddress }),
-      }
+      },
     );
     const data = await response.json();
     return data.referralLink;

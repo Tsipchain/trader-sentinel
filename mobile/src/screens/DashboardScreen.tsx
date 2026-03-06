@@ -243,7 +243,7 @@ export default function DashboardScreen() {
                 <Ionicons name="star" size={20} color={COLORS.thronosGold} />
               </View>
               <Text style={styles.statValue}>{rewards.total.toFixed(2)}</Text>
-              <Text style={styles.statLabel}>THRONOS Rewards</Text>
+              <Text style={styles.statLabel}>THR Rewards</Text>
             </LinearGradient>
           </TouchableOpacity>
 

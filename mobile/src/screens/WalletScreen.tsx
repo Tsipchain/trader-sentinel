@@ -107,10 +107,10 @@ export default function WalletScreen() {
           color: '#627EEA',
         });
 
-        // Show THRONOS rewards balance
+        // Show THR rewards balance
         if (user?.thronosBalance && user.thronosBalance > 0) {
           tokenList.push({
-            symbol: 'THRONOS',
+            symbol: 'THR',
             name: 'Thronos Token',
             balance: user.thronosBalance,
             value: user.thronosBalance * 0.85,
@@ -162,7 +162,7 @@ export default function WalletScreen() {
   const shareReferralLink = async () => {
     if (user?.referralCode) {
       await Share.share({
-        message: `Join Trader Sentinel and earn THRONOS rewards! Use my referral code: ${user.referralCode}\n\nDownload now: https://tradersentinel.app/ref/${user.referralCode}`,
+        message: `Join Trader Sentinel and earn THR rewards! Use my referral code: ${user.referralCode}\n\nDownload now: https://tradersentinel.app/ref/${user.referralCode}`,
       });
     }
   };
@@ -313,7 +313,7 @@ export default function WalletScreen() {
               </View>
               <View style={styles.rewardsInfo}>
                 <Text style={styles.rewardsLabel}>Thronos Rewards</Text>
-                <Text style={styles.rewardsValue}>{rewards.pending.toFixed(2)} THRONOS</Text>
+                <Text style={styles.rewardsValue}>{rewards.pending.toFixed(2)} THR</Text>
               </View>
               <Ionicons name="chevron-forward" size={24} color={COLORS.textMuted} />
             </View>
@@ -378,7 +378,7 @@ export default function WalletScreen() {
             <View style={styles.referralInfo}>
               <Text style={styles.referralTitle}>Refer & Earn</Text>
               <Text style={styles.referralDesc}>
-                Earn {CONFIG.REWARDS.REFERRAL_BONUS} THRONOS for each friend
+                Earn {CONFIG.REWARDS.REFERRAL_BONUS} THR for each friend
               </Text>
               <View style={styles.referralCode}>
                 <Text style={styles.referralCodeText}>

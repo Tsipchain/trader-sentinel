@@ -24,7 +24,7 @@ interface Package {
   id: string;
   name: string;
   priceUSD: number;
-  priceThronos: number;
+  priceTHR: number;
   features: string[];
   rewardsMultiplier: number;
   popular?: boolean;
@@ -47,7 +47,7 @@ export default function SubscriptionScreen() {
   const [processing, setProcessing] = useState(false);
 
   const chains = Object.entries(CONFIG.SUPPORTED_CHAINS).filter(
-    ([key]) => key !== 'SOLANA'
+    ([key]) => key !== 'SOLANA'  // Solana support coming soon
   );
 
   const handleSelectPackage = (pkg: Package) => {
@@ -61,7 +61,8 @@ export default function SubscriptionScreen() {
     setProcessing(true);
     try {
       const chainInfo = CONFIG.SUPPORTED_CHAINS[selectedChain];
-      const tokens = CONFIG.PAYMENT_TOKENS[chainInfo.chainId as keyof typeof CONFIG.PAYMENT_TOKENS];
+      const chainId = chainInfo.chainId;
+      const tokens = CONFIG.PAYMENT_TOKENS[chainId as keyof typeof CONFIG.PAYMENT_TOKENS];
       const token = tokens?.find((t) => t.symbol === selectedToken);
 
       if (!token) {
@@ -69,14 +70,16 @@ export default function SubscriptionScreen() {
         return;
       }
 
-      // Determine price
-      const price = selectedToken === 'THRONOS'
-        ? selectedPackage.priceThronos.toString()
+      // THR native payment uses THR price, stablecoins use USD price
+      const price = selectedToken === 'THR'
+        ? selectedPackage.priceTHR.toString()
         : selectedPackage.priceUSD.toString();
 
+      // All payments route through Thronos blockchain for verification
       const result = await thronosService.processPayment({
         packageId: selectedPackage.id,
-        chainId: chainInfo.chainId as number,
+        chainId,
+        tokenSymbol: token.symbol,
         tokenAddress: token.address,
         amount: price,
         userAddress: wallet.address,
@@ -85,9 +88,12 @@ export default function SubscriptionScreen() {
       if (result.success) {
         setSubscription(selectedPackage.id as any);
         setShowPaymentModal(false);
+        const ref = result.blockchainRef
+          ? `\nBlockchain Ref: ${result.blockchainRef}`
+          : '';
         Alert.alert(
           'Success!',
-          `You are now subscribed to ${selectedPackage.name}!\n\nTransaction: ${result.txHash?.slice(0, 20)}...`,
+          `You are now subscribed to ${selectedPackage.name}!\n\nTx: ${result.txHash?.slice(0, 20)}...${ref}`,
         );
       } else {
         Alert.alert('Payment Failed', result.error || 'Unknown error');
@@ -146,7 +152,7 @@ export default function SubscriptionScreen() {
           <View style={styles.savingsInfo}>
             <Ionicons name="star" size={16} color={COLORS.thronosGold} />
             <Text style={styles.savingsText}>
-              Pay with THRONOS & save up to 25%
+              Pay with THR & save up to 25%
             </Text>
           </View>
         </View>
@@ -184,7 +190,7 @@ export default function SubscriptionScreen() {
                 <View style={styles.priceContainer}>
                   <Text style={styles.priceUSD}>${pkg.priceUSD}</Text>
                   <Text style={styles.priceThronos}>
-                    or {pkg.priceThronos} THRONOS
+                    or {pkg.priceTHR} THR
                   </Text>
                   <Text style={styles.pricePeriod}>/month</Text>
                 </View>
@@ -236,7 +242,7 @@ export default function SubscriptionScreen() {
             <View style={styles.benefitText}>
               <Text style={styles.benefitName}>Earn Rewards</Text>
               <Text style={styles.benefitDesc}>
-                Get THRONOS tokens for using signals
+                Get THR tokens for using signals
               </Text>
             </View>
           </View>
@@ -254,7 +260,7 @@ export default function SubscriptionScreen() {
             <View style={styles.benefitText}>
               <Text style={styles.benefitName}>Referrals</Text>
               <Text style={styles.benefitDesc}>
-                Earn 50 THRONOS per referred friend
+                Earn 50 THR per referred friend
               </Text>
             </View>
           </View>
@@ -365,7 +371,7 @@ export default function SubscriptionScreen() {
                 {/* Token Selection */}
                 <Text style={styles.sectionLabel}>Pay with</Text>
                 <View style={styles.tokenSelector}>
-                  {['USDT', 'USDC', 'THRONOS'].map((token) => (
+                  {['USDT', 'USDC', 'THR'].map((token) => (
                     <TouchableOpacity
                       key={token}
                       style={[
@@ -382,7 +388,7 @@ export default function SubscriptionScreen() {
                       >
                         {token}
                       </Text>
-                      {token === 'THRONOS' && (
+                      {token === 'THR' && (
                         <View style={styles.discountBadge}>
                           <Text style={styles.discountText}>-25%</Text>
                         </View>
@@ -395,8 +401,8 @@ export default function SubscriptionScreen() {
                 <View style={styles.priceSummary}>
                   <Text style={styles.summaryLabel}>Total</Text>
                   <Text style={styles.summaryValue}>
-                    {selectedToken === 'THRONOS'
-                      ? `${selectedPackage?.priceThronos} THRONOS`
+                    {selectedToken === 'THR'
+                      ? `${selectedPackage?.priceTHR} THR`
                       : `${selectedPackage?.priceUSD} ${selectedToken}`
                     }
                   </Text>
@@ -469,7 +475,7 @@ export default function SubscriptionScreen() {
 
             <Text style={styles.securityNote}>
               <Ionicons name="lock-closed" size={12} color={COLORS.textMuted} />
-              {' '}Secured by Thronos Gateway
+              {' '}Secured by Thronos Blockchain
             </Text>
           </View>
         </View>
