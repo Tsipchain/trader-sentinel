@@ -12,7 +12,7 @@ export const CONFIG = {
   BRAIN_URL: process.env.EXPO_PUBLIC_BRAIN_URL ?? 'https://alanisys.up.railway.app',
 
   // Thronos Gateway - Payment & Rewards
-  THRONOS_GATEWAY_URL: 'https://gateway.thronos.io',
+  THRONOS_GATEWAY_URL: 'https://api.thronoschain.org',
   THRONOS_REWARDS_CONTRACT: '0x...', // Thronos Rewards Contract
 
   // Supported Networks for Crosschain Payments
