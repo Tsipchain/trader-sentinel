@@ -29,7 +29,7 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 limiter = Limiter(key_func=get_remote_address)
-app = FastAPI(title="Thronos Trader Sentinel", version="0.1.0")
+app = FastAPI(title="Pytheia — Thronos Trader Sentinel", version="0.2.0")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -60,6 +60,7 @@ _dex = DexScreenerProvider(enabled=settings.dexscreener_enabled)
 async def _shutdown():
     await _cex.close()
     await _dex.close()
+    await tech_module.close_exchange_pool()
 
 
 @app.get("/robots.txt", include_in_schema=False)

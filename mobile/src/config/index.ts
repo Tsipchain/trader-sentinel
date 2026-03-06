@@ -170,8 +170,8 @@ export const CONFIG = {
   WALLETCONNECT_PROJECT_ID: 'b4954b0dc4eb9832e0f03ef0f25cc744',
 
   // App Settings
-  APP_NAME: 'Trader Sentinel',
-  APP_VERSION: '1.0.0',
+  APP_NAME: 'Pytheia — Trader Sentinel',
+  APP_VERSION: '1.1.0',
   SUPPORT_EMAIL: 'support@thronos.io',
 
   // API security — set this to the same value as API_KEY env var on each service
