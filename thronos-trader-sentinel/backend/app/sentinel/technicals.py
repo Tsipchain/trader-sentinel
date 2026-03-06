@@ -104,14 +104,18 @@ class TechnicalResult:
     error: str | None = None
 
 
-_FALLBACK_EXCHANGES = ["binance", "bybit", "okx"]
+_FALLBACK_EXCHANGES = ["binance", "bybit", "okx", "mexc"]
 _BLOCKED_EXCHANGES_UNTIL: dict[str, float] = {}
 _BLOCK_SECONDS = 1800
 
+# ── Shared exchange pool (avoids creating a new instance per request) ────────
+_EXCHANGE_POOL: dict[str, object] = {}
 
-async def _fetch_ohlcv_from(exchange_id: str, symbol: str,
-                             timeframe: str, limit: int) -> list[list]:
-    """Try one exchange; return candles or raise."""
+
+def _get_or_create_exchange(exchange_id: str):
+    """Return a cached async CCXT exchange, creating one if needed."""
+    if exchange_id in _EXCHANGE_POOL:
+        return _EXCHANGE_POOL[exchange_id]
     ccxt = _ccxt_module()
     if ccxt is None:
         raise ValueError("ccxt async module unavailable")
@@ -119,14 +123,32 @@ async def _fetch_ohlcv_from(exchange_id: str, symbol: str,
     if ex_class is None:
         raise ValueError(f"Unknown exchange: {exchange_id}")
     ex = ex_class({"enableRateLimit": True, "timeout": 20_000})
-    try:
-        candles = await ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        return candles or []
-    finally:
+    _EXCHANGE_POOL[exchange_id] = ex
+    return ex
+
+
+async def close_exchange_pool():
+    """Gracefully close all pooled exchange instances (call on shutdown)."""
+    for ex_id, ex in list(_EXCHANGE_POOL.items()):
         try:
             await ex.close()
         except Exception:
             pass
+    _EXCHANGE_POOL.clear()
+
+
+async def _fetch_ohlcv_from(exchange_id: str, symbol: str,
+                             timeframe: str, limit: int) -> list[list]:
+    """Try one exchange; return candles or raise."""
+    ex = _get_or_create_exchange(exchange_id)
+    try:
+        candles = await ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        return candles or []
+    except Exception as exc:
+        # If the exchange is broken (e.g. session closed), evict and re-raise
+        if "session is closed" in str(exc).lower():
+            _EXCHANGE_POOL.pop(exchange_id, None)
+        raise
 
 
 async def _fetch_ohlcv_okx_http(symbol: str, limit: int) -> list[list]:
@@ -218,6 +240,8 @@ def _is_geo_block(exc: Exception) -> bool:
         r"cloudfront distribution is configured to block",
         r"service unavailable from a restricted location",
         r"\b451\b",
+        r"\b403\b.*forbidden",
+        r"403 error",
     ]
     return any(re.search(p, msg) for p in patterns)
 
