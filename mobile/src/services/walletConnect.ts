@@ -210,22 +210,45 @@ export async function getSavedThronosWallet(): Promise<ThronosWalletInfo | null>
 export async function fetchThronosBalances(address: string): Promise<{
   tokens: { symbol: string; balance: number; name: string }[];
 }> {
-  try {
-    const response = await fetch(
-      `${CONFIG.THRONOS_GATEWAY_URL}/api/wallet/tokens/${address}?show_zero=true`,
-    );
-    if (!response.ok) {
-      // Try the main node
-      const fallback = await fetch(
-        `https://thronoschain.org/api/wallet/tokens/${address}?show_zero=true`,
-      );
-      if (!fallback.ok) return { tokens: [] };
-      return await fallback.json();
+  // Try Thronos chain API — handles multiple response formats
+  const chainUrl = CONFIG.THRONOS_CHAIN_URL || CONFIG.THRONOS_GATEWAY_URL;
+  const urls = [
+    `${chainUrl}/api/wallet/tokens/${address}?show_zero=true`,
+    `${chainUrl}/api/balance/${address}`,
+    `https://api.thronoschain.org/api/wallet/tokens/${address}?show_zero=true`,
+    `https://api.thronoschain.org/api/balance/${address}`,
+  ];
+
+  for (const url of urls) {
+    try {
+      const response = await fetch(url, { headers: { 'Content-Type': 'application/json' } });
+      if (!response.ok) continue;
+      const data = await response.json();
+
+      // Format 1: /api/wallet/tokens → { tokens: [{ symbol, balance, name }] }
+      if (data.tokens && Array.isArray(data.tokens)) {
+        return data;
+      }
+      // Format 2: /api/balance → { thr_balance: number, token_balances: { ... } }
+      if (data.thr_balance !== undefined) {
+        const tokens: { symbol: string; balance: number; name: string }[] = [
+          { symbol: 'THR', balance: Number(data.thr_balance), name: 'Thronos' },
+        ];
+        // Add other token balances if present
+        if (data.token_balances && typeof data.token_balances === 'object') {
+          for (const [sym, bal] of Object.entries(data.token_balances)) {
+            if (sym !== 'THR') {
+              tokens.push({ symbol: sym, balance: Number(bal), name: sym });
+            }
+          }
+        }
+        return { tokens };
+      }
+    } catch {
+      continue;
     }
-    return await response.json();
-  } catch {
-    return { tokens: [] };
   }
+  return { tokens: [] };
 }
 
 /**

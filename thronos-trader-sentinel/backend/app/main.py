@@ -288,6 +288,56 @@ async def sentinel_technicals(request: Request, symbol: str = Query("BTC/USDT"),
     }
 
 
+# ── Brain Proxy ──────────────────────────────────────────────────────────────
+# When BRAIN_URL is set, proxy /api/brain/* requests to the Brain service.
+# This allows the mobile app's fallback (API_URL) to reach Brain routes
+# even if BRAIN_URL is misconfigured or unreachable directly.
+
+import httpx
+
+_BRAIN_URL = settings.brain_url.rstrip("/") if settings.brain_url else ""
+
+
+async def _proxy_to_brain(path: str, request: Request) -> Response:
+    """Forward a request to the Brain service and return its response."""
+    if not _BRAIN_URL:
+        return Response(
+            content=json.dumps({"ok": False, "error": "BRAIN_URL not configured on backend"}),
+            status_code=502,
+            media_type="application/json",
+        )
+
+    target_url = f"{_BRAIN_URL}{path}"
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in ("host", "content-length")}
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            if request.method == "GET":
+                resp = await client.get(target_url, headers=headers, params=dict(request.query_params))
+            else:
+                body = await request.body()
+                resp = await client.request(request.method, target_url, headers=headers, content=body)
+        return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
+    except httpx.ConnectError:
+        return Response(
+            content=json.dumps({"ok": False, "error": f"Cannot reach Brain at {_BRAIN_URL}"}),
+            status_code=502,
+            media_type="application/json",
+        )
+    except Exception as exc:
+        return Response(
+            content=json.dumps({"ok": False, "error": str(exc)}),
+            status_code=502,
+            media_type="application/json",
+        )
+
+
+@app.api_route("/api/brain/{path:path}", methods=["GET", "POST"])
+async def brain_proxy(path: str, request: Request, _: str = Security(verify_api_key)):
+    """Proxy all /api/brain/* routes to the dedicated Brain service."""
+    return await _proxy_to_brain(f"/api/brain/{path}", request)
+
+
 @app.get("/api/tts")
 async def tts(text: str = Query(...), lang: str = Query("en-US"), voice: str = Query("en-US-Neural2-D")):
     if not settings.google_tts_enabled:
