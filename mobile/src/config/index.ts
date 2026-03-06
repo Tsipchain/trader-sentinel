@@ -172,7 +172,7 @@ export const CONFIG = {
   // App Settings
   APP_NAME: 'Pytheia — Trader Sentinel',
   APP_VERSION: '1.1.0',
-  SUPPORT_EMAIL: 'support@thronos.io',
+  SUPPORT_EMAIL: 'support@thronoschain.org',
 
   // API security — set this to the same value as API_KEY env var on each service
   API_KEY: process.env.EXPO_PUBLIC_API_KEY ?? '',
