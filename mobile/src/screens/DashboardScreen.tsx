@@ -52,6 +52,11 @@ export default function DashboardScreen() {
   const [arbitrageOpps, setArbitrageOpps] = useState<ArbitrageData[]>([]);
   const [loading, setLoading] = useState(true);
 
+  // Show all signal types on dashboard (arbitrage, alert, opportunity)
+  const recentSignals = signals
+    .sort((a, b) => b.timestamp - a.timestamp)
+    .slice(0, subscription === 'free' ? 2 : 5);
+
   const arbitrageSignalOpps = signals
     .filter((sig) => sig.type === 'arbitrage')
     .sort((a, b) => b.timestamp - a.timestamp)
@@ -322,6 +327,44 @@ export default function DashboardScreen() {
             </View>
           )}
         </View>
+
+        {/* Recent Signals (all types) */}
+        {recentSignals.length > 0 && (
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>
+                <Ionicons name="pulse" size={18} color={COLORS.warning} /> Recent Signals
+              </Text>
+              <TouchableOpacity onPress={() => navigation.navigate('MainTabs', { screen: 'Signals' } as any)}>
+                <Text style={styles.seeAll}>See All</Text>
+              </TouchableOpacity>
+            </View>
+
+            {recentSignals.map((sig, index) => {
+              const iconMap: Record<string, { name: string; color: string }> = {
+                arbitrage: { name: 'swap-horizontal', color: COLORS.success },
+                alert: { name: 'warning', color: COLORS.warning },
+                opportunity: { name: 'trending-up', color: COLORS.primary },
+              };
+              const icon = iconMap[sig.type] || { name: 'information-circle', color: COLORS.info };
+              const minutes = Math.floor((Date.now() - sig.timestamp) / 60000);
+              const timeText = minutes < 1 ? 'Just now' : minutes < 60 ? `${minutes}m ago` : `${Math.floor(minutes / 60)}h ago`;
+
+              return (
+                <View key={`recent-${index}`} style={styles.arbCard}>
+                  <View style={styles.arbHeader}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                      <Ionicons name={icon.name as any} size={18} color={icon.color} style={{ marginRight: 6 }} />
+                      <Text style={styles.arbSymbol}>{sig.symbol}</Text>
+                    </View>
+                    <Text style={{ fontSize: 11, color: COLORS.textMuted }}>{timeText}</Text>
+                  </View>
+                  <Text style={styles.arbVenueLabel}>{sig.message}</Text>
+                </View>
+              );
+            })}
+          </View>
+        )}
 
         {/* Watchlist */}
         <View style={styles.section}>
