@@ -28,7 +28,7 @@ from app.sentinel import geo as geo_module
 from app.sentinel import technicals as tech_module
 from app.sentinel import risk as risk_module
 
-from app.brain.connector import fetch_exchange_snapshot, fetch_user_trades
+from app.brain.connector import fetch_exchange_snapshot, fetch_user_trades, fetch_open_positions
 from app.brain.predictor import PredictionEngine
 from app.brain import store as brain_store
 
@@ -445,33 +445,84 @@ async def brain_exchange_snapshot(payload: dict = Body(default_factory=dict), _:
 
 @app.post("/api/brain/sync")
 async def brain_sync_trades(payload: dict = Body(default_factory=dict), _: str = Security(verify_api_key)):
-    """Fetch closed trade history, train personal MLP model, persist matched trade records."""
+    """Fetch closed trade history, train personal MLP model, persist matched trade records.
+
+    Supports market_type: "auto" (default — tries futures first), "futures", "spot".
+    """
     user_id = payload.get("user_id") or payload.get("userId") or "anonymous"
     exchange = payload.get("exchange")
     api_key = payload.get("api_key") or payload.get("apiKey")
     api_secret = payload.get("api_secret") or payload.get("apiSecret")
     symbol = payload.get("symbol") or "BTC/USDT"
     days = int(payload.get("days") or 30)
+    market_type = payload.get("market_type") or payload.get("marketType") or "auto"
 
     if not exchange or not api_key or not api_secret:
         return {"ok": True, "trained": False, "trade_count": 0}
 
     try:
-        trades = await fetch_user_trades(exchange=exchange, api_key=api_key, api_secret=api_secret, symbol=symbol, days=days)
+        trades = await fetch_user_trades(
+            exchange=exchange, api_key=api_key, api_secret=api_secret,
+            symbol=symbol, days=days, market_type=market_type,
+        )
     except ValueError as e:
         raise HTTPException(400, detail=str(e))
     except Exception as e:
         raise HTTPException(502, detail=f"Exchange error: {e}")
 
     if not trades:
-        raise HTTPException(400, detail="No trades found for this pair/period. Try a longer window or different symbol.")
+        return {
+            "ok": True,
+            "trained": False,
+            "trade_count": 0,
+            "message": f"No trades found on {exchange} ({market_type}) for the last {days} days. "
+                       "Make sure you have closed trades in your history.",
+        }
 
     result = _brain_engine.train(user_id, trades)
     records, hist_stats = _build_trade_records(trades, exchange)
     if records:
         brain_store.save_history(user_id, records, hist_stats)
 
-    return {"ok": True, **result}
+    return {"ok": True, "market_type": market_type, **result}
+
+
+@app.post("/api/brain/positions")
+async def brain_positions(payload: dict = Body(default_factory=dict), _: str = Security(verify_api_key)):
+    """Fetch live open futures positions with real-time PnL for monitoring."""
+    user_id = payload.get("user_id") or payload.get("userId") or "anonymous"
+    exchange = (payload.get("exchange") or "").lower()
+    api_key = payload.get("api_key") or payload.get("apiKey")
+    api_secret = payload.get("api_secret") or payload.get("apiSecret")
+    passphrase = payload.get("passphrase")
+
+    if not exchange or not api_key or not api_secret:
+        return {"ok": False, "positions": [], "error": "Missing exchange credentials"}
+
+    try:
+        positions = await fetch_open_positions(exchange, api_key, api_secret, passphrase)
+
+        # Save to autotrader session for tracking
+        session = brain_store.load_autotrader(user_id)
+        if session:
+            session["active_trades"] = positions
+            session["last_position_check"] = time.time()
+            brain_store.save_autotrader(user_id, session)
+
+        # Calculate portfolio summary
+        total_unrealized = sum(p.get("unrealizedPnl", 0) for p in positions)
+        total_notional = sum(p.get("notional", 0) for p in positions)
+
+        return {
+            "ok": True,
+            "positions": positions,
+            "count": len(positions),
+            "total_unrealized_pnl": round(total_unrealized, 4),
+            "total_notional": round(total_notional, 2),
+            "ts": time.time(),
+        }
+    except Exception as e:
+        return {"ok": False, "positions": [], "error": str(e)}
 
 
 @app.post("/api/brain/predict")

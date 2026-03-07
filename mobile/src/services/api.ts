@@ -476,7 +476,8 @@ export const brainAPI = {
     api_secret: string;
     symbol?: string;
     days?: number;
-  }): Promise<{ ok: boolean; trained: boolean; trade_count?: number; model_accuracy?: number }> {
+    market_type?: 'auto' | 'futures' | 'spot';
+  }): Promise<{ ok: boolean; trained: boolean; trade_count?: number; model_accuracy?: number; message?: string; market_type?: string }> {
     const response = await brainPost('/api/brain/sync', params);
     return response;
   },
@@ -576,6 +577,38 @@ export const brainAPI = {
       api_secret: params.apiSecret,
       passphrase: params.passphrase,
     });
+    return response;
+  },
+
+  async getOpenPositions(params: {
+    user_id: string;
+    exchange: string;
+    api_key: string;
+    api_secret: string;
+    passphrase?: string;
+  }): Promise<{
+    ok: boolean;
+    positions: Array<{
+      symbol: string;
+      side: string;
+      contracts: number;
+      entryPrice: number;
+      markPrice: number;
+      unrealizedPnl: number;
+      pnlPct: number;
+      leverage: number;
+      marginMode: string;
+      liquidationPrice: number;
+      notional: number;
+      timestamp: number;
+    }>;
+    count: number;
+    total_unrealized_pnl: number;
+    total_notional: number;
+    ts: number;
+    error?: string;
+  }> {
+    const response = await brainPost('/api/brain/positions', params);
     return response;
   },
 
