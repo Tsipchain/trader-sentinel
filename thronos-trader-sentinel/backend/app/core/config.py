@@ -25,8 +25,7 @@ class Settings(BaseSettings):
     # NYT Article Search API (developer.nytimes.com)
     nyt_api_key: str | None = None
 
-    # Brain service URL for proxy fallback
-    brain_url: str = ""
+    # Brain is now integrated directly — no proxy needed
 
 
 settings = Settings()
