@@ -32,10 +32,10 @@ interface Package {
 }
 
 const packages: Package[] = [
-  { ...CONFIG.PACKAGES.STARTER, priceTHR: CONFIG.PACKAGES.STARTER.priceTHR ?? 25 },
-  { ...CONFIG.PACKAGES.PRO, popular: true, priceTHR: CONFIG.PACKAGES.PRO.priceTHR ?? 79 },
-  { ...CONFIG.PACKAGES.ELITE, priceTHR: CONFIG.PACKAGES.ELITE.priceTHR ?? 229 },
-  { ...CONFIG.PACKAGES.WHALE, priceTHR: CONFIG.PACKAGES.WHALE.priceTHR ?? 749 },
+  { ...CONFIG.PACKAGES.STARTER },
+  { ...CONFIG.PACKAGES.PRO },
+  { ...CONFIG.PACKAGES.ELITE },
+  { ...CONFIG.PACKAGES.WHALE },
 ];
 
 export default function SubscriptionScreen() {
@@ -318,33 +318,115 @@ export default function SubscriptionScreen() {
           </TouchableOpacity>
         ))}
 
-        {/* Thronos Benefits */}
+        {/* Free Tier Info */}
         <View style={styles.benefitsSection}>
-          <Text style={styles.benefitsTitle}>Thronos Ecosystem Benefits</Text>
+          <Text style={styles.benefitsTitle}>Free Plan Includes</Text>
+          <View style={styles.benefitItem}>
+            <Ionicons name="pulse" size={24} color={COLORS.primary} />
+            <View style={styles.benefitText}>
+              <Text style={styles.benefitName}>BTC Market Signals</Text>
+              <Text style={styles.benefitDesc}>
+                Real-time Bitcoin signals with 20s refresh
+              </Text>
+            </View>
+          </View>
+          <View style={styles.benefitItem}>
+            <Ionicons name="shield-checkmark" size={24} color={COLORS.success} />
+            <View style={styles.benefitText}>
+              <Text style={styles.benefitName}>Basic Risk Monitor</Text>
+              <Text style={styles.benefitDesc}>
+                Composite risk score from calendar + technical indicators
+              </Text>
+            </View>
+          </View>
+          <View style={styles.benefitItem}>
+            <Ionicons name="swap-horizontal" size={24} color={COLORS.accent} />
+            <View style={styles.benefitText}>
+              <Text style={styles.benefitName}>Arbitrage Scanner</Text>
+              <Text style={styles.benefitDesc}>
+                Cross-exchange price difference alerts for BTC
+              </Text>
+            </View>
+          </View>
+        </View>
+
+        {/* Platform Features */}
+        <View style={styles.benefitsSection}>
+          <Text style={styles.benefitsTitle}>Powered by Sentinel AI</Text>
+          <View style={styles.benefitItem}>
+            <Ionicons name="hardware-chip" size={24} color={COLORS.thronosPurple} />
+            <View style={styles.benefitText}>
+              <Text style={styles.benefitName}>Neural Brain</Text>
+              <Text style={styles.benefitDesc}>
+                Personal MLP model trained on YOUR trade history
+              </Text>
+            </View>
+          </View>
+          <View style={styles.benefitItem}>
+            <Ionicons name="analytics" size={24} color={COLORS.primary} />
+            <View style={styles.benefitText}>
+              <Text style={styles.benefitName}>7 Technical Indicators</Text>
+              <Text style={styles.benefitDesc}>
+                RSI, MACD, Bollinger, EMA, Williams %R, Fibonacci, ATR
+              </Text>
+            </View>
+          </View>
+          <View style={styles.benefitItem}>
+            <Ionicons name="earth" size={24} color={COLORS.error} />
+            <View style={styles.benefitText}>
+              <Text style={styles.benefitName}>Geopolitical Intelligence</Text>
+              <Text style={styles.benefitDesc}>
+                Live news sentiment analysis — Iran, Energy, Conflict
+              </Text>
+            </View>
+          </View>
+          <View style={styles.benefitItem}>
+            <Ionicons name="eye" size={24} color={COLORS.thronosGold} />
+            <View style={styles.benefitText}>
+              <Text style={styles.benefitName}>24/7 Position Monitoring</Text>
+              <Text style={styles.benefitDesc}>
+                Live futures position tracking with auto-refresh
+              </Text>
+            </View>
+          </View>
+        </View>
+
+        {/* Thronos Ecosystem */}
+        <View style={styles.benefitsSection}>
+          <Text style={styles.benefitsTitle}>Thronos Ecosystem</Text>
           <View style={styles.benefitItem}>
             <Ionicons name="gift" size={24} color={COLORS.thronosGold} />
             <View style={styles.benefitText}>
-              <Text style={styles.benefitName}>Earn Rewards</Text>
+              <Text style={styles.benefitName}>Earn THR Rewards</Text>
               <Text style={styles.benefitDesc}>
-                Get THR tokens for using signals
+                Up to 5x multiplier · Daily login + signal usage rewards
               </Text>
             </View>
           </View>
           <View style={styles.benefitItem}>
             <Ionicons name="water" size={24} color={COLORS.accent} />
             <View style={styles.benefitText}>
-              <Text style={styles.benefitName}>Liquidity Pools</Text>
+              <Text style={styles.benefitName}>Liquidity Pools — 12% APY</Text>
               <Text style={styles.benefitDesc}>
-                Earn up to 12% APY providing liquidity
+                Provide liquidity and earn passive income in THR
+              </Text>
+            </View>
+          </View>
+          <View style={styles.benefitItem}>
+            <Ionicons name="flame" size={24} color={COLORS.error} />
+            <View style={styles.benefitText}>
+              <Text style={styles.benefitName}>25% Fee Burn</Text>
+              <Text style={styles.benefitDesc}>
+                Every subscription burns 25% of fees — deflationary
               </Text>
             </View>
           </View>
           <View style={styles.benefitItem}>
             <Ionicons name="people" size={24} color={COLORS.success} />
             <View style={styles.benefitText}>
-              <Text style={styles.benefitName}>Referrals</Text>
+              <Text style={styles.benefitName}>Referrals — 50 THR Each</Text>
               <Text style={styles.benefitDesc}>
-                Earn 50 THR per referred friend
+                Invite friends and earn THR for every signup
               </Text>
             </View>
           </View>
