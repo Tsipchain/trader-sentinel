@@ -21,6 +21,38 @@ export interface ThronosWalletInfo {
 }
 
 // ── RPC Providers (read-only, for balance queries) ────────────────────────────
+// Multiple fallback RPCs per chain to handle "no response" errors
+
+const RPC_FALLBACKS: Record<number, string[]> = {
+  1: [
+    CONFIG.SUPPORTED_CHAINS.ETHEREUM.rpcUrl,
+    'https://rpc.ankr.com/eth',
+    'https://ethereum-rpc.publicnode.com',
+    'https://1rpc.io/eth',
+  ],
+  56: [
+    CONFIG.SUPPORTED_CHAINS.BSC.rpcUrl,
+    'https://bsc-dataseed1.defibit.io',
+    'https://rpc.ankr.com/bsc',
+  ],
+  137: [
+    CONFIG.SUPPORTED_CHAINS.POLYGON.rpcUrl,
+    'https://rpc.ankr.com/polygon',
+    'https://polygon-bor-rpc.publicnode.com',
+  ],
+  42161: [
+    CONFIG.SUPPORTED_CHAINS.ARBITRUM.rpcUrl,
+    'https://rpc.ankr.com/arbitrum',
+  ],
+  43114: [
+    CONFIG.SUPPORTED_CHAINS.AVALANCHE.rpcUrl,
+    'https://rpc.ankr.com/avalanche',
+  ],
+  8453: [
+    CONFIG.SUPPORTED_CHAINS.BASE.rpcUrl,
+    'https://base-rpc.publicnode.com',
+  ],
+};
 
 const RPC_URLS: Record<number, string> = {
   1: CONFIG.SUPPORTED_CHAINS.ETHEREUM.rpcUrl,
@@ -38,15 +70,26 @@ export function getReadProvider(chainId: number = 1): ethers.JsonRpcProvider {
 
 // ── Balance Fetching ──────────────────────────────────────────────────────────
 
+/**
+ * Fetch native balance with RPC fallbacks.
+ * Tries each RPC URL in sequence until one succeeds.
+ */
 export async function fetchETHBalance(address: string, chainId: number = 1): Promise<string> {
-  try {
-    const provider = getReadProvider(chainId);
-    const balance = await provider.getBalance(address);
-    return ethers.formatEther(balance);
-  } catch (error) {
-    console.warn('Failed to fetch ETH balance:', error);
-    return '0';
+  const rpcs = RPC_FALLBACKS[chainId] || RPC_FALLBACKS[1] || [];
+
+  for (const rpcUrl of rpcs) {
+    try {
+      const provider = new ethers.JsonRpcProvider(rpcUrl);
+      const balance = await provider.getBalance(address);
+      return ethers.formatEther(balance);
+    } catch (error) {
+      console.warn(`RPC failed (${rpcUrl}):`, error);
+      continue;
+    }
   }
+
+  console.warn('All RPCs failed for chainId', chainId);
+  return '0';
 }
 
 export async function fetchERC20Balance(

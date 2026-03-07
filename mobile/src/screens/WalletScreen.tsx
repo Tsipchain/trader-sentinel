@@ -46,8 +46,27 @@ export default function WalletScreen() {
   const [tokens, setTokens] = useState<TokenDisplay[]>([]);
   const [loading, setLoading] = useState(true);
   const [prices, setPrices] = useState<Record<string, number>>({});
+  const [chainPickerOpen, setChainPickerOpen] = useState(false);
 
-  const isThronosWallet = wallet.address?.startsWith('THR') ?? false;
+  const isThronosWallet = wallet.walletType === 'thronos' || (wallet.address?.startsWith('THR') ?? false);
+
+  // Available chains for current wallet type
+  const availableChainKeys: string[] = isThronosWallet
+    ? (CONFIG.WALLET_CHAINS.thronos || ['THRONOS'])
+    : wallet.walletType === 'phantom'
+      ? (CONFIG.WALLET_CHAINS.phantom || ['SOLANA'])
+      : (CONFIG.WALLET_CHAINS.evm || ['ETHEREUM']);
+
+  const currentChainKey = wallet.selectedChainKey || (isThronosWallet ? 'THRONOS' : 'ETHEREUM');
+  const currentChain = CONFIG.SUPPORTED_CHAINS[currentChainKey as keyof typeof CONFIG.SUPPORTED_CHAINS];
+
+  const switchChain = async (chainKey: string) => {
+    const chain = CONFIG.SUPPORTED_CHAINS[chainKey as keyof typeof CONFIG.SUPPORTED_CHAINS];
+    if (!chain) return;
+    setChainPickerOpen(false);
+    setLoading(true);
+    setWallet({ selectedChainKey: chainKey, chainId: chain.chainId });
+  };
 
   const loadBalances = useCallback(async () => {
     if (!wallet.address) return;
@@ -58,7 +77,7 @@ export default function WalletScreen() {
 
       const tokenList: TokenDisplay[] = [];
 
-      if (isThronosWallet) {
+      if (isThronosWallet && currentChainKey === 'THRONOS') {
         // Fetch Thronos chain balances
         const data = await fetchThronosBalances(wallet.address);
         if (data.tokens && data.tokens.length > 0) {
@@ -68,7 +87,7 @@ export default function WalletScreen() {
                 symbol: t.symbol,
                 name: t.name || t.symbol,
                 balance: t.balance,
-                value: t.symbol === 'THR' ? t.balance * 0.85 : t.balance, // THR price TBD
+                value: t.symbol === 'THR' ? t.balance * 0.85 : t.balance,
                 change: 0,
                 icon: t.symbol === 'THR' ? 'planet' : 'cube',
                 color: t.symbol === 'THR' ? COLORS.thronosGold : COLORS.accent,
@@ -89,22 +108,46 @@ export default function WalletScreen() {
             color: COLORS.thronosGold,
           });
         }
+      } else if (currentChainKey === 'BTC') {
+        // BTC balance — bridged via Thronos Chain
+        tokenList.push({
+          symbol: 'BTC',
+          name: 'Bitcoin (Bridge)',
+          balance: 0,
+          value: 0,
+          change: 0,
+          icon: 'logo-bitcoin',
+          color: '#F7931A',
+        });
+      } else if (currentChainKey === 'XRP') {
+        // XRP Ledger balance
+        tokenList.push({
+          symbol: 'XRP',
+          name: 'XRP Ledger',
+          balance: 0,
+          value: 0,
+          change: 0,
+          icon: 'pulse',
+          color: '#23292F',
+        });
       } else {
-        // EVM wallet - fetch ETH balance
-        const ethBalance = await fetchETHBalance(wallet.address, wallet.chainId || 1);
-        const ethPrice = priceData.ETH || 0;
+        // EVM wallet - fetch native balance for selected chain
+        const nativeChainId = typeof currentChain?.chainId === 'number' ? currentChain.chainId : 1;
+        const nativeSymbol = currentChain?.symbol || 'ETH';
+        const nativeBalance = await fetchETHBalance(wallet.address, nativeChainId);
+        const nativePrice = priceData[nativeSymbol] || priceData.ETH || 0;
 
         // Update stored balance
-        setWallet({ balance: ethBalance });
+        setWallet({ balance: nativeBalance });
 
         tokenList.push({
-          symbol: 'ETH',
-          name: 'Ethereum',
-          balance: parseFloat(ethBalance) || 0,
-          value: (parseFloat(ethBalance) || 0) * ethPrice,
+          symbol: nativeSymbol,
+          name: currentChain?.name || 'Unknown',
+          balance: parseFloat(nativeBalance) || 0,
+          value: (parseFloat(nativeBalance) || 0) * nativePrice,
           change: 0,
-          icon: 'diamond-outline',
-          color: '#627EEA',
+          icon: nativeSymbol === 'BNB' ? 'cube' : nativeSymbol === 'AVAX' ? 'snow' : 'diamond-outline',
+          color: nativeSymbol === 'BNB' ? '#F0B90B' : nativeSymbol === 'MATIC' ? '#8247E5' : nativeSymbol === 'AVAX' ? '#E84142' : '#627EEA',
         });
 
         // Show THR rewards balance
@@ -124,11 +167,11 @@ export default function WalletScreen() {
       setTokens(tokenList);
     } catch (error) {
       console.warn('Failed to load balances:', error);
-      // Show fallback data from store
+      const sym = currentChain?.symbol || 'ETH';
       setTokens([
         {
-          symbol: isThronosWallet ? 'THR' : 'ETH',
-          name: isThronosWallet ? 'Thronos' : 'Ethereum',
+          symbol: isThronosWallet ? 'THR' : sym,
+          name: isThronosWallet ? 'Thronos' : (currentChain?.name || 'Unknown'),
           balance: parseFloat(wallet.balance) || 0,
           value: 0,
           change: 0,
@@ -139,7 +182,7 @@ export default function WalletScreen() {
     } finally {
       setLoading(false);
     }
-  }, [wallet.address, wallet.chainId, isThronosWallet, user?.thronosBalance]);
+  }, [wallet.address, wallet.chainId, isThronosWallet, currentChainKey, user?.thronosBalance]);
 
   useEffect(() => {
     loadBalances();
@@ -184,11 +227,7 @@ export default function WalletScreen() {
   };
 
   const getNetworkName = () => {
-    if (isThronosWallet) return 'Thronos Chain';
-    const chain = Object.values(CONFIG.SUPPORTED_CHAINS).find(
-      (c) => c.chainId === wallet.chainId,
-    );
-    return chain?.name || 'Ethereum';
+    return currentChain?.name || 'Unknown';
   };
 
   const totalValue = tokens.reduce((acc, t) => acc + t.value, 0);
@@ -222,10 +261,17 @@ export default function WalletScreen() {
           end={{ x: 1, y: 1 }}
         >
           <View style={styles.walletCardHeader}>
-            <View style={styles.networkBadge}>
+            <TouchableOpacity
+              style={styles.networkBadge}
+              onPress={() => availableChainKeys.length > 1 && setChainPickerOpen(!chainPickerOpen)}
+              activeOpacity={availableChainKeys.length > 1 ? 0.6 : 1}
+            >
               <View style={[styles.networkDot, isThronosWallet && { backgroundColor: COLORS.thronosGold }]} />
               <Text style={styles.networkText}>{getNetworkName()}</Text>
-            </View>
+              {availableChainKeys.length > 1 && (
+                <Ionicons name={chainPickerOpen ? 'chevron-up' : 'chevron-down'} size={14} color={COLORS.text} style={{ marginLeft: 4 }} />
+              )}
+            </TouchableOpacity>
             <View
               style={[
                 styles.subscriptionBadge,
@@ -263,6 +309,31 @@ export default function WalletScreen() {
             )}
           </View>
         </LinearGradient>
+
+        {/* Chain Picker Dropdown */}
+        {chainPickerOpen && availableChainKeys.length > 1 && (
+          <View style={styles.chainPicker}>
+            {availableChainKeys.map((key) => {
+              const chain = CONFIG.SUPPORTED_CHAINS[key as keyof typeof CONFIG.SUPPORTED_CHAINS];
+              if (!chain) return null;
+              const isActive = key === currentChainKey;
+              return (
+                <TouchableOpacity
+                  key={key}
+                  style={[styles.chainPickerItem, isActive && styles.chainPickerItemActive]}
+                  onPress={() => switchChain(key)}
+                >
+                  <View style={[styles.chainPickerDot, isActive && styles.chainPickerDotActive]} />
+                  <Text style={[styles.chainPickerText, isActive && styles.chainPickerTextActive]}>
+                    {chain.name}
+                  </Text>
+                  <Text style={styles.chainPickerSymbol}>{chain.symbol}</Text>
+                  {isActive && <Ionicons name="checkmark" size={18} color={COLORS.primary} />}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        )}
 
         {/* Quick Actions */}
         <View style={styles.quickActions}>
@@ -505,6 +576,50 @@ const styles = StyleSheet.create({
     fontSize: FONT_SIZES.xxxl,
     fontWeight: '700',
     color: COLORS.text,
+  },
+  chainPicker: {
+    backgroundColor: COLORS.surface,
+    borderRadius: BORDER_RADIUS.lg,
+    marginBottom: SPACING.lg,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    overflow: 'hidden',
+  },
+  chainPickerItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.md,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  chainPickerItemActive: {
+    backgroundColor: COLORS.primary + '10',
+  },
+  chainPickerDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: COLORS.textMuted,
+    marginRight: SPACING.sm,
+  },
+  chainPickerDotActive: {
+    backgroundColor: COLORS.success,
+  },
+  chainPickerText: {
+    flex: 1,
+    fontSize: FONT_SIZES.md,
+    color: COLORS.text,
+    fontWeight: '500',
+  },
+  chainPickerTextActive: {
+    color: COLORS.primary,
+    fontWeight: '600',
+  },
+  chainPickerSymbol: {
+    fontSize: FONT_SIZES.sm,
+    color: COLORS.textMuted,
+    marginRight: SPACING.sm,
   },
   quickActions: {
     flexDirection: 'row',

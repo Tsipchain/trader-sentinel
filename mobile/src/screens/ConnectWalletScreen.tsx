@@ -28,6 +28,7 @@ import {
   isValidEVMAddress,
   isValidThronosAddress,
 } from '../services/walletConnect';
+import { CONFIG } from '../config';
 
 type NavigationProp = NativeStackNavigationProp<RootStackParamList, 'ConnectWallet'>;
 
@@ -103,12 +104,13 @@ export default function ConnectWalletScreen() {
   const [evmModalVisible, setEvmModalVisible] = useState(false);
   const [manualAddress, setManualAddress] = useState('');
   const [selectedEvmWallet, setSelectedEvmWallet] = useState<string>('');
+  const [selectedChainKey, setSelectedChainKey] = useState<string>('ETHEREUM');
 
-  const finalizeConnection = async (address: string, chainId: number, provider: string) => {
+  const finalizeConnection = async (address: string, chainId: number | string, provider: string, walletType: 'thronos' | 'evm' | 'phantom' = 'evm', chainKey: string = 'ETHEREUM') => {
     let balance = '0';
 
     // Fetch real balance for EVM wallets
-    if (address.startsWith('0x')) {
+    if (address.startsWith('0x') && typeof chainId === 'number') {
       try {
         balance = await fetchETHBalance(address, chainId);
       } catch {
@@ -132,6 +134,9 @@ export default function ConnectWalletScreen() {
       address,
       chainId,
       balance,
+      walletType,
+      selectedChainKey: chainKey,
+      provider,
     });
 
     setUser({
@@ -175,7 +180,7 @@ export default function ConnectWalletScreen() {
     try {
       const result = await importThronosWallet(importAddress.trim(), importSecret.trim());
       setThronosModalVisible(false);
-      await finalizeConnection(result.address, 0, 'thronos');
+      await finalizeConnection(result.address, 'thronos', 'thronos', 'thronos', 'THRONOS');
     } catch (error: any) {
       Alert.alert('Import Failed', error.message || 'Invalid Thronos wallet credentials.');
     } finally {
@@ -188,7 +193,7 @@ export default function ConnectWalletScreen() {
     setThronosModalVisible(false);
     setConnecting('thronos');
     try {
-      await finalizeConnection(createdWallet.address, 0, 'thronos');
+      await finalizeConnection(createdWallet.address, 'thronos', 'thronos', 'thronos', 'THRONOS');
     } finally {
       setConnecting(null);
     }
@@ -207,7 +212,7 @@ export default function ConnectWalletScreen() {
             onPress: async () => {
               setConnecting('thronos');
               try {
-                await finalizeConnection(saved.address, 0, 'thronos');
+                await finalizeConnection(saved.address, 'thronos', 'thronos', 'thronos', 'THRONOS');
               } finally {
                 setConnecting(null);
               }
@@ -263,10 +268,13 @@ export default function ConnectWalletScreen() {
       return;
     }
 
+    const chain = CONFIG.SUPPORTED_CHAINS[selectedChainKey as keyof typeof CONFIG.SUPPORTED_CHAINS];
+    const chainId = chain?.chainId ?? 1;
+
     setEvmModalVisible(false);
     setConnecting(selectedEvmWallet);
     try {
-      await finalizeConnection(address, 1, selectedEvmWallet);
+      await finalizeConnection(address, chainId, selectedEvmWallet, 'evm', selectedChainKey);
     } finally {
       setConnecting(null);
     }
@@ -555,10 +563,32 @@ export default function ConnectWalletScreen() {
               </TouchableOpacity>
             </View>
 
-            <View style={styles.modalContent}>
+            <ScrollView style={styles.modalContent} showsVerticalScrollIndicator={false}>
               <Text style={styles.importDesc}>
-                Open your wallet app and copy your public address, then paste it below. This is a read-only connection — your private keys stay safe in your wallet app.
+                Select your network, then paste your public address below. This is a read-only connection — your private keys stay safe in your wallet app.
               </Text>
+
+              {/* ── Network Selector ──────────────────────────────── */}
+              <Text style={styles.inputLabel}>Select Network</Text>
+              <View style={styles.chainSelectorGrid}>
+                {(CONFIG.WALLET_CHAINS[selectedEvmWallet === 'phantom' ? 'phantom' : 'evm'] || CONFIG.WALLET_CHAINS.evm).map((key) => {
+                  const chain = CONFIG.SUPPORTED_CHAINS[key as keyof typeof CONFIG.SUPPORTED_CHAINS];
+                  if (!chain) return null;
+                  const isSelected = selectedChainKey === key;
+                  return (
+                    <TouchableOpacity
+                      key={key}
+                      style={[styles.chainChip, isSelected && styles.chainChipSelected]}
+                      onPress={() => setSelectedChainKey(key)}
+                    >
+                      <View style={[styles.chainDot, isSelected && styles.chainDotSelected]} />
+                      <Text style={[styles.chainChipText, isSelected && styles.chainChipTextSelected]}>
+                        {chain.name}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
 
               <Text style={styles.inputLabel}>Wallet Address</Text>
               <TextInput
@@ -590,7 +620,7 @@ export default function ConnectWalletScreen() {
                   <Text style={styles.thronosActionText}>Connect</Text>
                 </LinearGradient>
               </TouchableOpacity>
-            </View>
+            </ScrollView>
           </LinearGradient>
         </View>
       </Modal>
@@ -870,6 +900,45 @@ const styles = StyleSheet.create({
     color: COLORS.text,
     borderWidth: 1,
     borderColor: COLORS.border,
+  },
+  chainSelectorGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: SPACING.sm,
+    marginBottom: SPACING.lg,
+  },
+  chainChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.surface,
+    borderRadius: BORDER_RADIUS.full,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  chainChipSelected: {
+    borderColor: COLORS.primary,
+    backgroundColor: COLORS.primary + '15',
+  },
+  chainDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: COLORS.textMuted,
+    marginRight: SPACING.xs,
+  },
+  chainDotSelected: {
+    backgroundColor: COLORS.primary,
+  },
+  chainChipText: {
+    fontSize: FONT_SIZES.sm,
+    color: COLORS.textSecondary,
+    fontWeight: '500',
+  },
+  chainChipTextSelected: {
+    color: COLORS.primary,
+    fontWeight: '600',
   },
   readOnlyNote: {
     flexDirection: 'row',
