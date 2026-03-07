@@ -22,6 +22,18 @@ const SIGNAL_POLICY: Record<string, TierSignalPolicy> = {
   whale: { directionalLimit: 99, allowNewCoinSignals: true, refreshMs: 7000 },
 };
 
+/** Tier-based pair access: free=BTC only, starter=BTC+ETH, pro+=all */
+export function getAllowedPairs(watchlist: string[], tier: string): string[] {
+  if (tier === 'free') {
+    return watchlist.filter((s) => s.startsWith('BTC'));
+  }
+  if (tier === 'starter') {
+    return watchlist.filter((s) => s.startsWith('BTC') || s.startsWith('ETH'));
+  }
+  // pro, elite, whale → all pairs
+  return watchlist;
+}
+
 export function useSignalPolling() {
   const nextFetchAllowedAtRef = useRef(0);
   const notificationReadyRef = useRef(false);
@@ -90,11 +102,12 @@ export function useSignalPolling() {
     const { watchlist, subscription } = state;
     const tierPolicy = SIGNAL_POLICY[subscription] ?? SIGNAL_POLICY.free;
     const canUseAdvancedSignals = subscription !== 'free';
+    const allowedPairs = getAllowedPairs(watchlist, subscription);
 
     try {
-      // Arbitrage signals for watchlist
+      // Arbitrage signals for tier-allowed pairs
       const results = await Promise.allSettled(
-        watchlist.map(async (symbol) => {
+        allowedPairs.map(async (symbol) => {
           const arb = await marketAPI.getArbitrage(symbol);
           const signal = marketAPI.detectArbitrageSignal(arb, 0.1);
           return { symbol, arb, signal };
@@ -127,8 +140,8 @@ export function useSignalPolling() {
       });
 
       // Free-tier baseline directional hint
-      if (!canUseAdvancedSignals && watchlist.length > 0) {
-        const baseSymbol = watchlist[0];
+      if (!canUseAdvancedSignals && allowedPairs.length > 0) {
+        const baseSymbol = allowedPairs[0];
         const prefix = `free-risk-${baseSymbol}`;
         if (!hasAnySignalPrefix(prefix)) {
           const risk = await marketAPI.getRiskReport(baseSymbol);
@@ -148,7 +161,7 @@ export function useSignalPolling() {
 
       // Pro+ directional signals from composite risk framework
       if (canUseAdvancedSignals) {
-        const directionalSymbols = watchlist.slice(0, tierPolicy.directionalLimit);
+        const directionalSymbols = allowedPairs.slice(0, tierPolicy.directionalLimit);
         const riskSignals = await Promise.all(
           directionalSymbols.map(async (symbol) => {
             const risk = await marketAPI.getRiskReport(symbol);

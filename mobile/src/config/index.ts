@@ -37,21 +37,31 @@ export const CONFIG = {
     LP_REWARDS_SHARE: 0.25, // 25% to LP rewards pool
   },
 
-  // Supported Networks for Crosschain Payments
+  // Supported Networks for Crosschain Payments & Wallet
   SUPPORTED_CHAINS: {
     THRONOS: {
       chainId: 'thronos',
-      name: 'Thronos',
+      name: 'Thronos Chain',
       symbol: 'THR',
       rpcUrl: process.env.EXPO_PUBLIC_THRONOS_CHAIN ?? 'https://api.thronoschain.org',
       explorerUrl: 'https://explorer.thronoschain.org',
+      family: 'thronos',
+    },
+    BTC: {
+      chainId: 'btc',
+      name: 'Bitcoin',
+      symbol: 'BTC',
+      rpcUrl: '',
+      explorerUrl: 'https://mempool.space',
+      family: 'btc',
     },
     ETHEREUM: {
       chainId: 1,
       name: 'Ethereum',
       symbol: 'ETH',
-      rpcUrl: 'https://eth.llamarpc.com',
+      rpcUrl: 'https://rpc.ankr.com/eth',
       explorerUrl: 'https://etherscan.io',
+      family: 'evm',
     },
     BSC: {
       chainId: 56,
@@ -59,6 +69,7 @@ export const CONFIG = {
       symbol: 'BNB',
       rpcUrl: 'https://bsc-dataseed.binance.org',
       explorerUrl: 'https://bscscan.com',
+      family: 'evm',
     },
     POLYGON: {
       chainId: 137,
@@ -66,6 +77,7 @@ export const CONFIG = {
       symbol: 'MATIC',
       rpcUrl: 'https://polygon-rpc.com',
       explorerUrl: 'https://polygonscan.com',
+      family: 'evm',
     },
     ARBITRUM: {
       chainId: 42161,
@@ -73,6 +85,7 @@ export const CONFIG = {
       symbol: 'ETH',
       rpcUrl: 'https://arb1.arbitrum.io/rpc',
       explorerUrl: 'https://arbiscan.io',
+      family: 'evm',
     },
     AVALANCHE: {
       chainId: 43114,
@@ -80,6 +93,7 @@ export const CONFIG = {
       symbol: 'AVAX',
       rpcUrl: 'https://api.avax.network/ext/bc/C/rpc',
       explorerUrl: 'https://snowtrace.io',
+      family: 'evm',
     },
     BASE: {
       chainId: 8453,
@@ -87,6 +101,15 @@ export const CONFIG = {
       symbol: 'ETH',
       rpcUrl: 'https://mainnet.base.org',
       explorerUrl: 'https://basescan.org',
+      family: 'evm',
+    },
+    XRP: {
+      chainId: 'xrp',
+      name: 'XRP Ledger',
+      symbol: 'XRP',
+      rpcUrl: 'https://xrplcluster.com',
+      explorerUrl: 'https://xrpscan.com',
+      family: 'xrp',
     },
     SOLANA: {
       chainId: 'solana',
@@ -94,8 +117,16 @@ export const CONFIG = {
       symbol: 'SOL',
       rpcUrl: 'https://api.mainnet-beta.solana.com',
       explorerUrl: 'https://solscan.io',
+      family: 'solana',
     },
   },
+
+  // Which chains are available per wallet type
+  WALLET_CHAINS: {
+    thronos: ['THRONOS', 'BTC'],
+    evm: ['ETHEREUM', 'BSC', 'POLYGON', 'ARBITRUM', 'AVALANCHE', 'BASE'],
+    phantom: ['SOLANA'],
+  } as Record<string, string[]>,
 
   // Supported Payment Tokens per Chain
   PAYMENT_TOKENS: {

@@ -16,6 +16,7 @@ import { useStore, Signal } from '../store/useStore';
 import { marketAPI, brainAPI } from '../services/api';
 import * as Haptics from 'expo-haptics';
 import * as Notifications from 'expo-notifications';
+import { getAllowedPairs } from '../hooks/useSignalPolling';
 
 type SignalType = 'all' | 'arbitrage' | 'alert' | 'opportunity';
 
@@ -107,10 +108,12 @@ export default function SignalsScreen() {
       return;
     }
 
+    const allowedPairs = getAllowedPairs(watchlist, subscription);
+
     try {
-      // Fetch arbitrage data for watchlist (per-symbol fault tolerance)
+      // Fetch arbitrage data for tier-allowed pairs
       const results = await Promise.allSettled(
-        watchlist.map(async (symbol) => {
+        allowedPairs.map(async (symbol) => {
           const arb = await marketAPI.getArbitrage(symbol);
           const signal = marketAPI.detectArbitrageSignal(arb, 0.1);
           return { symbol, arb, signal };
@@ -144,8 +147,8 @@ export default function SignalsScreen() {
 
 
       // Free-tier baseline directional hint so users don't wait "all day" for a signal.
-      if (!canUseAdvancedSignals && watchlist.length > 0) {
-        const baseSymbol = watchlist[0];
+      if (!canUseAdvancedSignals && allowedPairs.length > 0) {
+        const baseSymbol = allowedPairs[0];
         const prefix = `free-risk-${baseSymbol}`;
         if (!hasAnySignalPrefix(prefix)) {
           const risk = await marketAPI.getRiskReport(baseSymbol);
@@ -165,7 +168,7 @@ export default function SignalsScreen() {
 
       // Pro+ directional signals from composite risk framework
       if (canUseAdvancedSignals) {
-        const directionalSymbols = watchlist.slice(0, tierPolicy.directionalLimit);
+        const directionalSymbols = allowedPairs.slice(0, tierPolicy.directionalLimit);
         const riskSignals = await Promise.all(
           directionalSymbols.map(async (symbol) => {
             const risk = await marketAPI.getRiskReport(symbol);
@@ -420,7 +423,7 @@ export default function SignalsScreen() {
         <View style={styles.subscriptionNotice}>
           <Ionicons name="lock-closed" size={16} color={COLORS.warning} />
           <Text style={styles.subscriptionNoticeText}>
-            Free tier: 1 directional signal + arbitrage. Upgrade for more pairs/faster updates.
+            Free tier: BTC pairs only. Upgrade to Starter for ETH, Pro+ for all pairs.
           </Text>
         </View>
       )}
@@ -429,7 +432,7 @@ export default function SignalsScreen() {
         <View style={styles.subscriptionNotice}>
           <Ionicons name="information-circle-outline" size={16} color={COLORS.info} />
           <Text style={styles.subscriptionNoticeText}>
-            Starter tier: up to 2 directional pairs. Upgrade to Pro+ for new-coin opportunities.
+            Starter tier: BTC + ETH pairs. Upgrade to Pro+ for all pairs & new-coin opportunities.
           </Text>
         </View>
       )}

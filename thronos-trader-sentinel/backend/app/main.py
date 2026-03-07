@@ -332,9 +332,15 @@ async def _proxy_to_brain(path: str, request: Request) -> Response:
         )
 
 
-@app.api_route("/api/brain/{path:path}", methods=["GET", "POST"])
-async def brain_proxy(path: str, request: Request, _: str = Security(verify_api_key)):
-    """Proxy all /api/brain/* routes to the dedicated Brain service."""
+@app.get("/api/brain/{path:path}", operation_id="brain_proxy_get")
+async def brain_proxy_get(path: str, request: Request, _: str = Security(verify_api_key)):
+    """Proxy GET /api/brain/* routes to the dedicated Brain service."""
+    return await _proxy_to_brain(f"/api/brain/{path}", request)
+
+
+@app.post("/api/brain/{path:path}", operation_id="brain_proxy_post")
+async def brain_proxy_post(path: str, request: Request, _: str = Security(verify_api_key)):
+    """Proxy POST /api/brain/* routes to the dedicated Brain service."""
     return await _proxy_to_brain(f"/api/brain/{path}", request)
 
 
