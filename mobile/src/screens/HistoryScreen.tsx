@@ -13,12 +13,32 @@ import CONFIG from '../config';
 import type { TradeRecord } from '../services/api';
 
 const EXCHANGE_OPTIONS = ['binance', 'bybit', 'okx', 'mexc'];
+const MARKET_TYPE_OPTIONS = [
+  { key: 'auto' as const, label: 'AUTO' },
+  { key: 'futures' as const, label: 'FUTURES' },
+  { key: 'spot' as const, label: 'SPOT' },
+];
+
+type OpenPosition = {
+  symbol: string;
+  side: string;
+  contracts: number;
+  entryPrice: number;
+  markPrice: number;
+  unrealizedPnl: number;
+  pnlPct: number;
+  leverage: number;
+  marginMode: string;
+  liquidationPrice: number;
+  notional: number;
+};
 
 export default function HistoryScreen() {
   const { user, tradeHistory, setTradeHistory, autoTrader, setAutoTrader, subscription } = useStore();
 
   const [syncLoading, setSyncLoading] = useState(false);
   const [analysisLoading, setAnalysisLoading] = useState(false);
+  const [positionsLoading, setPositionsLoading] = useState(false);
   const hasShownBrainMisconfigAlert = useRef(false);
 
   // Exchange credentials for sync (re-use autoTrader config if available)
@@ -26,6 +46,11 @@ export default function HistoryScreen() {
   const [apiKey, setApiKey] = useState(autoTrader.config.apiKey);
   const [apiSecret, setApiSecret] = useState(autoTrader.config.apiSecret);
   const [showSetup, setShowSetup] = useState(false);
+  const [marketType, setMarketType] = useState<'auto' | 'futures' | 'spot'>('auto');
+  const [openPositions, setOpenPositions] = useState<OpenPosition[]>([]);
+  const [totalUnrealizedPnl, setTotalUnrealizedPnl] = useState(0);
+  const [positionsLastChecked, setPositionsLastChecked] = useState<string | null>(null);
+  const positionPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     // Keep History screen credentials in sync with shared AutoTrader config.
@@ -33,6 +58,49 @@ export default function HistoryScreen() {
     setApiKey(autoTrader.config.apiKey);
     setApiSecret(autoTrader.config.apiSecret);
   }, [autoTrader.config.exchange, autoTrader.config.apiKey, autoTrader.config.apiSecret]);
+
+  // Position monitoring — poll every 15 minutes
+  const fetchPositions = useCallback(async () => {
+    if (!user?.id || !apiKey || !apiSecret || !exchange) return;
+    setPositionsLoading(true);
+    try {
+      const result = await brainAPI.getOpenPositions({
+        user_id: user.id,
+        exchange,
+        api_key: apiKey,
+        api_secret: apiSecret,
+      });
+      if (result.ok) {
+        setOpenPositions(result.positions ?? []);
+        setTotalUnrealizedPnl(result.total_unrealized_pnl ?? 0);
+        setPositionsLastChecked(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+      }
+    } catch {
+      // Silent fail for background polling
+    } finally {
+      setPositionsLoading(false);
+    }
+  }, [user?.id, exchange, apiKey, apiSecret]);
+
+  useEffect(() => {
+    // Auto-fetch positions on mount if credentials exist
+    if (apiKey && apiSecret && exchange) {
+      fetchPositions();
+    }
+
+    // Set up 15-minute polling interval
+    positionPollRef.current = setInterval(() => {
+      if (apiKey && apiSecret && exchange) {
+        fetchPositions();
+      }
+    }, 15 * 60 * 1000); // 15 minutes
+
+    return () => {
+      if (positionPollRef.current) {
+        clearInterval(positionPollRef.current);
+      }
+    };
+  }, [fetchPositions, apiKey, apiSecret, exchange]);
 
   const { trades, stats, lastSynced, aiAnalysis } = tradeHistory;
 
@@ -67,13 +135,14 @@ export default function HistoryScreen() {
       }
       hasShownBrainMisconfigAlert.current = false;
 
-      // Sync & train model
+      // Sync & train model (auto = try futures first, then spot)
       const syncResult = await brainAPI.syncTrades({
         user_id: user.id,
         exchange,
         api_key: apiKey,
         api_secret: apiSecret,
         days: 90,
+        market_type: marketType,
       });
 
       // Fetch history
@@ -104,11 +173,14 @@ export default function HistoryScreen() {
         wallet_address: user.walletAddress ?? '',
       }).catch(() => {});
 
+      // Also refresh open positions after sync
+      await fetchPositions();
+
       Alert.alert(
         'Sync Complete',
         syncResult.trade_count
-          ? `${syncResult.trade_count} trades synced. Model accuracy: ${((syncResult.model_accuracy ?? 0) * 100).toFixed(1)}%`
-          : 'Trade history updated.',
+          ? `${syncResult.trade_count} trades synced (${syncResult.market_type ?? marketType}). Model accuracy: ${((syncResult.model_accuracy ?? 0) * 100).toFixed(1)}%`
+          : (syncResult.message || 'Trade history updated.'),
       );
     } catch (err: any) {
       const status = err?.response?.status;
@@ -267,6 +339,22 @@ export default function HistoryScreen() {
             </View>
           )}
 
+          {/* Market type selector */}
+          <Text style={[styles.fieldLabel, { marginTop: SPACING.sm }]}>Market Type</Text>
+          <View style={styles.chips}>
+            {MARKET_TYPE_OPTIONS.map((mt) => (
+              <TouchableOpacity
+                key={mt.key}
+                style={[styles.chip, marketType === mt.key && styles.chipActive]}
+                onPress={() => setMarketType(mt.key)}
+              >
+                <Text style={[styles.chipText, marketType === mt.key && styles.chipTextActive]}>
+                  {mt.label}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
           <TouchableOpacity style={styles.syncBtn} onPress={handleSync} disabled={syncLoading}>
             {syncLoading
               ? <ActivityIndicator size="small" color={COLORS.text} />
@@ -276,6 +364,39 @@ export default function HistoryScreen() {
                 </>}
           </TouchableOpacity>
         </View>
+
+        {/* ── Open Positions (live) ───────────────────────────────── */}
+        {(openPositions.length > 0 || positionsLoading) && (
+          <>
+            <View style={styles.sectionRow}>
+              <Text style={styles.sectionTitle}>Open Positions</Text>
+              <TouchableOpacity onPress={fetchPositions} disabled={positionsLoading}>
+                {positionsLoading
+                  ? <ActivityIndicator size="small" color={COLORS.primary} />
+                  : <Ionicons name="refresh-outline" size={18} color={COLORS.primary} />}
+              </TouchableOpacity>
+            </View>
+            {positionsLastChecked && (
+              <Text style={styles.lastSynced}>
+                Last checked {positionsLastChecked} · Auto-refresh every 15min
+              </Text>
+            )}
+            {totalUnrealizedPnl !== 0 && (
+              <View style={[styles.card, { marginBottom: SPACING.sm }]}>
+                <Text style={styles.fieldLabel}>Total Unrealized P&L</Text>
+                <Text style={[styles.statValue, {
+                  color: totalUnrealizedPnl >= 0 ? COLORS.success : COLORS.error,
+                  fontSize: FONT_SIZES.lg,
+                }]}>
+                  {totalUnrealizedPnl >= 0 ? '+' : ''}${totalUnrealizedPnl.toFixed(4)}
+                </Text>
+              </View>
+            )}
+            {openPositions.map((pos, i) => (
+              <PositionRow key={`${pos.symbol}-${pos.side}-${i}`} position={pos} />
+            ))}
+          </>
+        )}
 
         {/* ── AI Strategy Advisor ────────────────────────────────── */}
         <Text style={styles.sectionTitle}>AI Strategy Advisor</Text>
@@ -390,6 +511,39 @@ function TradeRow({ trade }: { trade: TradeRecord }) {
   );
 }
 
+function PositionRow({ position }: { position: OpenPosition }) {
+  const pnlColor = position.unrealizedPnl >= 0 ? COLORS.success : COLORS.error;
+  const isLong = position.side === 'long';
+  const displaySymbol = position.symbol.replace(':USDT', '').replace('/USDT', '');
+
+  return (
+    <View style={rowStyles.row}>
+      <View style={[rowStyles.side, { backgroundColor: isLong ? COLORS.success + '22' : COLORS.error + '22' }]}>
+        <Text style={[rowStyles.sideText, { color: isLong ? COLORS.success : COLORS.error }]}>
+          {isLong ? 'L' : 'S'}
+        </Text>
+      </View>
+      <View style={rowStyles.body}>
+        <Text style={rowStyles.symbol}>{displaySymbol}</Text>
+        <Text style={rowStyles.date}>
+          {position.leverage}x {position.marginMode} · Entry ${position.entryPrice.toFixed(2)}
+        </Text>
+        <Text style={[rowStyles.date, { color: COLORS.textMuted }]}>
+          Mark ${position.markPrice.toFixed(2)} · Liq ${position.liquidationPrice > 0 ? '$' + position.liquidationPrice.toFixed(2) : '–'}
+        </Text>
+      </View>
+      <View style={{ alignItems: 'flex-end' }}>
+        <Text style={[rowStyles.pnl, { color: pnlColor }]}>
+          {position.pnlPct >= 0 ? '+' : ''}{position.pnlPct.toFixed(2)}%
+        </Text>
+        <Text style={[rowStyles.pnlUsd, { color: pnlColor }]}>
+          {position.unrealizedPnl >= 0 ? '+' : ''}${position.unrealizedPnl.toFixed(4)}
+        </Text>
+      </View>
+    </View>
+  );
+}
+
 const rowStyles = StyleSheet.create({
   row: {
     flexDirection: 'row', alignItems: 'center',
@@ -423,6 +577,10 @@ const styles = StyleSheet.create({
   sectionTitle: {
     color: COLORS.text, fontSize: FONT_SIZES.md, fontWeight: '700',
     marginBottom: SPACING.sm, marginTop: SPACING.sm,
+  },
+  sectionRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    marginTop: SPACING.sm, marginBottom: SPACING.sm,
   },
   card: {
     backgroundColor: COLORS.backgroundCard, borderRadius: BORDER_RADIUS.lg,

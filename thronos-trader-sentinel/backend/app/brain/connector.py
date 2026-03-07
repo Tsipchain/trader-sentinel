@@ -1,14 +1,42 @@
 """
 Connects to a user's CEX account via CCXT (read-only API keys) and
 fetches account/trade information.
+
+Supports both spot and futures (swap) markets.
 """
+import logging
 import time
 from typing import Any
 
 import ccxt.async_support as ccxt
 
+log = logging.getLogger(__name__)
 
-def _build_exchange(exchange: str, api_key: str, api_secret: str, passphrase: str | None = None) -> ccxt.Exchange:
+# Futures symbols to scan when no specific symbol is given
+DEFAULT_FUTURES_SYMBOLS = [
+    "BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT",
+    "BNB/USDT:USDT", "XRP/USDT:USDT", "DOGE/USDT:USDT",
+    "ADA/USDT:USDT", "AVAX/USDT:USDT", "LINK/USDT:USDT",
+    "DOT/USDT:USDT", "MATIC/USDT:USDT", "LTC/USDT:USDT",
+    "UNI/USDT:USDT", "NEAR/USDT:USDT", "FIL/USDT:USDT",
+    "ARB/USDT:USDT", "OP/USDT:USDT", "APT/USDT:USDT",
+    "SUI/USDT:USDT", "PEPE/USDT:USDT", "WIF/USDT:USDT",
+    "SHIB/USDT:USDT", "ATOM/USDT:USDT", "TRX/USDT:USDT",
+]
+
+DEFAULT_SPOT_SYMBOLS = [
+    "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT",
+    "XRP/USDT", "DOGE/USDT", "ADA/USDT", "AVAX/USDT",
+]
+
+
+def _build_exchange(
+    exchange: str,
+    api_key: str,
+    api_secret: str,
+    passphrase: str | None = None,
+    market_type: str = "spot",
+) -> ccxt.Exchange:
     ExchangeClass = getattr(ccxt, exchange, None)
     if ExchangeClass is None:
         raise ValueError(f"Unsupported exchange: '{exchange}'. Use a valid ccxt exchange id.")
@@ -16,6 +44,10 @@ def _build_exchange(exchange: str, api_key: str, api_secret: str, passphrase: st
     params: dict[str, Any] = {"apiKey": api_key, "secret": api_secret}
     if passphrase:
         params["password"] = passphrase
+
+    if market_type in ("futures", "swap"):
+        params["options"] = {"defaultType": "swap"}
+
     return ExchangeClass(params)
 
 
@@ -23,20 +55,109 @@ async def fetch_user_trades(
     exchange: str,
     api_key: str,
     api_secret: str,
-    symbol: str,
+    symbol: str = "BTC/USDT",
     days: int = 30,
+    market_type: str = "auto",
 ) -> list[dict[str, Any]]:
     """
-    Fetch closed trades for `symbol` from the user's exchange account.
+    Fetch closed trades from the user's exchange account.
     Uses read-only credentials — never places or cancels orders.
+
+    market_type:
+      - "auto"    → try futures first, then spot (default)
+      - "futures"  → only futures/swap
+      - "spot"     → only spot
     """
-    ex = _build_exchange(exchange, api_key, api_secret)
+    since_ms = int((time.time() - days * 86400) * 1000)
+    all_trades: list[dict[str, Any]] = []
+
+    if market_type in ("auto", "futures"):
+        futures_trades = await _fetch_trades_for_type(
+            exchange, api_key, api_secret, symbol, since_ms, "futures",
+        )
+        all_trades.extend(futures_trades)
+        log.info("[connector] %s futures trades fetched from %s", len(futures_trades), exchange)
+
+    if market_type in ("auto", "spot"):
+        # Skip spot if we already got plenty from futures
+        if market_type == "auto" and len(all_trades) >= 10:
+            log.info("[connector] skipping spot — enough futures trades found")
+        else:
+            spot_trades = await _fetch_trades_for_type(
+                exchange, api_key, api_secret, symbol, since_ms, "spot",
+            )
+            all_trades.extend(spot_trades)
+            log.info("[connector] %s spot trades fetched from %s", len(spot_trades), exchange)
+
+    # Deduplicate by trade id
+    seen: set[str] = set()
+    unique: list[dict[str, Any]] = []
+    for t in all_trades:
+        tid = str(t.get("id", ""))
+        if tid and tid in seen:
+            continue
+        if tid:
+            seen.add(tid)
+        unique.append(t)
+
+    return sorted(unique, key=lambda x: x["ts"])
+
+
+async def _fetch_trades_for_type(
+    exchange: str,
+    api_key: str,
+    api_secret: str,
+    symbol: str,
+    since_ms: int,
+    market_type: str,
+) -> list[dict[str, Any]]:
+    """Fetch trades for a specific market type, scanning multiple symbols if needed."""
+    ex = _build_exchange(exchange, api_key, api_secret, market_type=market_type)
+    trades: list[dict[str, Any]] = []
+
     try:
-        since_ms = int((time.time() - days * 86400) * 1000)
-        raw = await ex.fetch_my_trades(symbol, since=since_ms, limit=500)
-        return _normalise(raw, symbol)
+        # Determine which symbols to scan
+        if symbol and symbol != "BTC/USDT":
+            # User specified a symbol — adapt it for the market type
+            symbols_to_try = [_adapt_symbol(symbol, market_type)]
+        else:
+            # Scan common symbols
+            symbols_to_try = DEFAULT_FUTURES_SYMBOLS if market_type == "futures" else DEFAULT_SPOT_SYMBOLS
+
+        for sym in symbols_to_try:
+            try:
+                raw = await ex.fetch_my_trades(sym, since=since_ms, limit=500)
+                if raw:
+                    trades.extend(_normalise(raw, sym))
+                    log.info("[connector] %s: %d trades for %s", market_type, len(raw), sym)
+            except ccxt.BadSymbol:
+                continue
+            except ccxt.NotSupported:
+                continue
+            except Exception as e:
+                err_msg = str(e).lower()
+                if "symbol" in err_msg or "not found" in err_msg or "invalid" in err_msg:
+                    continue
+                log.warning("[connector] %s %s error for %s: %s", exchange, market_type, sym, e)
+                continue
+
     finally:
         await ex.close()
+
+    return trades
+
+
+def _adapt_symbol(symbol: str, market_type: str) -> str:
+    """Convert a symbol to the correct format for the market type."""
+    if market_type == "futures":
+        # BTC/USDT → BTC/USDT:USDT for futures
+        if ":USDT" not in symbol:
+            return f"{symbol}:USDT"
+    else:
+        # BTC/USDT:USDT → BTC/USDT for spot
+        if ":USDT" in symbol:
+            return symbol.replace(":USDT", "")
+    return symbol
 
 
 async def fetch_exchange_snapshot(
@@ -46,11 +167,54 @@ async def fetch_exchange_snapshot(
     passphrase: str | None = None,
 ) -> dict[str, Any]:
     """Fetch portfolio snapshot (balances/positions/margin) for AutoTrader UX."""
-    ex = _build_exchange(exchange, api_key, api_secret, passphrase)
+    # Try futures first for margin/positions, then spot for balances
+    futures_data = await _fetch_snapshot_for_type(exchange, api_key, api_secret, passphrase, "futures")
+    spot_data = await _fetch_snapshot_for_type(exchange, api_key, api_secret, passphrase, "spot")
+
+    # Merge: use futures positions + equity, add spot balances
+    positions = futures_data.get("positions", [])
+    futures_balances = futures_data.get("balances", [])
+    spot_balances = spot_data.get("balances", [])
+
+    # Combine balances (prefer futures equity if available)
+    all_balance_map: dict[str, dict] = {}
+    for b in spot_balances:
+        all_balance_map[b["asset"]] = b
+    for b in futures_balances:
+        asset = b["asset"]
+        if asset in all_balance_map:
+            all_balance_map[asset]["total"] += b["total"]
+            all_balance_map[asset]["free"] += b["free"]
+            all_balance_map[asset]["used"] += b["used"]
+        else:
+            all_balance_map[asset] = b
+
+    equity = futures_data.get("equity", 0) + spot_data.get("equity", 0)
+    used_margin = futures_data.get("usedMargin", 0)
+
+    return {
+        "equity": equity,
+        "balances": list(all_balance_map.values()),
+        "positions": positions,
+        "usedMargin": used_margin,
+        "maxLeverageBySymbol": futures_data.get("maxLeverageBySymbol", {}),
+        "ts": time.time(),
+    }
+
+
+async def _fetch_snapshot_for_type(
+    exchange: str,
+    api_key: str,
+    api_secret: str,
+    passphrase: str | None,
+    market_type: str,
+) -> dict[str, Any]:
+    """Fetch snapshot for a specific market type."""
+    ex = _build_exchange(exchange, api_key, api_secret, passphrase, market_type)
     try:
         bal = await ex.fetch_balance()
         positions: list[dict[str, Any]] = []
-        if ex.has.get("fetchPositions"):
+        if market_type == "futures" and ex.has.get("fetchPositions"):
             try:
                 positions = await ex.fetch_positions()
             except Exception:
@@ -91,12 +255,14 @@ async def fetch_exchange_snapshot(
             normalized_positions.append({
                 "symbol": symbol,
                 "side": pos.get("side") or ("long" if contracts > 0 else "short"),
-                "contracts": contracts,
+                "contracts": abs(contracts),
                 "entryPrice": float(pos.get("entryPrice") or 0),
                 "markPrice": float(pos.get("markPrice") or 0),
                 "unrealizedPnl": float(pos.get("unrealizedPnl") or 0),
                 "leverage": leverage,
                 "marginMode": pos.get("marginMode") or pos.get("marginType") or "",
+                "liquidationPrice": float(pos.get("liquidationPrice") or 0),
+                "notional": float(pos.get("notional") or 0),
             })
             if leverage > (max_lev_by_symbol.get(symbol) or 0):
                 max_lev_by_symbol[symbol] = leverage
@@ -109,6 +275,62 @@ async def fetch_exchange_snapshot(
             "maxLeverageBySymbol": max_lev_by_symbol,
             "ts": time.time(),
         }
+    except Exception as e:
+        log.warning("[connector] snapshot error for %s %s: %s", exchange, market_type, e)
+        return {"equity": 0, "balances": [], "positions": [], "usedMargin": 0, "maxLeverageBySymbol": {}, "ts": time.time()}
+    finally:
+        await ex.close()
+
+
+async def fetch_open_positions(
+    exchange: str,
+    api_key: str,
+    api_secret: str,
+    passphrase: str | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch currently open futures positions with live PnL."""
+    ex = _build_exchange(exchange, api_key, api_secret, passphrase, market_type="futures")
+    try:
+        positions: list[dict[str, Any]] = []
+        if ex.has.get("fetchPositions"):
+            raw_positions = await ex.fetch_positions()
+            for pos in raw_positions:
+                symbol = str(pos.get("symbol") or "")
+                contracts = float(pos.get("contracts") or pos.get("positionAmt") or 0)
+                if not symbol or contracts == 0:
+                    continue
+                entry_price = float(pos.get("entryPrice") or 0)
+                mark_price = float(pos.get("markPrice") or 0)
+                unrealized_pnl = float(pos.get("unrealizedPnl") or 0)
+                leverage = float(pos.get("leverage") or 0)
+                notional = float(pos.get("notional") or abs(contracts * mark_price))
+                side = pos.get("side") or ("long" if contracts > 0 else "short")
+
+                # Calculate PnL percentage
+                if entry_price > 0 and abs(contracts) > 0:
+                    if side == "long":
+                        pnl_pct = ((mark_price - entry_price) / entry_price) * 100
+                    else:
+                        pnl_pct = ((entry_price - mark_price) / entry_price) * 100
+                else:
+                    pnl_pct = 0.0
+
+                positions.append({
+                    "symbol": symbol,
+                    "side": side,
+                    "contracts": abs(contracts),
+                    "entryPrice": entry_price,
+                    "markPrice": mark_price,
+                    "unrealizedPnl": unrealized_pnl,
+                    "pnlPct": round(pnl_pct, 4),
+                    "leverage": leverage,
+                    "marginMode": pos.get("marginMode") or pos.get("marginType") or "",
+                    "liquidationPrice": float(pos.get("liquidationPrice") or 0),
+                    "notional": notional,
+                    "timestamp": pos.get("timestamp") or int(time.time() * 1000),
+                })
+
+        return positions
     finally:
         await ex.close()
 
@@ -116,6 +338,8 @@ async def fetch_exchange_snapshot(
 def _normalise(raw: list, symbol: str) -> list[dict[str, Any]]:
     trades = []
     for t in raw:
+        # Use the actual symbol from the trade if available
+        trade_symbol = t.get("symbol") or symbol
         trades.append({
             "id": t.get("id"),
             "ts": (t.get("timestamp") or 0) / 1000,
@@ -124,6 +348,6 @@ def _normalise(raw: list, symbol: str) -> list[dict[str, Any]]:
             "amount": float(t.get("amount") or 0),
             "cost": float(t.get("cost") or 0),
             "fee": float((t.get("fee") or {}).get("cost") or 0),
-            "symbol": symbol,
+            "symbol": trade_symbol,
         })
     return sorted(trades, key=lambda x: x["ts"])
