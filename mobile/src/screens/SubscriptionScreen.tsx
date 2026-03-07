@@ -9,6 +9,7 @@ import {
   ActivityIndicator,
   Alert,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import * as WebBrowser from 'expo-web-browser';
@@ -55,6 +56,67 @@ export default function SubscriptionScreen() {
     setShowPaymentModal(true);
   };
 
+  /**
+   * Save payment receipt locally so it's never lost even if Brain is down.
+   */
+  const savePaymentReceipt = async (receipt: Record<string, any>) => {
+    try {
+      const key = 'sentinel_payment_receipts';
+      const raw = await AsyncStorage.getItem(key);
+      const receipts: Record<string, any>[] = raw ? JSON.parse(raw) : [];
+      receipts.push({ ...receipt, savedAt: new Date().toISOString() });
+      await AsyncStorage.setItem(key, JSON.stringify(receipts));
+    } catch {
+      // Best-effort — payment is already on-chain
+    }
+  };
+
+  /**
+   * Register subscription with Brain service (best-effort with retry).
+   * The payment is already confirmed on-chain — this is just for Brain tracking.
+   */
+  const registerWithBrain = async (userId: string, tier: string, walletAddr: string) => {
+    const url = `${CONFIG.BRAIN_URL}/api/brain/subscription/register`;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (CONFIG.API_KEY) headers['X-API-Key'] = CONFIG.API_KEY;
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            user_id: userId,
+            tier,
+            source: 'mobile',
+            wallet_address: walletAddr,
+          }),
+        });
+        if (resp.ok) return true;
+      } catch {
+        // Retry after delay
+      }
+      // Also try via backend proxy as fallback
+      try {
+        const resp = await fetch(`${CONFIG.API_URL}/api/brain/subscription/register`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            user_id: userId,
+            tier,
+            source: 'mobile',
+            wallet_address: walletAddr,
+          }),
+        });
+        if (resp.ok) return true;
+      } catch {
+        // Continue retrying
+      }
+      await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+    }
+    return false;
+  };
+
   const handleCryptoPayment = async () => {
     if (!selectedPackage || !wallet.address) return;
 
@@ -86,8 +148,30 @@ export default function SubscriptionScreen() {
       });
 
       if (result.success) {
+        // 1. Save receipt locally (never lose payment proof)
+        await savePaymentReceipt({
+          packageId: selectedPackage.id,
+          tier: selectedPackage.id,
+          amount: price,
+          token: token.symbol,
+          chain: selectedChain,
+          txHash: result.txHash,
+          blockchainRef: result.blockchainRef,
+          walletAddress: wallet.address,
+        });
+
+        // 2. Update local subscription state immediately
         setSubscription(selectedPackage.id as any);
         setShowPaymentModal(false);
+
+        // 3. Register with Brain (best-effort, payment already confirmed on-chain)
+        const userId = wallet.address;
+        registerWithBrain(userId, selectedPackage.id, wallet.address).then((ok) => {
+          if (!ok) {
+            console.warn('Brain registration failed — will retry on next app launch');
+          }
+        });
+
         const ref = result.blockchainRef
           ? `\nBlockchain Ref: ${result.blockchainRef}`
           : '';

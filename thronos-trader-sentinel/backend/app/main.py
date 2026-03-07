@@ -296,13 +296,19 @@ async def sentinel_technicals(request: Request, symbol: str = Query("BTC/USDT"),
 import httpx
 
 _BRAIN_URL = settings.brain_url.rstrip("/") if settings.brain_url else ""
+if _BRAIN_URL:
+    log.info("[brain-proxy] BRAIN_URL=%s — proxy enabled", _BRAIN_URL)
+else:
+    log.warning("[brain-proxy] BRAIN_URL not set — all /api/brain/* routes will return 502. "
+                "Set the BRAIN_URL env var on this Railway service to the Brain URL (e.g. https://alanisys.up.railway.app)")
 
 
 async def _proxy_to_brain(path: str, request: Request) -> Response:
     """Forward a request to the Brain service and return its response."""
     if not _BRAIN_URL:
+        log.warning("[brain-proxy] 502 for %s %s — BRAIN_URL not configured", request.method, path)
         return Response(
-            content=json.dumps({"ok": False, "error": "BRAIN_URL not configured on backend"}),
+            content=json.dumps({"ok": False, "error": "BRAIN_URL not configured on backend. Set BRAIN_URL env var."}),
             status_code=502,
             media_type="application/json",
         )
