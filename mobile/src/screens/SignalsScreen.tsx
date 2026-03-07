@@ -111,9 +111,9 @@ export default function SignalsScreen() {
     const allowedPairs = getAllowedPairs(watchlist, subscription);
 
     try {
-      // Fetch arbitrage data for tier-allowed pairs
+      // Arbitrage signals scan ALL watchlist pairs (available to every tier)
       const results = await Promise.allSettled(
-        allowedPairs.map(async (symbol) => {
+        watchlist.map(async (symbol) => {
           const arb = await marketAPI.getArbitrage(symbol);
           const signal = marketAPI.detectArbitrageSignal(arb, 0.1);
           return { symbol, arb, signal };
@@ -421,9 +421,9 @@ export default function SignalsScreen() {
       {/* Subscription Notice */}
       {subscription === 'free' && (
         <View style={styles.subscriptionNotice}>
-          <Ionicons name="lock-closed" size={16} color={COLORS.warning} />
+          <Ionicons name="information-circle-outline" size={16} color={COLORS.info} />
           <Text style={styles.subscriptionNoticeText}>
-            Free tier: BTC pairs only. Upgrade to Starter for ETH, Pro+ for all pairs.
+            Arbitrage scanning: all pairs. Directional signals: BTC only. Upgrade for more pairs & AI insights.
           </Text>
         </View>
       )}
@@ -432,7 +432,7 @@ export default function SignalsScreen() {
         <View style={styles.subscriptionNotice}>
           <Ionicons name="information-circle-outline" size={16} color={COLORS.info} />
           <Text style={styles.subscriptionNoticeText}>
-            Starter tier: BTC + ETH pairs. Upgrade to Pro+ for all pairs & new-coin opportunities.
+            Arbitrage scanning: all pairs. Directional signals: BTC + ETH. Upgrade to Pro+ for all pairs & new-coin alerts.
           </Text>
         </View>
       )}

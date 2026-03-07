@@ -165,8 +165,8 @@ export const CONFIG = {
       priceUSD: 29,
       priceTHR: 25,
       features: [
-        'BTC + ETH market signals',
-        'Cross-exchange arbitrage alerts',
+        'BTC + ETH directional signals',
+        'Cross-exchange arbitrage (all pairs)',
         'AI Risk Monitor (Francis)',
         'Technical analysis (RSI, MACD, Bollinger)',
         'Push notifications',

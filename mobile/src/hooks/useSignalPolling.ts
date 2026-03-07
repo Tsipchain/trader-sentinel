@@ -105,9 +105,9 @@ export function useSignalPolling() {
     const allowedPairs = getAllowedPairs(watchlist, subscription);
 
     try {
-      // Arbitrage signals for tier-allowed pairs
+      // Arbitrage signals scan ALL watchlist pairs (available to every tier)
       const results = await Promise.allSettled(
-        allowedPairs.map(async (symbol) => {
+        watchlist.map(async (symbol) => {
           const arb = await marketAPI.getArbitrage(symbol);
           const signal = marketAPI.detectArbitrageSignal(arb, 0.1);
           return { symbol, arb, signal };
