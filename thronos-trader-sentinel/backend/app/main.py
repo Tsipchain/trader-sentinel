@@ -27,6 +27,7 @@ from app.sentinel import calendar as cal_module
 from app.sentinel import geo as geo_module
 from app.sentinel import technicals as tech_module
 from app.sentinel import risk as risk_module
+from app.sentinel import sessions as sessions_module
 
 from app.brain.connector import fetch_exchange_snapshot, fetch_user_trades, fetch_open_positions
 from app.brain.predictor import PredictionEngine
@@ -971,6 +972,34 @@ def brain_trader_profile(user_id: str, _: str = Security(verify_api_key)):
             "trades_trained_on": model_stats.get("trades_trained_on", 0),
         },
     }
+
+
+@app.get("/api/sentinel/sessions")
+@limiter.limit("30/minute")
+async def sentinel_sessions(request: Request, _: str = Security(verify_api_key)) -> dict[str, Any]:
+    """Global market sessions status — opening ranges, overlaps, volume forecast."""
+    report = sessions_module.calculate()
+    return {
+        "ok": True,
+        "utc_time": report.utc_time,
+        "active_sessions": report.active_sessions,
+        "upcoming_events": report.upcoming_events,
+        "opening_range": report.opening_range_active,
+        "closing_sessions": report.closing_sessions,
+        "session_overlap": report.session_overlap,
+        "trading_recommendation": report.trading_recommendation,
+        "volume_expectation": report.volume_expectation,
+        "crypto_impact_score": report.crypto_impact_score,
+        "ts": report.timestamp,
+    }
+
+
+@app.get("/api/sentinel/sessions/bias")
+@limiter.limit("60/minute")
+async def sentinel_session_bias(request: Request, _: str = Security(verify_api_key)) -> dict[str, Any]:
+    """Quick trading bias based on current market sessions — used by AutoTrader."""
+    bias = sessions_module.get_session_bias()
+    return {"ok": True, **bias}
 
 
 # ── Sleep Mode AutoTrader ─────────────────────────────────────────────────────

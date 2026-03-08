@@ -381,6 +381,75 @@ export function useSignalPolling() {
     // ── Position-based alerts (every 60s) ──
     checkPositionAlerts();
 
+    // ── Market Session Signals (opening ranges, session overlaps) ──
+    try {
+      if (canUseAdvancedSignals && !hasRecentDuplicate('session-')) {
+        const sessions = await marketAPI.getMarketSessions();
+        if (sessions.ok) {
+          // Opening range signals — first 15 min of major markets
+          for (const or of sessions.opening_range || []) {
+            const name = or.name?.split('(')[0]?.trim() || 'Market';
+            const prefix = `session-opening-${name.replace(/\s+/g, '')}`;
+            if (!hasRecentDuplicate(prefix)) {
+              addSignalWithFeedback({
+                id: `${prefix}-${Date.now()}`,
+                type: 'alert',
+                symbol: 'MARKET',
+                message: `${name} OPENING RANGE (${or.minutes_since_open || 0}min) — First 15 minutes confirm session trend. Watch for directional confirmation before entering.`,
+                timestamp: Date.now(),
+                venues: ['sentinel-sessions'],
+              });
+            }
+          }
+
+          // Session overlap signals
+          if (sessions.volume_expectation === 'peak' && !hasRecentDuplicate('session-overlap')) {
+            addSignalWithFeedback({
+              id: `session-overlap-${Date.now()}`,
+              type: 'opportunity',
+              symbol: 'MARKET',
+              message: `${sessions.session_overlap} — Best liquidity window. Tighter spreads, faster fills. Crypto impact: ${sessions.crypto_impact_score}/10.`,
+              timestamp: Date.now(),
+              venues: ['sentinel-sessions'],
+            });
+          }
+
+          // Upcoming high-impact events
+          for (const event of (sessions.upcoming_events || []).filter((e: any) => e.impact === 'high' && e.in_minutes <= 30)) {
+            const prefix = `session-event-${event.name.replace(/\s+/g, '')}`;
+            if (!hasRecentDuplicate(prefix)) {
+              addSignalWithFeedback({
+                id: `${prefix}-${Date.now()}`,
+                type: 'alert',
+                symbol: 'MARKET',
+                message: `${event.name} in ${event.in_minutes}min — ${event.description}`,
+                timestamp: Date.now(),
+                venues: ['sentinel-sessions'],
+              });
+            }
+          }
+
+          // Closing session warnings
+          for (const cs of sessions.closing_sessions || []) {
+            const name = cs.name?.split('(')[0]?.trim() || 'Market';
+            const prefix = `session-close-${name.replace(/\s+/g, '')}`;
+            if (!hasRecentDuplicate(prefix)) {
+              addSignalWithFeedback({
+                id: `${prefix}-${Date.now()}`,
+                type: 'alert',
+                symbol: 'MARKET',
+                message: `${name} closing in ${cs.minutes_to_close || 0}min — Expect position squaring, potential reversals. Reduce new entries.`,
+                timestamp: Date.now(),
+                venues: ['sentinel-sessions'],
+              });
+            }
+          }
+        }
+      }
+    } catch {
+      // non-blocking
+    }
+
     // ── Sentinel Technical Scanner (every 30s, paid tiers) ──
     try {
       await scanTechnicals();
