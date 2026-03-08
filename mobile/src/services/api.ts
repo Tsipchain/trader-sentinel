@@ -195,6 +195,25 @@ export const marketAPI = {
     return response.data;
   },
 
+  async getTechnicals(symbol: string = 'BTC/USDT'): Promise<{
+    ok: boolean;
+    symbol: string;
+    score: number;
+    current_price: number;
+    rsi_14: number;
+    rsi_signal: string;
+    volatility_score: number;
+    macd: { line: number; signal: number; histogram: number; trend: string };
+    bollinger_bands: { upper: number; middle: number; lower: number; pct_b: number; signal: string };
+    ema: { ema_20: number; ema_50: number; cross: string };
+    williams_r: { value: number; signal: string };
+    nearest_fib: { level: string; price: number; distance_pct: number } | null;
+    error: string | null;
+  }> {
+    const response = await api.get('/api/sentinel/technicals', { params: { symbol } });
+    return response.data;
+  },
+
   createMarketStream(
     symbol: string,
     intervalMs: number = 1000,

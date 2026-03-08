@@ -111,11 +111,19 @@ export default function SignalsScreen() {
     const allowedPairs = getAllowedPairs(watchlist, subscription);
 
     // ── Arbitrage signals (all pairs, all tiers) — separate try/catch ──
+    const SCAN_PAIRS = [
+      'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'DOGE/USDT',
+      'NEAR/USDT', 'AVAX/USDT', 'LINK/USDT', 'DOT/USDT', 'ADA/USDT',
+      'MATIC/USDT', 'ARB/USDT', 'OP/USDT', 'SUI/USDT', 'APT/USDT',
+      'PEPE/USDT', 'WIF/USDT', 'FET/USDT', 'INJ/USDT', 'TIA/USDT',
+    ];
+    const arbPairs = [...new Set([...watchlist, ...SCAN_PAIRS])];
+
     try {
       const results = await Promise.allSettled(
-        watchlist.map(async (symbol) => {
+        arbPairs.map(async (symbol) => {
           const arb = await marketAPI.getArbitrage(symbol);
-          const signal = marketAPI.detectArbitrageSignal(arb, 0.1);
+          const signal = marketAPI.detectArbitrageSignal(arb, 0.05);
           return { symbol, arb, signal };
         })
       );
@@ -127,17 +135,28 @@ export default function SignalsScreen() {
           addSignalWithFeedback({ ...signal, id: `arb-${symbol}-${Date.now()}` });
         }
 
+        // Micro-spread alerts for monitored pairs
+        if (!signal && arb.best_bid && arb.best_ask && arb.spread !== null) {
+          const spreadPct = Math.abs(arb.spread / arb.best_ask) * 100;
+          const sym = symbol.replace('/USDT', '');
+          if (spreadPct > 0.02 && !hasRecentDuplicate(`spread-${sym}`)) {
+            addSignalWithFeedback({
+              id: `spread-${sym}-${Date.now()}`, type: 'arbitrage', symbol: sym,
+              message: `${sym} spread ${spreadPct.toFixed(3)}% — ${arb.best_ask_venue} $${arb.best_ask.toFixed(4)} / ${arb.best_bid_venue} $${arb.best_bid.toFixed(4)}. Monitor for widening.`,
+              profit: spreadPct, timestamp: Date.now(),
+              venues: [arb.best_ask_venue, arb.best_bid_venue],
+            });
+          }
+        }
+
         if (tierPolicy.allowNewCoinSignals && !hasRecentDuplicate(`newcoin-${symbol}`)) {
           const listedVenue = arb.best_bid_venue || arb.best_ask_venue;
           const noVenue = !arb.best_bid_venue || !arb.best_ask_venue;
           if (listedVenue && noVenue) {
             addSignalWithFeedback({
-              id: `newcoin-${symbol}-${Date.now()}`,
-              type: 'opportunity',
-              symbol,
-              message: `${symbol} shows limited venue availability — possible early listing edge.`,
-              timestamp: Date.now(),
-              venues: [listedVenue],
+              id: `newcoin-${symbol}-${Date.now()}`, type: 'opportunity', symbol,
+              message: `${symbol} limited venue availability — possible early listing edge.`,
+              timestamp: Date.now(), venues: [listedVenue],
             });
           }
         }
