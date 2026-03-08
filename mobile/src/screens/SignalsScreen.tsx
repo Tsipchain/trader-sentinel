@@ -18,6 +18,15 @@ import * as Haptics from 'expo-haptics';
 import * as Notifications from 'expo-notifications';
 import { getAllowedPairs } from '../hooks/useSignalPolling';
 
+/** Smart price format for micro-cap coins */
+function fmtPrice(n: number | null | undefined): string {
+  if (!n || n <= 0) return '';
+  if (n >= 100) return `$${n.toFixed(2)}`;
+  if (n >= 1) return `$${n.toFixed(4)}`;
+  if (n >= 0.01) return `$${n.toFixed(5)}`;
+  return `$${n.toPrecision(4)}`;
+}
+
 type SignalType = 'all' | 'arbitrage' | 'alert' | 'opportunity';
 
 type TierSignalPolicy = {
@@ -266,19 +275,29 @@ export default function SignalsScreen() {
         return;
       }
 
-      const cached = marketData[selectedSignal.symbol];
+      // Signal symbol might be "PEPE" or "PEPE/USDT" — try both
+      const rawSym = selectedSignal.symbol;
+      const fullSym = rawSym.includes('/') ? rawSym : `${rawSym}/USDT`;
+      const shortSym = rawSym.replace('/USDT', '');
+
+      const cached = marketData[fullSym] || marketData[shortSym] || marketData[rawSym];
       const cachedRef = cached?.bestAsk || cached?.bestBid || cached?.prices?.[0]?.price || null;
       if (cachedRef) {
         setModalRefPrice(cachedRef);
         return;
       }
 
+      // Also try extracting price from the signal message itself (e.g. "at $0.00001234")
+      const priceMatch = selectedSignal.message.match(/\$([0-9]+\.?[0-9]*)/);
+      const msgPrice = priceMatch ? parseFloat(priceMatch[1]) : null;
+
       try {
-        const snapshot = await marketAPI.getSnapshot(selectedSignal.symbol);
+        const snapshot = await marketAPI.getSnapshot(fullSym);
         const fresh = snapshot.venues.find((v) => v.last !== null)?.last ?? null;
-        if (!cancelled) setModalRefPrice(fresh);
+        if (!cancelled) setModalRefPrice(fresh || msgPrice);
       } catch {
-        if (!cancelled) setModalRefPrice(null);
+        // Fallback: use price from the signal message
+        if (!cancelled) setModalRefPrice(msgPrice);
       }
     };
 
@@ -332,8 +351,15 @@ export default function SignalsScreen() {
 
     const validationWindow = isPositionAlert ? 'Immediate action' : (highVolatility ? '15-45 min' : '30-120 min');
 
-    const symbolMarket = marketData[signal.symbol];
-    const refPrice = modalRefPrice || symbolMarket?.bestAsk || symbolMarket?.bestBid || symbolMarket?.prices?.[0]?.price;
+    const rawSym = signal.symbol;
+    const fullSym = rawSym.includes('/') ? rawSym : `${rawSym}/USDT`;
+    const shortSym = rawSym.replace('/USDT', '');
+    const symbolMarket = marketData[fullSym] || marketData[shortSym] || marketData[rawSym];
+
+    // Try modalRefPrice, market data, then extract from signal message
+    const msgPriceMatch = signal.message.match(/\$([0-9]+\.?[0-9]*)/);
+    const msgPrice = msgPriceMatch ? parseFloat(msgPriceMatch[1]) : null;
+    const refPrice = modalRefPrice || symbolMarket?.bestAsk || symbolMarket?.bestBid || symbolMarket?.prices?.[0]?.price || msgPrice;
     const toAbsPrice = (pct: number, target: 'sl' | 'tp') => {
       if (!refPrice) return null;
       const factor = pct / 100;
@@ -363,7 +389,7 @@ export default function SignalsScreen() {
     return {
       side: isShort ? 'SHORT bias' : 'LONG bias',
       entry,
-      entryPrice: refPrice ? refPrice.toFixed(4) : 'N/A',
+      entryPrice: refPrice ? (refPrice >= 1 ? `$${refPrice.toFixed(4)}` : `$${refPrice.toPrecision(4)}`) : 'N/A',
       sl: `${sl.toFixed(2)}%`,
       tp1: `${tp1.toFixed(2)}%`,
       tp2: `${tp2.toFixed(2)}%`,
@@ -579,9 +605,9 @@ export default function SignalsScreen() {
                         <Text style={styles.planTitle}>{plan.side}</Text>
                         <Text style={styles.planLine}>Entry: {plan.entry}</Text>
                         <Text style={styles.planLine}>Entry ref price: {plan.entryPrice}</Text>
-                        <Text style={styles.planLine}>SL: {plan.sl}{plan.slPrice ? ` (${plan.slPrice.toFixed(4)})` : ''}</Text>
-                        <Text style={styles.planLine}>TP1: {plan.tp1}{plan.tp1Price ? ` (${plan.tp1Price.toFixed(4)})` : ''}</Text>
-                        <Text style={styles.planLine}>TP2: {plan.tp2}{plan.tp2Price ? ` (${plan.tp2Price.toFixed(4)})` : ''}</Text>
+                        <Text style={styles.planLine}>SL: {plan.sl}{plan.slPrice ? ` (${fmtPrice(plan.slPrice)})` : ''}</Text>
+                        <Text style={styles.planLine}>TP1: {plan.tp1}{plan.tp1Price ? ` (${fmtPrice(plan.tp1Price)})` : ''}</Text>
+                        <Text style={styles.planLine}>TP2: {plan.tp2}{plan.tp2Price ? ` (${fmtPrice(plan.tp2Price)})` : ''}</Text>
                         <Text style={styles.planLine}>Leverage: {plan.leverage}</Text>
                         <Text style={styles.planLine}>Validation window: {plan.validationWindow}</Text>
                         <Text style={styles.planHint}>{plan.note}</Text>

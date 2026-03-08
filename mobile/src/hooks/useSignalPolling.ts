@@ -8,6 +8,15 @@ import type { Signal } from '../store/useStore';
 import * as Haptics from 'expo-haptics';
 import * as Notifications from 'expo-notifications';
 
+/** Format price with enough precision for micro-cap coins (PEPE, SHIB etc) */
+function fmtPrice(price: number): string {
+  if (!price || price <= 0) return '$0';
+  if (price >= 100) return `$${price.toFixed(2)}`;
+  if (price >= 1) return `${fmtPrice(price)}`;
+  if (price >= 0.01) return `$${price.toFixed(5)}`;
+  return `$${price.toPrecision(4)}`;
+}
+
 type TierSignalPolicy = {
   directionalLimit: number;
   allowNewCoinSignals: boolean;
@@ -263,14 +272,14 @@ export function useSignalPolling() {
       if (rsi <= 25 && !hasRecentDuplicate(`rsi-os-${sym}`)) {
         addSignalWithFeedback({
           id: `rsi-os-${sym}-${now}`, type: 'opportunity', symbol: sym,
-          message: `${sym} RSI ${rsi.toFixed(1)} — OVERSOLD. Potential bounce opportunity at $${price.toFixed(4)}. ${tech.bollinger_bands?.signal === 'oversold' ? 'BB confirms oversold.' : ''}`,
+          message: `${sym} RSI ${rsi.toFixed(1)} — OVERSOLD. Potential bounce opportunity at ${fmtPrice(price)}. ${tech.bollinger_bands?.signal === 'oversold' ? 'BB confirms oversold.' : ''}`,
           timestamp: now, venues: ['sentinel-ta'],
         });
       }
       if (rsi >= 78 && !hasRecentDuplicate(`rsi-ob-${sym}`)) {
         addSignalWithFeedback({
           id: `rsi-ob-${sym}-${now}`, type: 'alert', symbol: sym,
-          message: `${sym} RSI ${rsi.toFixed(1)} — OVERBOUGHT at $${price.toFixed(4)}. Watch for reversal or short entry. ${tech.macd?.trend === 'bearish' ? 'MACD bearish confirms.' : ''}`,
+          message: `${sym} RSI ${rsi.toFixed(1)} — OVERBOUGHT at ${fmtPrice(price)}. Watch for reversal or short entry. ${tech.macd?.trend === 'bearish' ? 'MACD bearish confirms.' : ''}`,
           timestamp: now, venues: ['sentinel-ta'],
         });
       }
@@ -281,14 +290,14 @@ export function useSignalPolling() {
         if (tech.macd.trend === 'bullish' && hist > 0 && hist < 0.5 && !hasRecentDuplicate(`macd-bull-${sym}`)) {
           addSignalWithFeedback({
             id: `macd-bull-${sym}-${now}`, type: 'opportunity', symbol: sym,
-            message: `${sym} MACD bullish crossover detected at $${price.toFixed(4)}. Histogram turning positive — early momentum shift.`,
+            message: `${sym} MACD bullish crossover detected at ${fmtPrice(price)}. Histogram turning positive — early momentum shift.`,
             timestamp: now, venues: ['sentinel-ta'],
           });
         }
         if (tech.macd.trend === 'bearish' && hist < 0 && hist > -0.5 && !hasRecentDuplicate(`macd-bear-${sym}`)) {
           addSignalWithFeedback({
             id: `macd-bear-${sym}-${now}`, type: 'alert', symbol: sym,
-            message: `${sym} MACD bearish crossover at $${price.toFixed(4)}. Momentum fading — protect longs or look for shorts.`,
+            message: `${sym} MACD bearish crossover at ${fmtPrice(price)}. Momentum fading — protect longs or look for shorts.`,
             timestamp: now, venues: ['sentinel-ta'],
           });
         }
@@ -301,21 +310,21 @@ export function useSignalPolling() {
         if (bandwidth < 3 && !hasRecentDuplicate(`bb-squeeze-${sym}`)) {
           addSignalWithFeedback({
             id: `bb-squeeze-${sym}-${now}`, type: 'opportunity', symbol: sym,
-            message: `${sym} Bollinger Band SQUEEZE — bandwidth ${bandwidth.toFixed(1)}% at $${price.toFixed(4)}. Breakout imminent. Watch direction for entry.`,
+            message: `${sym} Bollinger Band SQUEEZE — bandwidth ${bandwidth.toFixed(1)}% at ${fmtPrice(price)}. Breakout imminent. Watch direction for entry.`,
             timestamp: now, venues: ['sentinel-ta'],
           });
         }
         if (bb.pct_b > 1.05 && !hasRecentDuplicate(`bb-break-up-${sym}`)) {
           addSignalWithFeedback({
             id: `bb-break-up-${sym}-${now}`, type: 'opportunity', symbol: sym,
-            message: `${sym} breaking ABOVE upper BB at $${price.toFixed(4)} (%B: ${bb.pct_b.toFixed(2)}). Strong momentum — trend continuation or exhaustion?`,
+            message: `${sym} breaking ABOVE upper BB at ${fmtPrice(price)} (%B: ${bb.pct_b.toFixed(2)}). Strong momentum — trend continuation or exhaustion?`,
             timestamp: now, venues: ['sentinel-ta'],
           });
         }
         if (bb.pct_b < -0.05 && !hasRecentDuplicate(`bb-break-dn-${sym}`)) {
           addSignalWithFeedback({
             id: `bb-break-dn-${sym}-${now}`, type: 'alert', symbol: sym,
-            message: `${sym} breaking BELOW lower BB at $${price.toFixed(4)} (%B: ${bb.pct_b.toFixed(2)}). Panic sell or bounce zone?`,
+            message: `${sym} breaking BELOW lower BB at ${fmtPrice(price)} (%B: ${bb.pct_b.toFixed(2)}). Panic sell or bounce zone?`,
             timestamp: now, venues: ['sentinel-ta'],
           });
         }
@@ -326,14 +335,14 @@ export function useSignalPolling() {
         if (tech.ema.cross === 'golden_cross' && !hasRecentDuplicate(`ema-golden-${sym}`)) {
           addSignalWithFeedback({
             id: `ema-golden-${sym}-${now}`, type: 'opportunity', symbol: sym,
-            message: `${sym} GOLDEN CROSS — EMA20 crossed above EMA50 at $${price.toFixed(4)}. Bullish trend confirmation.`,
+            message: `${sym} GOLDEN CROSS — EMA20 crossed above EMA50 at ${fmtPrice(price)}. Bullish trend confirmation.`,
             timestamp: now, venues: ['sentinel-ta'],
           });
         }
         if (tech.ema.cross === 'death_cross' && !hasRecentDuplicate(`ema-death-${sym}`)) {
           addSignalWithFeedback({
             id: `ema-death-${sym}-${now}`, type: 'alert', symbol: sym,
-            message: `${sym} DEATH CROSS — EMA20 below EMA50 at $${price.toFixed(4)}. Bearish structure — reduce longs.`,
+            message: `${sym} DEATH CROSS — EMA20 below EMA50 at ${fmtPrice(price)}. Bearish structure — reduce longs.`,
             timestamp: now, venues: ['sentinel-ta'],
           });
         }
@@ -345,14 +354,14 @@ export function useSignalPolling() {
         if (wr < -90 && !hasRecentDuplicate(`wr-os-${sym}`)) {
           addSignalWithFeedback({
             id: `wr-os-${sym}-${now}`, type: 'opportunity', symbol: sym,
-            message: `${sym} Williams %R at ${wr.toFixed(0)} — deeply oversold. Reversal watch at $${price.toFixed(4)}.`,
+            message: `${sym} Williams %R at ${wr.toFixed(0)} — deeply oversold. Reversal watch at ${fmtPrice(price)}.`,
             timestamp: now, venues: ['sentinel-ta'],
           });
         }
         if (wr > -10 && !hasRecentDuplicate(`wr-ob-${sym}`)) {
           addSignalWithFeedback({
             id: `wr-ob-${sym}-${now}`, type: 'alert', symbol: sym,
-            message: `${sym} Williams %R at ${wr.toFixed(0)} — extremely overbought. Distribution risk at $${price.toFixed(4)}.`,
+            message: `${sym} Williams %R at ${wr.toFixed(0)} — extremely overbought. Distribution risk at ${fmtPrice(price)}.`,
             timestamp: now, venues: ['sentinel-ta'],
           });
         }
