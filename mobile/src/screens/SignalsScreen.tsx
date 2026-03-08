@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import {
   View,
   Text,
@@ -33,6 +33,14 @@ const SIGNAL_POLICY: Record<string, TierSignalPolicy> = {
   elite: { directionalLimit: 10, allowNewCoinSignals: true, refreshMs: 9000 },
   whale: { directionalLimit: 99, allowNewCoinSignals: true, refreshMs: 7000 },
 };
+
+const SIGNAL_ITEM_HEIGHT = 120;
+const signalKeyExtractor = (item: Signal) => item.id;
+const getSignalItemLayout = (_data: any, index: number) => ({
+  length: SIGNAL_ITEM_HEIGHT,
+  offset: SIGNAL_ITEM_HEIGHT * index,
+  index,
+});
 
 export default function SignalsScreen() {
   const { signals, addSignal, clearSignals, watchlist, settings, subscription, marketData, user } = useStore();
@@ -111,11 +119,19 @@ export default function SignalsScreen() {
     const allowedPairs = getAllowedPairs(watchlist, subscription);
 
     // ── Arbitrage signals (all pairs, all tiers) — separate try/catch ──
+    const SCAN_PAIRS = [
+      'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'DOGE/USDT',
+      'NEAR/USDT', 'AVAX/USDT', 'LINK/USDT', 'DOT/USDT', 'ADA/USDT',
+      'MATIC/USDT', 'ARB/USDT', 'OP/USDT', 'SUI/USDT', 'APT/USDT',
+      'PEPE/USDT', 'WIF/USDT', 'FET/USDT', 'INJ/USDT', 'TIA/USDT',
+    ];
+    const arbPairs = [...new Set([...watchlist, ...SCAN_PAIRS])];
+
     try {
       const results = await Promise.allSettled(
-        watchlist.map(async (symbol) => {
+        arbPairs.map(async (symbol) => {
           const arb = await marketAPI.getArbitrage(symbol);
-          const signal = marketAPI.detectArbitrageSignal(arb, 0.1);
+          const signal = marketAPI.detectArbitrageSignal(arb, 0.05);
           return { symbol, arb, signal };
         })
       );
@@ -127,17 +143,28 @@ export default function SignalsScreen() {
           addSignalWithFeedback({ ...signal, id: `arb-${symbol}-${Date.now()}` });
         }
 
+        // Micro-spread alerts for monitored pairs
+        if (!signal && arb.best_bid && arb.best_ask && arb.spread !== null) {
+          const spreadPct = Math.abs(arb.spread / arb.best_ask) * 100;
+          const sym = symbol.replace('/USDT', '');
+          if (spreadPct > 0.02 && !hasRecentDuplicate(`spread-${sym}`)) {
+            addSignalWithFeedback({
+              id: `spread-${sym}-${Date.now()}`, type: 'arbitrage', symbol: sym,
+              message: `${sym} spread ${spreadPct.toFixed(3)}% — ${arb.best_ask_venue} $${arb.best_ask.toFixed(4)} / ${arb.best_bid_venue} $${arb.best_bid.toFixed(4)}. Monitor for widening.`,
+              profit: spreadPct, timestamp: Date.now(),
+              venues: [arb.best_ask_venue, arb.best_bid_venue],
+            });
+          }
+        }
+
         if (tierPolicy.allowNewCoinSignals && !hasRecentDuplicate(`newcoin-${symbol}`)) {
           const listedVenue = arb.best_bid_venue || arb.best_ask_venue;
           const noVenue = !arb.best_bid_venue || !arb.best_ask_venue;
           if (listedVenue && noVenue) {
             addSignalWithFeedback({
-              id: `newcoin-${symbol}-${Date.now()}`,
-              type: 'opportunity',
-              symbol,
-              message: `${symbol} shows limited venue availability — possible early listing edge.`,
-              timestamp: Date.now(),
-              venues: [listedVenue],
+              id: `newcoin-${symbol}-${Date.now()}`, type: 'opportunity', symbol,
+              message: `${symbol} limited venue availability — possible early listing edge.`,
+              timestamp: Date.now(), venues: [listedVenue],
             });
           }
         }
@@ -368,10 +395,10 @@ export default function SignalsScreen() {
     setRefreshing(false);
   }, [fetchSignals]);
 
-  const filteredSignals = signals.filter((s) => {
+  const filteredSignals = useMemo(() => signals.filter((s) => {
     if (filter === 'all') return true;
     return s.type === filter;
-  });
+  }), [signals, filter]);
 
   const getSignalIcon = (type: Signal['type']) => {
     switch (type) {
@@ -397,7 +424,7 @@ export default function SignalsScreen() {
     return new Date(timestamp).toLocaleDateString();
   };
 
-  const renderSignal = ({ item }: { item: Signal }) => {
+  const renderSignal = useCallback(({ item }: { item: Signal }) => {
     const icon = getSignalIcon(item.type);
 
     return (
@@ -429,7 +456,7 @@ export default function SignalsScreen() {
         </View>
       </TouchableOpacity>
     );
-  };
+  }, []);
 
   const FilterButton = ({ type, label }: { type: SignalType; label: string }) => (
     <TouchableOpacity
@@ -494,8 +521,14 @@ export default function SignalsScreen() {
       <FlatList
         data={filteredSignals}
         renderItem={renderSignal}
-        keyExtractor={(item) => item.id}
+        keyExtractor={signalKeyExtractor}
         contentContainerStyle={styles.listContent}
+        removeClippedSubviews
+        maxToRenderPerBatch={10}
+        windowSize={7}
+        initialNumToRender={8}
+        updateCellsBatchingPeriod={50}
+        getItemLayout={getSignalItemLayout}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}

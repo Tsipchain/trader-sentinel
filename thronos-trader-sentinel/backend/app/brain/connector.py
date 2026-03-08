@@ -403,3 +403,181 @@ def _normalise(raw: list, symbol: str) -> list[dict[str, Any]]:
             "symbol": trade_symbol,
         })
     return sorted(trades, key=lambda x: x["ts"])
+
+
+# ── Trade Execution (AutoTrader / Sleep Mode) ────────────────────────────────
+
+
+async def set_leverage(
+    exchange: str,
+    api_key: str,
+    api_secret: str,
+    symbol: str,
+    leverage: int,
+    passphrase: str | None = None,
+) -> bool:
+    """Set leverage for a futures symbol. Returns True on success."""
+    ex = _build_exchange(exchange, api_key, api_secret, passphrase, market_type="futures")
+    try:
+        futures_symbol = _adapt_symbol(symbol, "futures")
+        await ex.set_leverage(leverage, futures_symbol)
+        log.info("[exec] set leverage %dx for %s on %s", leverage, futures_symbol, exchange)
+        return True
+    except Exception as e:
+        log.warning("[exec] set_leverage failed for %s: %s", symbol, e)
+        return False
+    finally:
+        await ex.close()
+
+
+async def create_market_order(
+    exchange: str,
+    api_key: str,
+    api_secret: str,
+    symbol: str,
+    side: str,
+    amount: float,
+    passphrase: str | None = None,
+    reduce_only: bool = False,
+) -> dict[str, Any]:
+    """Place a market order on futures. Returns order info."""
+    ex = _build_exchange(exchange, api_key, api_secret, passphrase, market_type="futures")
+    try:
+        futures_symbol = _adapt_symbol(symbol, "futures")
+        params: dict[str, Any] = {}
+        if reduce_only:
+            params["reduceOnly"] = True
+
+        order = await ex.create_order(
+            symbol=futures_symbol,
+            type="market",
+            side=side,  # "buy" or "sell"
+            amount=amount,
+            params=params,
+        )
+        log.info("[exec] market %s %s %.6f on %s → %s", side, futures_symbol, amount, exchange, order.get("id"))
+        return {
+            "ok": True,
+            "id": order.get("id"),
+            "symbol": futures_symbol,
+            "side": side,
+            "amount": amount,
+            "price": float(order.get("average") or order.get("price") or 0),
+            "cost": float(order.get("cost") or 0),
+            "status": order.get("status"),
+            "timestamp": order.get("timestamp"),
+        }
+    except Exception as e:
+        log.error("[exec] market order failed %s %s: %s", side, symbol, e)
+        return {"ok": False, "error": str(e)}
+    finally:
+        await ex.close()
+
+
+async def create_stop_loss(
+    exchange: str,
+    api_key: str,
+    api_secret: str,
+    symbol: str,
+    side: str,
+    amount: float,
+    stop_price: float,
+    passphrase: str | None = None,
+) -> dict[str, Any]:
+    """Place a stop-loss order. side should be opposite to the position (sell for long, buy for short)."""
+    ex = _build_exchange(exchange, api_key, api_secret, passphrase, market_type="futures")
+    try:
+        futures_symbol = _adapt_symbol(symbol, "futures")
+        params: dict[str, Any] = {"stopPrice": stop_price, "reduceOnly": True}
+
+        # MEXC and some exchanges use stop_market type
+        order_type = "stop_market"
+        try:
+            order = await ex.create_order(
+                symbol=futures_symbol,
+                type=order_type,
+                side=side,
+                amount=amount,
+                params=params,
+            )
+        except (ccxt.NotSupported, ccxt.InvalidOrder):
+            # Fallback: try as regular stop order
+            order = await ex.create_order(
+                symbol=futures_symbol,
+                type="stop",
+                side=side,
+                amount=amount,
+                price=stop_price,
+                params={"reduceOnly": True, "triggerPrice": stop_price},
+            )
+
+        log.info("[exec] SL %s %s @ %.6f on %s → %s", side, futures_symbol, stop_price, exchange, order.get("id"))
+        return {"ok": True, "id": order.get("id"), "stop_price": stop_price}
+    except Exception as e:
+        log.warning("[exec] SL failed %s %s: %s", side, symbol, e)
+        return {"ok": False, "error": str(e)}
+    finally:
+        await ex.close()
+
+
+async def create_take_profit(
+    exchange: str,
+    api_key: str,
+    api_secret: str,
+    symbol: str,
+    side: str,
+    amount: float,
+    tp_price: float,
+    passphrase: str | None = None,
+) -> dict[str, Any]:
+    """Place a take-profit order."""
+    ex = _build_exchange(exchange, api_key, api_secret, passphrase, market_type="futures")
+    try:
+        futures_symbol = _adapt_symbol(symbol, "futures")
+        params: dict[str, Any] = {"stopPrice": tp_price, "reduceOnly": True}
+
+        order_type = "take_profit_market"
+        try:
+            order = await ex.create_order(
+                symbol=futures_symbol,
+                type=order_type,
+                side=side,
+                amount=amount,
+                params=params,
+            )
+        except (ccxt.NotSupported, ccxt.InvalidOrder):
+            order = await ex.create_order(
+                symbol=futures_symbol,
+                type="limit",
+                side=side,
+                amount=amount,
+                price=tp_price,
+                params={"reduceOnly": True, "triggerPrice": tp_price},
+            )
+
+        log.info("[exec] TP %s %s @ %.6f on %s → %s", side, futures_symbol, tp_price, exchange, order.get("id"))
+        return {"ok": True, "id": order.get("id"), "tp_price": tp_price}
+    except Exception as e:
+        log.warning("[exec] TP failed %s %s: %s", side, symbol, e)
+        return {"ok": False, "error": str(e)}
+    finally:
+        await ex.close()
+
+
+async def get_ticker_price(
+    exchange: str,
+    api_key: str,
+    api_secret: str,
+    symbol: str,
+    passphrase: str | None = None,
+) -> float:
+    """Fetch current price for a symbol."""
+    ex = _build_exchange(exchange, api_key, api_secret, passphrase, market_type="futures")
+    try:
+        futures_symbol = _adapt_symbol(symbol, "futures")
+        ticker = await ex.fetch_ticker(futures_symbol)
+        return float(ticker.get("last") or ticker.get("close") or 0)
+    except Exception:
+        return 0.0
+    finally:
+        await ex.close()

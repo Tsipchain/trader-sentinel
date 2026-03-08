@@ -31,6 +31,7 @@ from app.sentinel import risk as risk_module
 from app.brain.connector import fetch_exchange_snapshot, fetch_user_trades, fetch_open_positions
 from app.brain.predictor import PredictionEngine
 from app.brain import store as brain_store
+from app.brain import sleep_trader
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -970,6 +971,41 @@ def brain_trader_profile(user_id: str, _: str = Security(verify_api_key)):
             "trades_trained_on": model_stats.get("trades_trained_on", 0),
         },
     }
+
+
+# ── Sleep Mode AutoTrader ─────────────────────────────────────────────────────
+
+
+@app.post("/api/brain/autotrader/sleep-start")
+async def brain_sleep_start(payload: dict = Body(default_factory=dict), _: str = Security(verify_api_key)):
+    """Start Sleep Mode: autonomous trading for up to 8 hours."""
+    user_id = payload.get("user_id") or payload.get("userId")
+    if not user_id:
+        return {"ok": False, "error": "Missing user_id"}
+
+    # Ensure autotrader session exists with credentials
+    session = brain_store.load_autotrader(user_id)
+    if not session or not session.get("config", {}).get("api_key"):
+        return {"ok": False, "error": "Enable AutoTrader first with exchange credentials"}
+
+    result = sleep_trader.start_sleep_mode(user_id, _brain_engine)
+    return result
+
+
+@app.post("/api/brain/autotrader/sleep-stop")
+async def brain_sleep_stop(payload: dict = Body(default_factory=dict), _: str = Security(verify_api_key)):
+    """Stop an active Sleep Mode session."""
+    user_id = payload.get("user_id") or payload.get("userId")
+    if not user_id:
+        return {"ok": False, "error": "Missing user_id"}
+    result = sleep_trader.stop_sleep_mode(user_id)
+    return result
+
+
+@app.get("/api/brain/autotrader/sleep-status/{user_id}")
+def brain_sleep_status(user_id: str, _: str = Security(verify_api_key)):
+    """Get current sleep session status, trades, and log."""
+    return {"ok": True, **sleep_trader.get_sleep_status(user_id)}
 
 
 @app.get("/api/tts")

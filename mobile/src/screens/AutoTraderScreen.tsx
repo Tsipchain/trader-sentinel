@@ -15,6 +15,42 @@ import type { ActiveTrade } from '../services/api';
 const SYMBOL_OPTIONS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT'];
 const EXCHANGE_OPTIONS = ['binance', 'bybit', 'okx', 'mexc'];
 const SNAPSHOT_MAX_AGE_MS = 5 * 60 * 1000;
+const SLEEP_POLL_MS = 15_000; // poll sleep status every 15s
+
+type SleepTrade = {
+  symbol: string;
+  side: string;
+  amount: number;
+  entry_price: number;
+  leverage: number;
+  sl_price: number;
+  tp_price: number;
+  confidence: number;
+  opened_at: number;
+  status: string;
+  pnl_pct?: number;
+  closed_at?: number;
+};
+
+type SleepStatus = {
+  active: boolean;
+  started_at?: number;
+  ends_at?: number;
+  elapsed_s?: number;
+  remaining_s?: number;
+  trade_count?: number;
+  realized_pnl?: number;
+  status?: string;
+  trades?: SleepTrade[];
+  log?: string[];
+};
+
+function formatDuration(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
 
 export default function AutoTraderScreen() {
   const { user, autoTrader, setAutoTrader } = useStore();
@@ -22,7 +58,11 @@ export default function AutoTraderScreen() {
   const [loadingStatus, setLoadingStatus] = useState(false);
   const [closingId, setClosingId] = useState<string | null>(null);
   const [syncingPortfolio, setSyncingPortfolio] = useState(false);
+  const [sleepStatus, setSleepStatus] = useState<SleepStatus>({ active: false });
+  const [startingSleep, setStartingSleep] = useState(false);
+  const [stoppingSleep, setStoppingSleep] = useState(false);
   const hasShownBrainMisconfigAlert = useRef(false);
+  const sleepPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const isEnabled = autoTrader.enabled;
   const cfg = autoTrader.config;
@@ -35,6 +75,40 @@ export default function AutoTraderScreen() {
     lastSyncTs: null,
   };
   const exchangeAvailability = autoTrader.exchangeAvailability ?? {};
+
+  const pollSleepStatus = useCallback(async () => {
+    if (!user?.id) return;
+    try {
+      const res = await brainAPI.getSleepStatus(user.id);
+      if (res.ok) {
+        setSleepStatus({
+          active: res.active,
+          started_at: res.started_at,
+          ends_at: res.ends_at,
+          elapsed_s: res.elapsed_s,
+          remaining_s: res.remaining_s,
+          trade_count: res.trade_count,
+          realized_pnl: res.realized_pnl,
+          status: res.status,
+          trades: res.trades,
+          log: res.log,
+        });
+      }
+    } catch {
+      // silent
+    }
+  }, [user?.id]);
+
+  // Poll sleep status when active
+  useEffect(() => {
+    if (sleepStatus.active || isEnabled) {
+      pollSleepStatus();
+      sleepPollRef.current = setInterval(pollSleepStatus, SLEEP_POLL_MS);
+    }
+    return () => {
+      if (sleepPollRef.current) clearInterval(sleepPollRef.current);
+    };
+  }, [sleepStatus.active, isEnabled, pollSleepStatus]);
 
   const refreshStatus = useCallback(async () => {
     setLoadingStatus(true);
@@ -49,12 +123,13 @@ export default function AutoTraderScreen() {
       if (availability.ok) {
         setAutoTrader({ exchangeAvailability: availability.exchanges });
       }
+      await pollSleepStatus();
     } catch {
       // keep UI functional when backend is unavailable
     } finally {
       setLoadingStatus(false);
     }
-  }, [user?.id, setAutoTrader]);
+  }, [user?.id, setAutoTrader, pollSleepStatus]);
 
   useEffect(() => { refreshStatus(); }, [refreshStatus]);
 
@@ -91,7 +166,6 @@ export default function AutoTraderScreen() {
             );
           }
         }
-        // Do not hard-block here: continue and let real API call/fallback decide.
       } else {
         hasShownBrainMisconfigAlert.current = false;
       }
@@ -207,6 +281,57 @@ export default function AutoTraderScreen() {
     ]);
   };
 
+  const handleStartSleep = () => {
+    if (!user?.id || !isEnabled) return;
+    Alert.alert(
+      'Activate Sleep Mode?',
+      `Sentinel will autonomously trade ${cfg.symbols.join(', ')} on ${cfg.exchange.toUpperCase()} for up to 8 hours while you rest.\n\nTarget: 25-30% portfolio profit.\nMax leverage: ${cfg.maxLeverage}x\nPortfolio: $${portfolio.equity.toFixed(2)}`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Start Sleep Mode',
+          onPress: async () => {
+            setStartingSleep(true);
+            try {
+              const res = await brainAPI.startSleepMode(user.id);
+              if (res.ok) {
+                setSleepStatus({ active: true, status: 'running', trade_count: 0, realized_pnl: 0 });
+              } else {
+                Alert.alert('Sleep Mode', res.error || 'Could not start sleep mode.');
+              }
+            } catch {
+              Alert.alert('Error', 'Failed to start sleep mode.');
+            } finally {
+              setStartingSleep(false);
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  const handleStopSleep = () => {
+    if (!user?.id) return;
+    Alert.alert('Stop Sleep Mode?', 'Open positions will remain on your exchange. Sleep Mode trading will stop.', [
+      { text: 'Keep Running', style: 'cancel' },
+      {
+        text: 'Stop',
+        style: 'destructive',
+        onPress: async () => {
+          setStoppingSleep(true);
+          try {
+            await brainAPI.stopSleepMode(user.id);
+            setSleepStatus((prev) => ({ ...prev, active: false, status: 'stopped_by_user' }));
+          } catch {
+            // silent
+          } finally {
+            setStoppingSleep(false);
+          }
+        },
+      },
+    ]);
+  };
+
   const handleCloseTrade = (trade: ActiveTrade) => {
     Alert.alert(
       'Close Position?',
@@ -235,30 +360,45 @@ export default function AutoTraderScreen() {
 
   const selectedExchangeBlocked = !isExchangeEnabled(cfg.exchange);
 
+  // Sleep session derived data
+  const sleepTrades = sleepStatus.trades ?? [];
+  const openSleepTrades = sleepTrades.filter((t) => t.status === 'open');
+  const closedSleepTrades = sleepTrades.filter((t) => t.status === 'closed');
+  const sleepLog = sleepStatus.log ?? [];
+
   return (
     <SafeAreaView style={styles.safe} edges={['bottom']}>
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
         <View style={styles.statusRow}>
-          <View style={[styles.statusDot, { backgroundColor: isEnabled ? COLORS.success : COLORS.textMuted }]} />
-          <Text style={[styles.statusLabel, { color: isEnabled ? COLORS.success : COLORS.textMuted }]}>
-            {loadingStatus ? 'CHECKING…' : isEnabled ? 'AUTOTRADER ACTIVE' : 'AUTOTRADER IDLE'}
+          <View style={[styles.statusDot, { backgroundColor: sleepStatus.active ? '#8B5CF6' : isEnabled ? COLORS.success : COLORS.textMuted }]} />
+          <Text style={[styles.statusLabel, { color: sleepStatus.active ? '#8B5CF6' : isEnabled ? COLORS.success : COLORS.textMuted }]}>
+            {loadingStatus ? 'CHECKING\u2026' : sleepStatus.active ? 'SLEEP MODE ACTIVE' : isEnabled ? 'AUTOTRADER ACTIVE' : 'AUTOTRADER IDLE'}
           </Text>
           <TouchableOpacity onPress={refreshStatus} style={styles.refreshBtn}>
             <Ionicons name="refresh" size={16} color={COLORS.textMuted} />
           </TouchableOpacity>
         </View>
 
+        {/* Main toggle card */}
         <LinearGradient
-          colors={isEnabled ? ['#065F46', '#047857'] as [string, string] : COLORS.gradientCard as [string, string]}
+          colors={sleepStatus.active ? ['#4C1D95', '#6D28D9'] as [string, string] : isEnabled ? ['#065F46', '#047857'] as [string, string] : COLORS.gradientCard as [string, string]}
           style={styles.mainCard}
         >
           <View style={styles.toggleRow}>
             <View style={styles.toggleLeft}>
-              <Ionicons name="hardware-chip" size={30} color={isEnabled ? COLORS.chartGreen : COLORS.primary} />
+              <Ionicons
+                name={sleepStatus.active ? 'moon' : 'hardware-chip'}
+                size={30}
+                color={sleepStatus.active ? '#C4B5FD' : isEnabled ? COLORS.chartGreen : COLORS.primary}
+              />
               <View style={styles.toggleText}>
-                <Text style={styles.toggleTitle}>Sleep Mode</Text>
+                <Text style={styles.toggleTitle}>
+                  {sleepStatus.active ? 'Sleep Mode' : 'AutoTrader'}
+                </Text>
                 <Text style={styles.toggleSub}>
-                  {isEnabled ? 'AI is trading on your behalf' : 'Hand over trades to Sentinel AI'}
+                  {sleepStatus.active
+                    ? 'Sentinel is trading while you rest'
+                    : isEnabled ? 'AI is trading on your behalf' : 'Hand over trades to Sentinel AI'}
                 </Text>
               </View>
             </View>
@@ -267,10 +407,11 @@ export default function AutoTraderScreen() {
               onValueChange={handleToggle}
               trackColor={{ false: COLORS.surface, true: COLORS.successDark }}
               thumbColor={isEnabled ? '#fff' : COLORS.textMuted}
+              disabled={sleepStatus.active}
             />}
           </View>
 
-          {isEnabled && (
+          {isEnabled && !sleepStatus.active && (
             <View style={styles.activeStats}>
               {[
                 { label: 'Open', value: autoTrader.activeTrades.length },
@@ -284,7 +425,165 @@ export default function AutoTraderScreen() {
               ))}
             </View>
           )}
+
+          {sleepStatus.active && (
+            <View style={styles.activeStats}>
+              {[
+                { label: 'Trades', value: sleepStatus.trade_count ?? 0 },
+                { label: 'PnL', value: `$${(sleepStatus.realized_pnl ?? 0).toFixed(2)}` },
+                { label: 'Remaining', value: formatDuration(sleepStatus.remaining_s ?? 0) },
+              ].map(({ label, value }) => (
+                <View key={label} style={styles.activeStat}>
+                  <Text style={styles.activeStatValue}>{String(value)}</Text>
+                  <Text style={styles.activeStatLabel}>{label}</Text>
+                </View>
+              ))}
+            </View>
+          )}
         </LinearGradient>
+
+        {/* Sleep Mode Controls */}
+        {isEnabled && (
+          <View style={styles.card}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: SPACING.sm }}>
+              <Ionicons name="moon-outline" size={18} color="#8B5CF6" />
+              <Text style={[styles.sectionTitle, { marginLeft: 8, marginBottom: 0, marginTop: 0 }]}>
+                Sleep Mode
+              </Text>
+            </View>
+            <Text style={{ color: COLORS.textSecondary, fontSize: FONT_SIZES.xs, marginBottom: SPACING.md, lineHeight: 16 }}>
+              Activate when you go to sleep. Sentinel will autonomously trade for 8 hours targeting 25-30% portfolio profit using TA-driven entries with SL/TP protection.
+            </Text>
+
+            {!sleepStatus.active ? (
+              <TouchableOpacity
+                style={[styles.sleepBtn, startingSleep && { opacity: 0.6 }]}
+                onPress={handleStartSleep}
+                disabled={startingSleep}
+              >
+                {startingSleep ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <>
+                    <Ionicons name="moon" size={18} color="#fff" />
+                    <Text style={styles.sleepBtnText}>Start Sleep Mode (8h)</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity
+                style={[styles.sleepStopBtn, stoppingSleep && { opacity: 0.6 }]}
+                onPress={handleStopSleep}
+                disabled={stoppingSleep}
+              >
+                {stoppingSleep ? (
+                  <ActivityIndicator color={COLORS.error} />
+                ) : (
+                  <>
+                    <Ionicons name="stop-circle" size={18} color={COLORS.error} />
+                    <Text style={styles.sleepStopBtnText}>Stop Sleep Mode</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            )}
+
+            {/* Progress bar */}
+            {sleepStatus.active && sleepStatus.elapsed_s != null && sleepStatus.ends_at != null && sleepStatus.started_at != null && (
+              <View style={styles.progressContainer}>
+                <View style={styles.progressBar}>
+                  <View
+                    style={[styles.progressFill, {
+                      width: `${Math.min(100, (sleepStatus.elapsed_s / (sleepStatus.ends_at - sleepStatus.started_at)) * 100)}%`,
+                    }]}
+                  />
+                </View>
+                <Text style={styles.progressText}>
+                  {formatDuration(sleepStatus.elapsed_s)} elapsed
+                </Text>
+              </View>
+            )}
+          </View>
+        )}
+
+        {/* Sleep Trades */}
+        {sleepStatus.active && openSleepTrades.length > 0 && (
+          <>
+            <Text style={styles.sectionTitle}>Sleep Mode Open Trades</Text>
+            {openSleepTrades.map((trade, idx) => {
+              const isLong = trade.side === 'buy';
+              return (
+                <View key={`sleep-${idx}`} style={[styles.tradeCard, { borderLeftWidth: 3, borderLeftColor: isLong ? COLORS.success : COLORS.error }]}>
+                  <View style={styles.tradeRow}>
+                    <View style={[styles.sideBadge, {
+                      backgroundColor: isLong ? COLORS.success + '22' : COLORS.error + '22',
+                    }]}>
+                      <Text style={[styles.sideText, { color: isLong ? COLORS.success : COLORS.error }]}>
+                        {isLong ? 'LONG' : 'SHORT'}
+                      </Text>
+                    </View>
+                    <View style={styles.tradeBody}>
+                      <Text style={styles.tradeSymbol}>{trade.symbol}</Text>
+                      <Text style={styles.tradeDetail}>
+                        Entry ${trade.entry_price.toFixed(2)} | {trade.leverage}x
+                      </Text>
+                    </View>
+                    <View style={{ alignItems: 'flex-end' }}>
+                      <Text style={[styles.tradePnl, { color: '#8B5CF6' }]}>
+                        {(trade.confidence * 100).toFixed(0)}% conf
+                      </Text>
+                      <Text style={styles.tradeDetail}>
+                        SL ${trade.sl_price.toFixed(2)}
+                      </Text>
+                    </View>
+                  </View>
+                </View>
+              );
+            })}
+          </>
+        )}
+
+        {/* Closed Sleep Trades */}
+        {closedSleepTrades.length > 0 && (
+          <>
+            <Text style={styles.sectionTitle}>Sleep Mode Closed Trades</Text>
+            {closedSleepTrades.slice(-5).map((trade, idx) => {
+              const pnl = trade.pnl_pct ?? 0;
+              const pnlColor = pnl >= 0 ? COLORS.success : COLORS.error;
+              return (
+                <View key={`closed-${idx}`} style={[styles.tradeCard, { opacity: 0.8 }]}>
+                  <View style={styles.tradeRow}>
+                    <View style={[styles.sideBadge, { backgroundColor: pnlColor + '22' }]}>
+                      <Text style={[styles.sideText, { color: pnlColor }]}>
+                        {trade.side === 'buy' ? 'LONG' : 'SHORT'}
+                      </Text>
+                    </View>
+                    <View style={styles.tradeBody}>
+                      <Text style={styles.tradeSymbol}>{trade.symbol}</Text>
+                      <Text style={styles.tradeDetail}>
+                        ${trade.entry_price.toFixed(2)} | {trade.leverage}x
+                      </Text>
+                    </View>
+                    <Text style={[styles.tradePnl, { color: pnlColor }]}>
+                      {pnl >= 0 ? '+' : ''}{pnl.toFixed(1)}%
+                    </Text>
+                  </View>
+                </View>
+              );
+            })}
+          </>
+        )}
+
+        {/* Sleep Log */}
+        {sleepStatus.active && sleepLog.length > 0 && (
+          <>
+            <Text style={styles.sectionTitle}>Sleep Mode Log</Text>
+            <View style={styles.logCard}>
+              {sleepLog.slice(-8).map((entry, idx) => (
+                <Text key={idx} style={styles.logEntry}>{entry}</Text>
+              ))}
+            </View>
+          </>
+        )}
 
         <Text style={styles.sectionTitle}>Exchange Connection</Text>
         <View style={styles.card}>
@@ -366,7 +665,7 @@ export default function AutoTraderScreen() {
 
           <View style={styles.securityNote}>
             <Ionicons name="lock-closed" size={12} color={COLORS.success} />
-            <Text style={styles.securityText}>Use read-only keys without withdrawal permissions.</Text>
+            <Text style={styles.securityText}>Use trade-enabled keys without withdrawal permissions.</Text>
           </View>
         </View>
 
@@ -471,7 +770,7 @@ export default function AutoTraderScreen() {
         <View style={styles.infoBox}>
           <Ionicons name="information-circle-outline" size={16} color={COLORS.info} />
           <Text style={styles.infoText}>
-            AutoTrader uses Sentinel AI&apos;s market analysis and executes via your exchange API. You can disable it or close individual positions at any time.
+            AutoTrader uses Sentinel AI&apos;s market analysis and executes via your exchange API. Sleep Mode runs autonomously for 8 hours with TA-driven entries. You can stop it or close positions at any time.
           </Text>
         </View>
 
@@ -530,4 +829,56 @@ const styles = StyleSheet.create({
   closeBtnText: { color: COLORS.error, fontSize: FONT_SIZES.sm, fontWeight: '600' },
   infoBox: { flexDirection: 'row', gap: SPACING.sm, backgroundColor: COLORS.info + '15', borderRadius: BORDER_RADIUS.lg, padding: SPACING.md, marginTop: SPACING.sm, alignItems: 'flex-start' },
   infoText: { color: COLORS.textSecondary, fontSize: FONT_SIZES.xs, flex: 1, lineHeight: 18 },
+  sleepBtn: {
+    backgroundColor: '#6D28D9',
+    borderRadius: BORDER_RADIUS.md,
+    paddingVertical: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  sleepBtnText: { color: '#fff', fontWeight: '700', fontSize: FONT_SIZES.sm },
+  sleepStopBtn: {
+    borderWidth: 1,
+    borderColor: COLORS.error,
+    borderRadius: BORDER_RADIUS.md,
+    paddingVertical: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  sleepStopBtnText: { color: COLORS.error, fontWeight: '700', fontSize: FONT_SIZES.sm },
+  progressContainer: { marginTop: SPACING.md },
+  progressBar: {
+    height: 6,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: '100%',
+    backgroundColor: '#8B5CF6',
+    borderRadius: 3,
+  },
+  progressText: {
+    color: COLORS.textMuted,
+    fontSize: FONT_SIZES.xs,
+    marginTop: 4,
+    textAlign: 'right',
+  },
+  logCard: {
+    backgroundColor: COLORS.backgroundCard,
+    borderRadius: BORDER_RADIUS.lg,
+    padding: SPACING.sm,
+    marginBottom: SPACING.md,
+  },
+  logEntry: {
+    color: COLORS.textSecondary,
+    fontSize: 10,
+    fontFamily: 'monospace' as any,
+    lineHeight: 16,
+    paddingVertical: 1,
+  },
 });

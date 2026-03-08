@@ -1,0 +1,565 @@
+"""
+Sleep Mode AutoTrader — Autonomous trading engine for Pytheia Sentinel.
+
+Runs as a background asyncio task when the user activates Sleep Mode.
+Uses Sentinel's TA signals (RSI, MACD, BB, EMA) + Brain predictions to
+open/close futures positions autonomously over an 8-hour sleep session.
+
+Target: 25–30% portfolio profit across multiple small, high-conviction trades.
+"""
+import asyncio
+import logging
+import time
+from typing import Any
+
+from app.brain import connector, store as brain_store
+from app.brain.predictor import PredictionEngine
+from app.sentinel import technicals as tech_module
+
+log = logging.getLogger(__name__)
+
+# ── Active sleep sessions (in-memory) ────────────────────────────────────────
+_active_sessions: dict[str, asyncio.Task] = {}
+
+SLEEP_DURATION_S = 8 * 3600  # 8 hours
+SCAN_INTERVAL_S = 90         # re-scan every 90s
+MAX_TRADES_PER_SESSION = 40  # cap total trades in one sleep
+ENTRY_COOLDOWN_S = 180       # min 3 min between entries on same symbol
+MIN_CONFIDENCE = 0.60        # brain confidence threshold
+
+
+def _sl_tp_for_leverage(leverage: float, side: str, price: float, sl_pct: float, tp_pct: float):
+    """Calculate SL/TP prices accounting for leverage."""
+    # Tighter SL for higher leverage
+    effective_sl = sl_pct / leverage if leverage > 1 else sl_pct
+    effective_tp = tp_pct / leverage if leverage > 1 else tp_pct
+
+    # Clamp: SL at least 0.1%, TP at least 0.15%
+    effective_sl = max(effective_sl, 0.1)
+    effective_tp = max(effective_tp, 0.15)
+
+    if side == "buy":  # long
+        sl_price = price * (1 - effective_sl / 100)
+        tp_price = price * (1 + effective_tp / 100)
+    else:  # short
+        sl_price = price * (1 + effective_sl / 100)
+        tp_price = price * (1 - effective_tp / 100)
+    return round(sl_price, 6), round(tp_price, 6)
+
+
+def _position_size(equity: float, price: float, risk_pct: float, max_position_pct: float, leverage: int) -> float:
+    """Calculate position size in contracts (base asset amount)."""
+    risk_usd = equity * (risk_pct / 100)
+    max_usd = equity * (max_position_pct / 100)
+    notional = min(risk_usd * leverage, max_usd * leverage, equity * 0.5 * leverage)
+    if price <= 0:
+        return 0.0
+    amount = notional / price
+    return round(amount, 6)
+
+
+async def _get_ta_signals(symbol: str) -> dict[str, Any]:
+    """Get technical analysis for a symbol."""
+    try:
+        result = await tech_module.calculate(symbol)
+        return {
+            "rsi": result.rsi_14,
+            "rsi_signal": result.rsi_signal,
+            "macd_trend": result.macd_trend,
+            "macd_histogram": result.macd_histogram,
+            "bb_signal": result.bb_signal,
+            "bb_pct": result.bb_pct,
+            "ema_cross": result.ema_cross,
+            "williams_r": result.williams_r,
+            "williams_signal": result.williams_r_signal,
+            "score": result.score,
+            "price": result.current_price,
+            "error": result.error,
+        }
+    except Exception as e:
+        log.warning("[sleep] TA failed for %s: %s", symbol, e)
+        return {"error": str(e)}
+
+
+def _evaluate_entry(ta: dict[str, Any], brain_pred: dict | None = None) -> tuple[str | None, float]:
+    """Evaluate whether to enter a trade based on TA + Brain.
+
+    Returns (side, confidence) where side is 'buy'/'sell'/None.
+    """
+    if ta.get("error"):
+        return None, 0.0
+
+    score = 0.0
+    direction_votes: dict[str, float] = {"long": 0.0, "short": 0.0}
+
+    rsi = ta.get("rsi", 50)
+    rsi_signal = ta.get("rsi_signal", "")
+
+    # RSI signals
+    if rsi < 25:
+        direction_votes["long"] += 2.0
+        score += 0.2
+    elif rsi < 35:
+        direction_votes["long"] += 1.0
+        score += 0.1
+    elif rsi > 75:
+        direction_votes["short"] += 2.0
+        score += 0.2
+    elif rsi > 65:
+        direction_votes["short"] += 1.0
+        score += 0.1
+
+    # MACD
+    macd_trend = ta.get("macd_trend", "")
+    macd_hist = ta.get("macd_histogram", 0)
+    if macd_trend == "bullish" and macd_hist > 0:
+        direction_votes["long"] += 1.5
+        score += 0.15
+    elif macd_trend == "bearish" and macd_hist < 0:
+        direction_votes["short"] += 1.5
+        score += 0.15
+
+    # Bollinger Bands
+    bb_signal = ta.get("bb_signal", "")
+    if "oversold" in bb_signal.lower() or "below" in bb_signal.lower():
+        direction_votes["long"] += 1.0
+        score += 0.1
+    elif "overbought" in bb_signal.lower() or "above" in bb_signal.lower():
+        direction_votes["short"] += 1.0
+        score += 0.1
+    if "squeeze" in bb_signal.lower():
+        score += 0.15  # high volatility incoming — good for entries
+
+    # EMA cross
+    ema_cross = ta.get("ema_cross", "")
+    if ema_cross == "golden_cross":
+        direction_votes["long"] += 2.0
+        score += 0.2
+    elif ema_cross == "death_cross":
+        direction_votes["short"] += 2.0
+        score += 0.2
+
+    # Williams %R
+    wr = ta.get("williams_r", -50)
+    if wr < -80:
+        direction_votes["long"] += 1.0
+    elif wr > -20:
+        direction_votes["short"] += 1.0
+
+    # Brain prediction boost
+    if brain_pred and brain_pred.get("confidence", "low") != "low":
+        pred = brain_pred.get("prediction", "risky")
+        if pred == "favorable":
+            score += 0.15
+        elif pred == "risky":
+            score -= 0.1
+
+    # Determine direction
+    long_score = direction_votes["long"]
+    short_score = direction_votes["short"]
+
+    if long_score > short_score and long_score >= 3.0:
+        side = "buy"
+        confidence = min(score + (long_score - short_score) * 0.1, 1.0)
+    elif short_score > long_score and short_score >= 3.0:
+        side = "sell"
+        confidence = min(score + (short_score - long_score) * 0.1, 1.0)
+    else:
+        return None, score
+
+    return side, confidence
+
+
+async def _manage_open_positions(
+    session: dict,
+    creds: dict,
+) -> list[dict]:
+    """Check open positions and close profitable ones / cut losses."""
+    closed: list[dict] = []
+    try:
+        positions = await connector.fetch_open_positions(
+            exchange=creds["exchange"],
+            api_key=creds["api_key"],
+            api_secret=creds["api_secret"],
+            passphrase=creds.get("passphrase"),
+        )
+    except Exception as e:
+        log.warning("[sleep] fetch positions failed: %s", e)
+        return closed
+
+    tp_pct = session.get("config", {}).get("take_profit_pct", 4.0)
+    sl_pct = session.get("config", {}).get("stop_loss_pct", 2.0)
+
+    sleep_trades = session.get("sleep_trades", [])
+    sleep_trade_symbols = {t["symbol"] for t in sleep_trades if t.get("status") == "open"}
+
+    for pos in positions:
+        sym = pos.get("symbol", "")
+        if sym not in sleep_trade_symbols:
+            continue  # not our trade
+
+        pnl_pct = pos.get("pnlPct", 0)
+        leverage = pos.get("leverage", 1)
+
+        # Dynamic TP: leverage-adjusted
+        effective_tp = tp_pct * leverage * 0.7  # 70% of theoretical max
+        effective_sl = sl_pct * leverage * 0.5
+
+        should_close = False
+        reason = ""
+
+        if pnl_pct >= effective_tp:
+            should_close = True
+            reason = f"TP hit: {pnl_pct:.1f}% (target {effective_tp:.1f}%)"
+        elif pnl_pct <= -effective_sl:
+            should_close = True
+            reason = f"SL hit: {pnl_pct:.1f}% (limit -{effective_sl:.1f}%)"
+        elif pnl_pct >= 15:
+            # Always take 15%+ profit
+            should_close = True
+            reason = f"Profit lock: {pnl_pct:.1f}%"
+
+        if should_close:
+            side = pos.get("side", "long")
+            close_side = "sell" if side == "long" else "buy"
+            contracts = pos.get("contracts", 0)
+
+            try:
+                result = await connector.create_market_order(
+                    exchange=creds["exchange"],
+                    api_key=creds["api_key"],
+                    api_secret=creds["api_secret"],
+                    symbol=sym.replace(":USDT", ""),
+                    side=close_side,
+                    amount=contracts,
+                    passphrase=creds.get("passphrase"),
+                    reduce_only=True,
+                )
+                if result.get("ok"):
+                    closed.append({
+                        "symbol": sym,
+                        "reason": reason,
+                        "pnl_pct": pnl_pct,
+                        "unrealized_pnl": pos.get("unrealizedPnl", 0),
+                        "closed_at": time.time(),
+                    })
+                    log.info("[sleep] closed %s: %s", sym, reason)
+            except Exception as e:
+                log.warning("[sleep] close failed %s: %s", sym, e)
+
+    return closed
+
+
+async def run_sleep_session(
+    user_id: str,
+    brain_engine: PredictionEngine,
+):
+    """Main sleep trading loop. Runs for up to 8 hours."""
+    session = brain_store.load_autotrader(user_id)
+    if not session:
+        log.warning("[sleep] no session found for %s", user_id)
+        return
+
+    config = session.get("config", {})
+    creds = {
+        "exchange": config.get("exchange", "mexc"),
+        "api_key": config.get("api_key", ""),
+        "api_secret": config.get("api_secret", ""),
+        "passphrase": config.get("passphrase"),
+    }
+
+    if not creds["api_key"] or not creds["api_secret"]:
+        _log_sleep(user_id, "Sleep Mode aborted: missing API credentials")
+        return
+
+    symbols = config.get("symbols", ["BTC/USDT"])
+    max_leverage = int(config.get("max_leverage", 20))
+    sl_pct = float(config.get("stop_loss_pct", 2.0))
+    tp_pct = float(config.get("take_profit_pct", 4.0))
+    risk_pct = float(config.get("risk_per_trade_pct", 1.0))
+    max_position_pct = float(config.get("max_position_pct", 10.0))
+    max_open = int(config.get("max_open_trades", 3))
+    max_exposure_pct = float(config.get("max_total_exposure_pct", 25.0))
+
+    start_time = time.time()
+    end_time = start_time + SLEEP_DURATION_S
+    trade_count = 0
+    total_realized_pnl = 0.0
+    last_entry_by_symbol: dict[str, float] = {}
+
+    # Initialize sleep session tracking
+    session["sleep_mode"] = {
+        "active": True,
+        "started_at": start_time,
+        "ends_at": end_time,
+        "trade_count": 0,
+        "realized_pnl": 0.0,
+        "status": "running",
+    }
+    session["sleep_trades"] = []
+    brain_store.save_autotrader(user_id, session)
+    _log_sleep(user_id, f"Sleep Mode started — scanning {len(symbols)} symbols, max {max_leverage}x leverage")
+
+    try:
+        while time.time() < end_time and trade_count < MAX_TRADES_PER_SESSION:
+            await asyncio.sleep(2)  # small initial delay
+
+            # 1. Manage existing positions
+            closed = await _manage_open_positions(session, creds)
+            for c in closed:
+                total_realized_pnl += c.get("unrealized_pnl", 0)
+                trade_count += 1
+                _log_sleep(user_id, f"Closed {c['symbol']}: {c['reason']} | PnL: {c['pnl_pct']:.1f}%")
+
+                # Mark trade closed
+                for t in session.get("sleep_trades", []):
+                    if t.get("symbol") == c["symbol"] and t.get("status") == "open":
+                        t["status"] = "closed"
+                        t["pnl_pct"] = c["pnl_pct"]
+                        t["closed_at"] = c["closed_at"]
+                        break
+
+            # Count current open sleep trades
+            open_trades = [t for t in session.get("sleep_trades", []) if t.get("status") == "open"]
+
+            # 2. Scan for new entries if we have capacity
+            if len(open_trades) < max_open:
+                # Get portfolio equity
+                try:
+                    snapshot = await connector.fetch_exchange_snapshot(
+                        creds["exchange"], creds["api_key"], creds["api_secret"], creds.get("passphrase")
+                    )
+                    equity = snapshot.get("equity", 0)
+                except Exception:
+                    equity = 0
+
+                if equity < 50:
+                    _log_sleep(user_id, "Equity below $50 — pausing entries")
+                    await asyncio.sleep(SCAN_INTERVAL_S)
+                    continue
+
+                # Check total exposure
+                current_notional = sum(p.get("notional", 0) for p in snapshot.get("positions", []))
+                max_notional = equity * (max_exposure_pct / 100) * max_leverage
+                exposure_ok = current_notional < max_notional
+
+                if exposure_ok:
+                    for symbol in symbols:
+                        # Cooldown check
+                        last_entry = last_entry_by_symbol.get(symbol, 0)
+                        if time.time() - last_entry < ENTRY_COOLDOWN_S:
+                            continue
+
+                        # Already have open trade on this symbol?
+                        if any(t.get("symbol") == symbol and t.get("status") == "open" for t in session.get("sleep_trades", [])):
+                            continue
+
+                        # Get TA
+                        ta = await _get_ta_signals(symbol)
+                        if ta.get("error"):
+                            continue
+
+                        price = ta.get("price", 0)
+                        if price <= 0:
+                            continue
+
+                        # Brain prediction
+                        brain_pred = None
+                        try:
+                            rsi = ta.get("rsi", 50)
+                            brain_pred = brain_engine.predict(user_id, {
+                                "rsi": rsi,
+                                "atr_score": ta.get("score", 5),
+                                "geo_score": 5.0,
+                                "calendar_score": 5.0,
+                            })
+                        except Exception:
+                            pass
+
+                        side, confidence = _evaluate_entry(ta, brain_pred)
+                        if not side or confidence < MIN_CONFIDENCE:
+                            continue
+
+                        # Determine leverage (scale with confidence)
+                        use_leverage = min(
+                            max(int(max_leverage * confidence * 0.6), 5),
+                            max_leverage,
+                        )
+
+                        # Calculate position size
+                        amount = _position_size(equity, price, risk_pct, max_position_pct, use_leverage)
+                        if amount <= 0:
+                            continue
+
+                        # Execute!
+                        try:
+                            # Set leverage
+                            await connector.set_leverage(
+                                creds["exchange"], creds["api_key"], creds["api_secret"],
+                                symbol, use_leverage, creds.get("passphrase"),
+                            )
+
+                            # Place market order
+                            order = await connector.create_market_order(
+                                creds["exchange"], creds["api_key"], creds["api_secret"],
+                                symbol, side, amount, creds.get("passphrase"),
+                            )
+
+                            if order.get("ok"):
+                                fill_price = order.get("price", price)
+                                sl_price, tp_price = _sl_tp_for_leverage(use_leverage, side, fill_price, sl_pct, tp_pct)
+
+                                # Place SL
+                                sl_side = "sell" if side == "buy" else "buy"
+                                await connector.create_stop_loss(
+                                    creds["exchange"], creds["api_key"], creds["api_secret"],
+                                    symbol, sl_side, amount, sl_price, creds.get("passphrase"),
+                                )
+
+                                # Place TP
+                                await connector.create_take_profit(
+                                    creds["exchange"], creds["api_key"], creds["api_secret"],
+                                    symbol, sl_side, amount, tp_price, creds.get("passphrase"),
+                                )
+
+                                trade_record = {
+                                    "symbol": symbol,
+                                    "side": side,
+                                    "amount": amount,
+                                    "entry_price": fill_price,
+                                    "leverage": use_leverage,
+                                    "sl_price": sl_price,
+                                    "tp_price": tp_price,
+                                    "confidence": round(confidence, 2),
+                                    "ta_summary": {
+                                        "rsi": ta.get("rsi"),
+                                        "macd": ta.get("macd_trend"),
+                                        "ema": ta.get("ema_cross"),
+                                    },
+                                    "opened_at": time.time(),
+                                    "status": "open",
+                                    "order_id": order.get("id"),
+                                }
+                                session.setdefault("sleep_trades", []).append(trade_record)
+                                last_entry_by_symbol[symbol] = time.time()
+                                trade_count += 1
+
+                                direction = "LONG" if side == "buy" else "SHORT"
+                                _log_sleep(
+                                    user_id,
+                                    f"Opened {direction} {symbol} @ ${fill_price:.2f} | "
+                                    f"{use_leverage}x | SL ${sl_price:.2f} TP ${tp_price:.2f} | "
+                                    f"Confidence {confidence:.0%}"
+                                )
+                            else:
+                                _log_sleep(user_id, f"Order failed for {symbol}: {order.get('error', 'unknown')}")
+
+                        except Exception as e:
+                            _log_sleep(user_id, f"Execution error on {symbol}: {str(e)[:100]}")
+
+                        # Don't flood — small delay between entries
+                        await asyncio.sleep(5)
+
+            # Update session stats
+            session["sleep_mode"]["trade_count"] = trade_count
+            session["sleep_mode"]["realized_pnl"] = round(total_realized_pnl, 4)
+            elapsed = time.time() - start_time
+            session["sleep_mode"]["elapsed_s"] = int(elapsed)
+            session["sleep_mode"]["remaining_s"] = max(0, int(end_time - time.time()))
+            brain_store.save_autotrader(user_id, session)
+
+            await asyncio.sleep(SCAN_INTERVAL_S)
+
+    except asyncio.CancelledError:
+        _log_sleep(user_id, "Sleep Mode cancelled by user")
+    except Exception as e:
+        _log_sleep(user_id, f"Sleep Mode error: {str(e)[:200]}")
+        log.exception("[sleep] session error for %s", user_id)
+    finally:
+        # Finalize session
+        session = brain_store.load_autotrader(user_id) or session
+        session["sleep_mode"]["active"] = False
+        session["sleep_mode"]["status"] = "completed"
+        session["sleep_mode"]["ended_at"] = time.time()
+        session["sleep_mode"]["total_trades"] = trade_count
+        session["sleep_mode"]["total_realized_pnl"] = round(total_realized_pnl, 4)
+        brain_store.save_autotrader(user_id, session)
+
+        elapsed_h = (time.time() - start_time) / 3600
+        _log_sleep(
+            user_id,
+            f"Sleep Mode ended — {trade_count} trades in {elapsed_h:.1f}h | "
+            f"Realized PnL: ${total_realized_pnl:.2f}"
+        )
+
+        # Clean up from active sessions
+        _active_sessions.pop(user_id, None)
+
+
+def _log_sleep(user_id: str, message: str):
+    """Append to the autotrader session log."""
+    ts = time.strftime("%H:%M:%S", time.gmtime())
+    entry = f"[{ts}] {message}"
+    log.info("[sleep:%s] %s", user_id, message)
+
+    session = brain_store.load_autotrader(user_id)
+    if session:
+        session.setdefault("log", []).append(entry)
+        # Keep last 200 log entries
+        if len(session["log"]) > 200:
+            session["log"] = session["log"][-200:]
+        brain_store.save_autotrader(user_id, session)
+
+
+def start_sleep_mode(user_id: str, brain_engine: PredictionEngine) -> dict:
+    """Start a sleep trading session. Returns status."""
+    if user_id in _active_sessions:
+        task = _active_sessions[user_id]
+        if not task.done():
+            return {"ok": False, "error": "Sleep Mode already active", "active": True}
+
+    task = asyncio.create_task(run_sleep_session(user_id, brain_engine))
+    _active_sessions[user_id] = task
+    return {"ok": True, "message": "Sleep Mode started", "duration_hours": 8}
+
+
+def stop_sleep_mode(user_id: str) -> dict:
+    """Stop an active sleep session."""
+    task = _active_sessions.get(user_id)
+    if not task or task.done():
+        return {"ok": True, "message": "No active sleep session"}
+
+    task.cancel()
+    _active_sessions.pop(user_id, None)
+
+    session = brain_store.load_autotrader(user_id)
+    if session and session.get("sleep_mode"):
+        session["sleep_mode"]["active"] = False
+        session["sleep_mode"]["status"] = "stopped_by_user"
+        session["sleep_mode"]["ended_at"] = time.time()
+        brain_store.save_autotrader(user_id, session)
+
+    return {"ok": True, "message": "Sleep Mode stopped"}
+
+
+def get_sleep_status(user_id: str) -> dict:
+    """Get current sleep session status."""
+    session = brain_store.load_autotrader(user_id)
+    if not session:
+        return {"active": False}
+
+    sleep = session.get("sleep_mode", {})
+    is_active = user_id in _active_sessions and not _active_sessions[user_id].done()
+
+    return {
+        "active": is_active,
+        "started_at": sleep.get("started_at"),
+        "ends_at": sleep.get("ends_at"),
+        "elapsed_s": sleep.get("elapsed_s", 0),
+        "remaining_s": sleep.get("remaining_s", 0),
+        "trade_count": sleep.get("trade_count", 0),
+        "realized_pnl": sleep.get("realized_pnl", 0),
+        "status": sleep.get("status", "idle"),
+        "trades": session.get("sleep_trades", []),
+        "log": session.get("log", [])[-30:],
+    }

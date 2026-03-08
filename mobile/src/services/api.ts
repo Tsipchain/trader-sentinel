@@ -195,6 +195,25 @@ export const marketAPI = {
     return response.data;
   },
 
+  async getTechnicals(symbol: string = 'BTC/USDT'): Promise<{
+    ok: boolean;
+    symbol: string;
+    score: number;
+    current_price: number;
+    rsi_14: number;
+    rsi_signal: string;
+    volatility_score: number;
+    macd: { line: number; signal: number; histogram: number; trend: string };
+    bollinger_bands: { upper: number; middle: number; lower: number; pct_b: number; signal: string };
+    ema: { ema_20: number; ema_50: number; cross: string };
+    williams_r: { value: number; signal: string };
+    nearest_fib: { level: string; price: number; distance_pct: number } | null;
+    error: string | null;
+  }> {
+    const response = await api.get('/api/sentinel/technicals', { params: { symbol } });
+    return response.data;
+  },
+
   createMarketStream(
     symbol: string,
     intervalMs: number = 1000,
@@ -617,6 +636,46 @@ export const brainAPI = {
     message?: string;
   }> {
     const response = await brainGet(`/api/brain/trader-profile/${userId}`);
+    return response;
+  },
+
+  async startSleepMode(userId: string): Promise<{ ok: boolean; message?: string; error?: string; duration_hours?: number }> {
+    const response = await brainPost('/api/brain/autotrader/sleep-start', { user_id: userId });
+    return response;
+  },
+
+  async stopSleepMode(userId: string): Promise<{ ok: boolean; message?: string }> {
+    const response = await brainPost('/api/brain/autotrader/sleep-stop', { user_id: userId });
+    return response;
+  },
+
+  async getSleepStatus(userId: string): Promise<{
+    ok: boolean;
+    active: boolean;
+    started_at?: number;
+    ends_at?: number;
+    elapsed_s?: number;
+    remaining_s?: number;
+    trade_count?: number;
+    realized_pnl?: number;
+    status?: string;
+    trades?: Array<{
+      symbol: string;
+      side: string;
+      amount: number;
+      entry_price: number;
+      leverage: number;
+      sl_price: number;
+      tp_price: number;
+      confidence: number;
+      opened_at: number;
+      status: string;
+      pnl_pct?: number;
+      closed_at?: number;
+    }>;
+    log?: string[];
+  }> {
+    const response = await brainGet(`/api/brain/autotrader/sleep-status/${userId}`);
     return response;
   },
 
