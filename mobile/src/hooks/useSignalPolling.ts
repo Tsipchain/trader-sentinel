@@ -127,7 +127,7 @@ export function useSignalPolling() {
   // ── Position-Aware Alerts ──────────────────────────────────────────────────
   const checkPositionAlerts = useCallback(async () => {
     const now = Date.now();
-    if (now - positionCheckRef.current < 60_000) return;
+    if (now - positionCheckRef.current < 60000) return;
     positionCheckRef.current = now;
 
     const state = useStore.getState();
@@ -229,7 +229,7 @@ export function useSignalPolling() {
   const scanTechnicals = useCallback(async () => {
     const now = Date.now();
     // Technical scans every 30s (heavier than arb, lighter than positions)
-    if (now - techScanRef.current < 30_000) return;
+    if (now - techScanRef.current < 30000) return;
     techScanRef.current = now;
 
     const state = useStore.getState();

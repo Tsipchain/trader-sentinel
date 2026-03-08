@@ -382,7 +382,7 @@ export interface PortfolioSnapshot {
   ts: number;
 }
 
-const _BRAIN_SERVICE_CHECK_TTL_MS = 60_000;
+const _BRAIN_SERVICE_CHECK_TTL_MS = 60000;
 let _brainServiceCheckCache: { at: number; value: BrainServiceCheck } | null = null;
 
 export const brainAPI = {
