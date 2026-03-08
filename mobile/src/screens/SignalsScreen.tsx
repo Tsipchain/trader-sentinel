@@ -249,9 +249,9 @@ export default function SignalsScreen() {
       const status = (error as any)?.response?.status;
       const isNetworkError = (error as any)?.message === 'Network Error';
       if (status === 429) {
-        nextFetchAllowedAtRef.current = Date.now() + 60_000;
+        nextFetchAllowedAtRef.current = Date.now() + 60000;
       } else if (isNetworkError) {
-        nextFetchAllowedAtRef.current = Date.now() + 15_000;
+        nextFetchAllowedAtRef.current = Date.now() + 15000;
       }
     }
   }, [watchlist, addSignalWithFeedback, canUseAdvancedSignals, hasRecentDuplicate, hasAnySignalPrefix, tierPolicy.allowNewCoinSignals, tierPolicy.directionalLimit]);

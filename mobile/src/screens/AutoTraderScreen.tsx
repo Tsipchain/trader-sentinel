@@ -15,7 +15,7 @@ import type { ActiveTrade } from '../services/api';
 const SYMBOL_OPTIONS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT'];
 const EXCHANGE_OPTIONS = ['binance', 'bybit', 'okx', 'mexc'];
 const SNAPSHOT_MAX_AGE_MS = 5 * 60 * 1000;
-const SLEEP_POLL_MS = 15_000; // poll sleep status every 15s
+const SLEEP_POLL_MS = 15000; // poll sleep status every 15s
 
 type SleepTrade = {
   symbol: string;
@@ -62,7 +62,7 @@ export default function AutoTraderScreen() {
   const [startingSleep, setStartingSleep] = useState(false);
   const [stoppingSleep, setStoppingSleep] = useState(false);
   const hasShownBrainMisconfigAlert = useRef(false);
-  const sleepPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const sleepPollRef = useRef<NodeJS.Timeout | null>(null);
 
   const isEnabled = autoTrader.enabled;
   const cfg = autoTrader.config;
