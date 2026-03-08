@@ -820,6 +820,158 @@ def brain_autotrader_close(payload: dict = Body(default_factory=dict), _: str = 
     return {"ok": True}
 
 
+@app.post("/api/brain/learn")
+async def brain_learn_from_positions(payload: dict = Body(default_factory=dict), _: str = Security(verify_api_key)):
+    """Sentinel learning loop: analyze trader's positions, match against
+    previous signals, and feed outcomes back into the Brain model.
+
+    This lets the AI discover the trader's personal techniques:
+    - Preferred leverage ranges per symbol
+    - Win patterns (which setups lead to profit)
+    - Risk tolerance (how long they hold drawdowns)
+    - Position sizing behavior
+    """
+    user_id = payload.get("user_id") or payload.get("userId") or "anonymous"
+    positions = payload.get("positions") or []
+    total_unrealized = float(payload.get("total_unrealized_pnl") or 0)
+
+    if not positions:
+        return {"ok": True, "learned": False, "message": "No positions to analyze"}
+
+    # Load historical analysis memory to find patterns
+    memory = brain_store.load_analysis_memory(user_id)
+    entries = memory.get("entries", []) if memory else []
+    position_snapshots = [e for e in entries if e.get("kind") == "position_snapshot"]
+
+    # Extract trader behavior patterns
+    leverages = [p.get("leverage", 1) for p in positions]
+    avg_leverage = sum(leverages) / len(leverages) if leverages else 1
+    max_leverage = max(leverages) if leverages else 1
+    symbols_traded = list(set(p.get("symbol", "") for p in positions))
+
+    # Detect trading style from position history
+    style_traits = []
+    if max_leverage >= 100:
+        style_traits.append("high_leverage_trader")
+    if max_leverage >= 200:
+        style_traits.append("extreme_leverage")
+    if len(positions) >= 3:
+        style_traits.append("multi_position")
+
+    sides = [p.get("side", "").lower() for p in positions]
+    long_count = sum(1 for s in sides if s == "long")
+    short_count = sum(1 for s in sides if s == "short")
+    if long_count > short_count * 2:
+        style_traits.append("long_bias")
+    elif short_count > long_count * 2:
+        style_traits.append("short_bias")
+    else:
+        style_traits.append("hedger")
+
+    # Check if positions match recent Sentinel signals
+    # (to measure signal effectiveness)
+    hist = brain_store.load_history(user_id)
+    trade_records = hist.get("trades", []) if hist else []
+    win_symbols = set(r["symbol"] for r in trade_records if r.get("pnl", 0) > 0)
+    loss_symbols = set(r["symbol"] for r in trade_records if r.get("pnl", 0) < 0)
+
+    # Feed outcomes back into Brain model for profitable positions
+    feedback_count = 0
+    for pos in positions:
+        pnl_pct = pos.get("pnlPct", 0)
+        leverage = pos.get("leverage", 1)
+        sym = pos.get("symbol", "")
+
+        if abs(pnl_pct) > 5:  # Only learn from significant moves
+            # Construct feature vector from position context
+            outcome = 1 if pnl_pct > 0 else 0
+            features = [
+                min(leverage / 300.0, 1.0),  # normalized leverage (0-300x → 0-1)
+                min(abs(pnl_pct) / 100.0, 1.0),  # normalized PnL magnitude
+                1.0 if pos.get("side", "").lower() == "long" else 0.0,
+                0.5,  # placeholder for market conditions (filled by risk score)
+            ]
+            try:
+                _brain_engine.adapt(user_id, features, outcome)
+                feedback_count += 1
+            except Exception:
+                pass
+
+    # Save learning snapshot
+    learning_snapshot = {
+        "kind": "sentinel_learning",
+        "symbol": ",".join(symbols_traded[:5]),
+        "content": {
+            "style_traits": style_traits,
+            "avg_leverage": round(avg_leverage, 1),
+            "max_leverage": max_leverage,
+            "position_count": len(positions),
+            "total_unrealized_pnl": round(total_unrealized, 2),
+            "feedback_count": feedback_count,
+            "win_symbols": list(win_symbols)[:10],
+            "loss_symbols": list(loss_symbols)[:10],
+            "timestamp": time.time(),
+        },
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    brain_store.save_analysis_snapshot(user_id, learning_snapshot)
+
+    return {
+        "ok": True,
+        "learned": feedback_count > 0,
+        "feedback_count": feedback_count,
+        "style_traits": style_traits,
+        "avg_leverage": round(avg_leverage, 1),
+        "max_leverage": max_leverage,
+    }
+
+
+@app.get("/api/brain/trader-profile/{user_id}")
+def brain_trader_profile(user_id: str, _: str = Security(verify_api_key)):
+    """Return the Sentinel's learned profile of the trader's style and preferences."""
+    memory = brain_store.load_analysis_memory(user_id)
+    if not memory:
+        return {"ok": True, "profile": None, "message": "No data yet — sync trades and positions first."}
+
+    entries = memory.get("entries", [])
+    learning_entries = [e for e in entries if e.get("kind") == "sentinel_learning"]
+
+    if not learning_entries:
+        return {"ok": True, "profile": None, "message": "Sentinel is still learning. Keep trading."}
+
+    # Aggregate style from all learning snapshots
+    all_traits: dict[str, int] = {}
+    total_leverage = 0.0
+    max_ever_leverage = 0
+    total_snapshots = len(learning_entries)
+
+    for entry in learning_entries:
+        content = entry.get("content", {})
+        for trait in content.get("style_traits", []):
+            all_traits[trait] = all_traits.get(trait, 0) + 1
+        total_leverage += content.get("avg_leverage", 0)
+        max_ever_leverage = max(max_ever_leverage, content.get("max_leverage", 0))
+
+    dominant_traits = sorted(all_traits.items(), key=lambda x: -x[1])[:5]
+    avg_leverage_overall = total_leverage / total_snapshots if total_snapshots else 0
+
+    # Get model stats
+    model_stats = _brain_engine.stats(user_id)
+
+    return {
+        "ok": True,
+        "profile": {
+            "dominant_traits": [{"trait": t, "frequency": c} for t, c in dominant_traits],
+            "avg_leverage": round(avg_leverage_overall, 1),
+            "max_leverage_seen": max_ever_leverage,
+            "learning_snapshots": total_snapshots,
+            "model_trained": model_stats.get("model") != "stub",
+            "model_accuracy": model_stats.get("model_accuracy"),
+            "trades_trained_on": model_stats.get("trades_trained_on", 0),
+        },
+    }
+
+
 @app.get("/api/tts")
 async def tts(text: str = Query(...), lang: str = Query("en-US"), voice: str = Query("en-US-Neural2-D")):
     if not settings.google_tts_enabled:

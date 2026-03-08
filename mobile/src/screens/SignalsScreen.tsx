@@ -110,8 +110,8 @@ export default function SignalsScreen() {
 
     const allowedPairs = getAllowedPairs(watchlist, subscription);
 
+    // ── Arbitrage signals (all pairs, all tiers) — separate try/catch ──
     try {
-      // Arbitrage signals scan ALL watchlist pairs (available to every tier)
       const results = await Promise.allSettled(
         watchlist.map(async (symbol) => {
           const arb = await marketAPI.getArbitrage(symbol);
@@ -120,7 +120,6 @@ export default function SignalsScreen() {
         })
       );
 
-      // Add arbitrage signals
       results.forEach((result) => {
         if (result.status !== 'fulfilled') return;
         const { signal, symbol, arb } = result.value;
@@ -128,7 +127,6 @@ export default function SignalsScreen() {
           addSignalWithFeedback({ ...signal, id: `arb-${symbol}-${Date.now()}` });
         }
 
-        // Pro+ signal: πιθανή cross-exchange "listing / availability" ευκαιρία
         if (tierPolicy.allowNewCoinSignals && !hasRecentDuplicate(`newcoin-${symbol}`)) {
           const listedVenue = arb.best_bid_venue || arb.best_ask_venue;
           const noVenue = !arb.best_bid_venue || !arb.best_ask_venue;
@@ -137,16 +135,19 @@ export default function SignalsScreen() {
               id: `newcoin-${symbol}-${Date.now()}`,
               type: 'opportunity',
               symbol,
-              message: `${symbol} εμφανίζει περιορισμένη διαθεσιμότητα σε venues — πιθανό early listing edge.`,
+              message: `${symbol} shows limited venue availability — possible early listing edge.`,
               timestamp: Date.now(),
               venues: [listedVenue],
             });
           }
         }
       });
+    } catch (error) {
+      _handleFetchError(error);
+    }
 
-
-      // Free-tier baseline directional hint so users don't wait "all day" for a signal.
+    // ── Free-tier baseline risk hint — separate try/catch ──
+    try {
       if (!canUseAdvancedSignals && allowedPairs.length > 0) {
         const baseSymbol = allowedPairs[0];
         const prefix = `free-risk-${baseSymbol}`;
@@ -165,18 +166,24 @@ export default function SignalsScreen() {
           });
         }
       }
+    } catch {
+      // non-blocking
+    }
 
-      // Pro+ directional signals from composite risk framework
-      if (canUseAdvancedSignals) {
+    // ── Pro+ directional signals — separate try/catch ──
+    if (canUseAdvancedSignals) {
+      try {
         const directionalSymbols = allowedPairs.slice(0, tierPolicy.directionalLimit);
-        const riskSignals = await Promise.all(
+        const riskSignals = await Promise.allSettled(
           directionalSymbols.map(async (symbol) => {
             const risk = await marketAPI.getRiskReport(symbol);
             return { symbol, risk };
           })
         );
 
-        riskSignals.forEach(({ symbol, risk }) => {
+        riskSignals.forEach((result) => {
+          if (result.status !== 'fulfilled') return;
+          const { symbol, risk } = result.value;
           const level = risk.recommendation?.level || 'UNKNOWN';
           const action = (risk.recommendation?.action || '').toLowerCase();
           const prefix = `dir-${symbol}-${level}`;
@@ -206,22 +213,18 @@ export default function SignalsScreen() {
             });
           }
         });
+      } catch (error) {
+        _handleFetchError(error);
       }
-    } catch (error) {
+    }
+
+    function _handleFetchError(error: unknown) {
       const status = (error as any)?.response?.status;
       const isNetworkError = (error as any)?.message === 'Network Error';
       if (status === 429) {
-        // Client-side backoff to avoid hammering upstream when rate-limited
         nextFetchAllowedAtRef.current = Date.now() + 60_000;
       } else if (isNetworkError) {
-        // transient network issue: short cooldown to avoid retry storms
         nextFetchAllowedAtRef.current = Date.now() + 15_000;
-      }
-
-      if (status === 429 || isNetworkError) {
-        console.warn('Signals fetch backoff:', status ?? 'network');
-      } else {
-        console.warn('Signals fetch failed:', (error as any)?.message ?? 'unknown error');
       }
     }
   }, [watchlist, addSignalWithFeedback, canUseAdvancedSignals, hasRecentDuplicate, hasAnySignalPrefix, tierPolicy.allowNewCoinSignals, tierPolicy.directionalLimit]);
@@ -260,18 +263,47 @@ export default function SignalsScreen() {
 
   const inferTradePlan = useCallback((signal: Signal) => {
     const isShort = /short|defensive|bear/i.test(signal.message);
+    const isPositionAlert = signal.venues?.includes('sentinel-position') || signal.venues?.includes('sentinel-portfolio');
     const base = Math.abs(signal.profit ?? 1.2);
     const highVolatility = /critical|caution|warning|volatile|risk\s[7-9]|risk\s10/i.test(signal.message);
     const liquidityTight = /limited|early listing|low liquidity|thin/i.test(signal.message);
+    const isHighLeverage = /\d{3}x|[1-9]\d{2}x/.test(signal.message); // 100x+
+    const isExtremeLeerage = /[2-3]\d{2}x/.test(signal.message); // 200x-300x
 
-    const entry = highVolatility
-      ? 'Scale-in around key S/R zones (avoid full-size market entry)'
-      : 'Market / nearest support-resistance retest';
-    const sl = (isShort ? base * 0.8 : base);
-    const tp1 = (base * 1.1);
-    const tp2 = (base * 1.8);
-    const leverage = liquidityTight ? '1x-2x' : (highVolatility ? '2x-3x' : '3x-5x');
-    const validationWindow = highVolatility ? '15-45 min' : '30-120 min';
+    // Extract leverage from position alerts (e.g., "145x cross", "235x")
+    const leverageMatch = signal.message.match(/(\d+)x\s*(cross|isolated)?/i);
+    const detectedLeverage = leverageMatch ? parseInt(leverageMatch[1], 10) : 0;
+
+    // Dynamic leverage suggestion based on signal context
+    let leverage: string;
+    if (isPositionAlert && detectedLeverage > 0) {
+      // For position alerts, show the actual leverage and suggest adjustment
+      leverage = `Current: ${detectedLeverage}x`;
+    } else if (isExtremeLeerage) {
+      leverage = '50x-150x (scale down from current extreme)';
+    } else if (isHighLeverage) {
+      leverage = '25x-75x (reduce from high leverage zone)';
+    } else if (liquidityTight) {
+      leverage = '5x-20x (thin liquidity — lower exposure)';
+    } else if (highVolatility) {
+      leverage = '10x-50x (volatility elevated — manage size)';
+    } else {
+      leverage = '20x-100x (adjust based on conviction & structure)';
+    }
+
+    // Tighter SL for high-leverage setups
+    const slMultiplier = detectedLeverage >= 100 ? 0.3 : (detectedLeverage >= 50 ? 0.5 : 1.0);
+    const sl = (isShort ? base * 0.8 : base) * slMultiplier;
+    const tp1 = base * 1.1;
+    const tp2 = base * 1.8;
+
+    const entry = isPositionAlert
+      ? 'Position already open — manage existing trade'
+      : (highVolatility
+        ? 'Scale-in around key S/R zones (avoid full-size market entry)'
+        : 'Market / nearest support-resistance retest');
+
+    const validationWindow = isPositionAlert ? 'Immediate action' : (highVolatility ? '15-45 min' : '30-120 min');
 
     const symbolMarket = marketData[signal.symbol];
     const refPrice = modalRefPrice || symbolMarket?.bestAsk || symbolMarket?.bestBid || symbolMarket?.prices?.[0]?.price;
@@ -283,6 +315,23 @@ export default function SignalsScreen() {
       }
       return isShort ? refPrice * (1 - factor) : refPrice * (1 + factor);
     };
+
+    let note: string;
+    if (isPositionAlert) {
+      if (detectedLeverage >= 200) {
+        note = `Extreme leverage (${detectedLeverage}x) — use incremental leverage adjustments to protect position. Trail stop at breakeven once in profit.`;
+      } else if (detectedLeverage >= 100) {
+        note = `High leverage (${detectedLeverage}x) — tighten stops progressively. Consider partial close at TP1 to reduce risk.`;
+      } else {
+        note = 'Position management signal — evaluate current exposure and adjust accordingly.';
+      }
+    } else if (liquidityTight) {
+      note = 'Lower leverage due to thinner liquidity / higher slippage risk.';
+    } else if (highVolatility) {
+      note = 'Volatility elevated — scale in, use tighter stops, and consider splitting across leverage tiers.';
+    } else {
+      note = 'Standard risk profile. Adjust leverage based on conviction — increase on strong structure, reduce on uncertainty.';
+    }
 
     return {
       side: isShort ? 'SHORT bias' : 'LONG bias',
@@ -296,11 +345,7 @@ export default function SignalsScreen() {
       tp2Price: toAbsPrice(tp2, 'tp'),
       leverage,
       validationWindow,
-      note: liquidityTight
-        ? 'Lower leverage due to thinner liquidity / higher slippage risk.'
-        : (highVolatility
-          ? 'Reduce size and tighten execution because volatility is elevated.'
-          : 'Standard risk profile; re-check structure before adding size.'),
+      note,
     };
   }, [marketData, modalRefPrice]);
 

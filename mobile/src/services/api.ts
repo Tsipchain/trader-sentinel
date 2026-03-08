@@ -580,6 +580,46 @@ export const brainAPI = {
     return response;
   },
 
+  async learnFromPositions(params: {
+    user_id: string;
+    positions: Array<{
+      symbol: string;
+      side: string;
+      leverage: number;
+      pnlPct: number;
+      entryPrice: number;
+      markPrice: number;
+    }>;
+    total_unrealized_pnl: number;
+  }): Promise<{
+    ok: boolean;
+    learned: boolean;
+    feedback_count: number;
+    style_traits: string[];
+    avg_leverage: number;
+    max_leverage: number;
+  }> {
+    const response = await brainPost('/api/brain/learn', params);
+    return response;
+  },
+
+  async getTraderProfile(userId: string): Promise<{
+    ok: boolean;
+    profile: {
+      dominant_traits: Array<{ trait: string; frequency: number }>;
+      avg_leverage: number;
+      max_leverage_seen: number;
+      learning_snapshots: number;
+      model_trained: boolean;
+      model_accuracy: number | null;
+      trades_trained_on: number;
+    } | null;
+    message?: string;
+  }> {
+    const response = await brainGet(`/api/brain/trader-profile/${userId}`);
+    return response;
+  },
+
   async getOpenPositions(params: {
     user_id: string;
     exchange: string;
