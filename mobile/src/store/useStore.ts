@@ -332,9 +332,19 @@ export const useStore = create<AppStore>()(
       }),
       merge: (persisted, current) => {
         const persistedState = (persisted as Partial<AppStore>) ?? {};
+
+        // Protect subscription: never downgrade a persisted paid tier to 'free'
+        // This prevents reset/rehydration bugs from losing paid subscriptions
+        const persistedTier = persistedState.subscription || 'free';
+        const userTier = persistedState.user?.subscription || 'free';
+        const safeTier = persistedTier !== 'free' ? persistedTier
+          : userTier !== 'free' ? userTier
+          : 'free';
+
         return {
           ...current,
           ...persistedState,
+          subscription: safeTier,
           autoTrader: {
             ...current.autoTrader,
             ...(persistedState.autoTrader ?? {}),

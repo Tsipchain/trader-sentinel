@@ -67,10 +67,10 @@ export function useSignalPolling() {
   const positionCheckRef = useRef(0);
   const techScanRef = useRef(0); // throttle technical scans
 
-  const hasRecentDuplicate = useCallback((idPrefix: string) => {
+  const hasRecentDuplicate = useCallback((idPrefix: string, cooldownMs: number = 10 * 60 * 1000) => {
     const now = Date.now();
     const currentSignals = useStore.getState().signals;
-    return currentSignals.some((s) => s.id.startsWith(idPrefix) && now - s.timestamp < 10 * 60 * 1000);
+    return currentSignals.some((s) => s.id.startsWith(idPrefix) && now - s.timestamp < cooldownMs);
   }, []);
 
   const hasAnySignalPrefix = useCallback((idPrefix: string) => {
@@ -382,15 +382,18 @@ export function useSignalPolling() {
     checkPositionAlerts();
 
     // ── Market Session Signals (opening ranges, session overlaps) ──
+    const SESSION_OPENING_COOLDOWN = 60 * 60 * 1000;   // 1h for opening range signals
+    const SESSION_OVERLAP_COOLDOWN = 4 * 60 * 60 * 1000; // 4h for overlap signals
+    const SESSION_EVENT_COOLDOWN = 2 * 60 * 60 * 1000;  // 2h for event warnings
     try {
-      if (canUseAdvancedSignals && !hasRecentDuplicate('session-')) {
+      if (canUseAdvancedSignals && !hasRecentDuplicate('session-', SESSION_OPENING_COOLDOWN)) {
         const sessions = await marketAPI.getMarketSessions();
         if (sessions.ok) {
           // Opening range signals — first 15 min of major markets
           for (const or of sessions.opening_range || []) {
             const name = or.name?.split('(')[0]?.trim() || 'Market';
             const prefix = `session-opening-${name.replace(/\s+/g, '')}`;
-            if (!hasRecentDuplicate(prefix)) {
+            if (!hasRecentDuplicate(prefix, SESSION_OPENING_COOLDOWN)) {
               addSignalWithFeedback({
                 id: `${prefix}-${Date.now()}`,
                 type: 'alert',
@@ -403,7 +406,7 @@ export function useSignalPolling() {
           }
 
           // Session overlap signals
-          if (sessions.volume_expectation === 'peak' && !hasRecentDuplicate('session-overlap')) {
+          if (sessions.volume_expectation === 'peak' && !hasRecentDuplicate('session-overlap', SESSION_OVERLAP_COOLDOWN)) {
             addSignalWithFeedback({
               id: `session-overlap-${Date.now()}`,
               type: 'opportunity',
@@ -417,7 +420,7 @@ export function useSignalPolling() {
           // Upcoming high-impact events
           for (const event of (sessions.upcoming_events || []).filter((e: any) => e.impact === 'high' && e.in_minutes <= 30)) {
             const prefix = `session-event-${event.name.replace(/\s+/g, '')}`;
-            if (!hasRecentDuplicate(prefix)) {
+            if (!hasRecentDuplicate(prefix, SESSION_EVENT_COOLDOWN)) {
               addSignalWithFeedback({
                 id: `${prefix}-${Date.now()}`,
                 type: 'alert',
@@ -433,7 +436,7 @@ export function useSignalPolling() {
           for (const cs of sessions.closing_sessions || []) {
             const name = cs.name?.split('(')[0]?.trim() || 'Market';
             const prefix = `session-close-${name.replace(/\s+/g, '')}`;
-            if (!hasRecentDuplicate(prefix)) {
+            if (!hasRecentDuplicate(prefix, SESSION_EVENT_COOLDOWN)) {
               addSignalWithFeedback({
                 id: `${prefix}-${Date.now()}`,
                 type: 'alert',
@@ -457,14 +460,19 @@ export function useSignalPolling() {
       // non-blocking
     }
 
-    // ── Arbitrage signals (all pairs, all tiers) ──
+    // ── Arbitrage signals (throttled: 4h regular, 12h low-value) ──
+    // Only significant opportunities show as signals — no spam
+    const ARB_COOLDOWN_4H = 4 * 60 * 60 * 1000;   // 4 hours for real arb opportunities
+    const ARB_COOLDOWN_12H = 12 * 60 * 60 * 1000;  // 12 hours for low-value spread info
+    const ARB_SIGNIFICANT_SPREAD = 0.15;            // 0.15% = significant opportunity
+
     try {
       // Merge watchlist + extra scan pairs for broader arb detection
       const arbPairs = [...new Set([...watchlist, ...SENTINEL_SCAN_PAIRS])];
       const results = await Promise.allSettled(
         arbPairs.map(async (symbol) => {
           const arb = await marketAPI.getArbitrage(symbol);
-          const signal = marketAPI.detectArbitrageSignal(arb, 0.05); // Lower threshold to catch more
+          const signal = marketAPI.detectArbitrageSignal(arb, 0.05);
           return { symbol, arb, signal };
         }),
       );
@@ -473,19 +481,22 @@ export function useSignalPolling() {
         if (result.status !== 'fulfilled') return;
         const { signal, symbol, arb } = result.value;
 
-        if (signal && !hasRecentDuplicate(`arb-${symbol}`)) {
-          addSignalWithFeedback({ ...signal, id: `arb-${symbol}-${Date.now()}` });
+        if (signal) {
+          // Real arb detected — show every 4h max per symbol
+          const profit = signal.profit || 0;
+          if (profit >= ARB_SIGNIFICANT_SPREAD && !hasRecentDuplicate(`arb-${symbol}`, ARB_COOLDOWN_4H)) {
+            addSignalWithFeedback({ ...signal, id: `arb-${symbol}-${Date.now()}` });
+          }
         }
 
-        // Show spread info even without arb signal for monitored pairs
+        // Low-value spread info — only show every 12h and only if spread > 0.1%
         if (!signal && arb.best_bid && arb.best_ask && arb.spread !== null) {
           const spreadPct = Math.abs(arb.spread / arb.best_ask) * 100;
-          if (spreadPct > 0.02 && !hasRecentDuplicate(`spread-${symbol}`)) {
-            // Micro-arb alert: spread exists but below trigger — informational
+          if (spreadPct >= 0.1 && !hasRecentDuplicate(`spread-${symbol}`, ARB_COOLDOWN_12H)) {
             const sym = symbol.replace('/USDT', '');
             addSignalWithFeedback({
               id: `spread-${sym}-${Date.now()}`, type: 'arbitrage', symbol: sym,
-              message: `${sym} spread ${spreadPct.toFixed(3)}% between ${arb.best_ask_venue} ($${arb.best_ask.toFixed(4)}) and ${arb.best_bid_venue} ($${arb.best_bid.toFixed(4)}). Monitor for widening.`,
+              message: `${sym} spread ${spreadPct.toFixed(3)}% between ${arb.best_ask_venue} ($${arb.best_ask.toFixed(4)}) and ${arb.best_bid_venue} ($${arb.best_bid.toFixed(4)}).`,
               profit: spreadPct,
               timestamp: Date.now(),
               venues: [arb.best_ask_venue, arb.best_bid_venue],
@@ -493,8 +504,8 @@ export function useSignalPolling() {
           }
         }
 
-        // Pro+ new-coin signals
-        if (tierPolicy.allowNewCoinSignals && !hasRecentDuplicate(`newcoin-${symbol}`)) {
+        // Pro+ new-coin signals — also throttle to 12h
+        if (tierPolicy.allowNewCoinSignals && !hasRecentDuplicate(`newcoin-${symbol}`, ARB_COOLDOWN_12H)) {
           const listedVenue = arb.best_bid_venue || arb.best_ask_venue;
           const noVenue = !arb.best_bid_venue || !arb.best_ask_venue;
           if (listedVenue && noVenue) {

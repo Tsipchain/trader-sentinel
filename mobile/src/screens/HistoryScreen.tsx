@@ -52,6 +52,16 @@ function leverageRisk(lev: number): { level: string; color: string; icon: string
   return { level: 'LOW', color: COLORS.success, icon: 'shield' };
 }
 
+/** Smart price formatting — handles micro-cap coins like PEPE ($0.000012) */
+function formatPrice(price: number): string {
+  if (price <= 0) return '$0';
+  if (price >= 100) return `$${price.toFixed(2)}`;
+  if (price >= 1) return `$${price.toFixed(4)}`;
+  if (price >= 0.01) return `$${price.toFixed(5)}`;
+  // Very small prices (PEPE, SHIB, etc.) — show significant digits
+  return `$${price.toPrecision(4)}`;
+}
+
 /** Calculate distance to liquidation as percentage */
 function liqDistancePct(pos: OpenPosition): number {
   if (!pos.liquidationPrice || pos.liquidationPrice <= 0 || !pos.markPrice) return 100;
@@ -688,10 +698,10 @@ function PositionRow({ position }: { position: OpenPosition }) {
           </View>
         </View>
         <Text style={rowStyles.date}>
-          {position.leverage}x {position.marginMode} · Entry ${position.entryPrice.toFixed(2)}
+          {position.leverage}x {position.marginMode} · Entry {formatPrice(position.entryPrice)}
         </Text>
         <Text style={[rowStyles.date, { color: COLORS.textMuted }]}>
-          Mark ${position.markPrice.toFixed(2)} · Liq {position.liquidationPrice > 0 ? `$${position.liquidationPrice.toFixed(2)} (${liqDist.toFixed(1)}%)` : '–'}
+          Mark {formatPrice(position.markPrice)} · Liq {position.liquidationPrice > 0 ? `${formatPrice(position.liquidationPrice)} (${liqDist.toFixed(1)}%)` : '–'}
         </Text>
       </View>
       <View style={{ alignItems: 'flex-end' }}>

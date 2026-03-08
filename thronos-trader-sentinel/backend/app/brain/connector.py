@@ -331,8 +331,25 @@ async def fetch_open_positions(
         for pos in active_raw:
             symbol = str(pos.get("symbol") or "")
             contracts = float(pos.get("contracts") or pos.get("positionAmt") or 0)
+
+            # CCXT normalizes to entryPrice, but some exchanges (MEXC, OKX)
+            # store it differently in the info dict. Try multiple paths.
             entry_price = float(pos.get("entryPrice") or 0)
+            if entry_price <= 0:
+                info = pos.get("info") or {}
+                entry_price = float(
+                    info.get("entryPrice") or info.get("openAvgPrice")
+                    or info.get("avgCost") or info.get("entry_price")
+                    or info.get("openPrice") or 0
+                )
+
             mark_price = float(pos.get("markPrice") or 0)
+            if mark_price <= 0:
+                info = pos.get("info") or {}
+                mark_price = float(
+                    info.get("markPrice") or info.get("fairPrice")
+                    or info.get("mark_price") or 0
+                )
 
             # Use live ticker price if mark price is missing
             if mark_price <= 0:
@@ -340,6 +357,9 @@ async def fetch_open_positions(
 
             unrealized_pnl = float(pos.get("unrealizedPnl") or 0)
             leverage = float(pos.get("leverage") or 0)
+            if leverage <= 0:
+                info = pos.get("info") or {}
+                leverage = float(info.get("leverage") or info.get("lever") or 1)
 
             # Determine side — MEXC uses 'long'/'short', some exchanges use positive/negative contracts
             side = pos.get("side")
@@ -376,8 +396,14 @@ async def fetch_open_positions(
                 "unrealizedPnl": round(unrealized_pnl, 6),
                 "pnlPct": round(pnl_pct, 2),
                 "leverage": leverage,
-                "marginMode": pos.get("marginMode") or pos.get("marginType") or "",
-                "liquidationPrice": float(pos.get("liquidationPrice") or 0),
+                "marginMode": pos.get("marginMode") or pos.get("marginType")
+                    or (pos.get("info") or {}).get("marginMode") or "",
+                "liquidationPrice": float(
+                    pos.get("liquidationPrice")
+                    or (pos.get("info") or {}).get("liquidationPrice")
+                    or (pos.get("info") or {}).get("liqPrice")
+                    or 0
+                ),
                 "notional": round(notional, 4),
                 "timestamp": pos.get("timestamp") or int(time.time() * 1000),
             })
