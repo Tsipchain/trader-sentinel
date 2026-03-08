@@ -98,7 +98,7 @@ const DEFAULT_AUTOTRADER_CONFIG: AutoTraderConfig = {
   maxPositionPct: 10,
   maxOpenTrades: 3,
   marginMode: 'isolated',
-  maxLeverage: 3,
+  maxLeverage: 125,
   riskPerTradePct: 1,
   maxTotalExposurePct: 25,
 };
