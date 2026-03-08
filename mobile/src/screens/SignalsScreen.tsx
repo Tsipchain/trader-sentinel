@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import {
   View,
   Text,
@@ -33,6 +33,14 @@ const SIGNAL_POLICY: Record<string, TierSignalPolicy> = {
   elite: { directionalLimit: 10, allowNewCoinSignals: true, refreshMs: 9000 },
   whale: { directionalLimit: 99, allowNewCoinSignals: true, refreshMs: 7000 },
 };
+
+const SIGNAL_ITEM_HEIGHT = 120;
+const signalKeyExtractor = (item: Signal) => item.id;
+const getSignalItemLayout = (_data: any, index: number) => ({
+  length: SIGNAL_ITEM_HEIGHT,
+  offset: SIGNAL_ITEM_HEIGHT * index,
+  index,
+});
 
 export default function SignalsScreen() {
   const { signals, addSignal, clearSignals, watchlist, settings, subscription, marketData, user } = useStore();
@@ -387,10 +395,10 @@ export default function SignalsScreen() {
     setRefreshing(false);
   }, [fetchSignals]);
 
-  const filteredSignals = signals.filter((s) => {
+  const filteredSignals = useMemo(() => signals.filter((s) => {
     if (filter === 'all') return true;
     return s.type === filter;
-  });
+  }), [signals, filter]);
 
   const getSignalIcon = (type: Signal['type']) => {
     switch (type) {
@@ -416,7 +424,7 @@ export default function SignalsScreen() {
     return new Date(timestamp).toLocaleDateString();
   };
 
-  const renderSignal = ({ item }: { item: Signal }) => {
+  const renderSignal = useCallback(({ item }: { item: Signal }) => {
     const icon = getSignalIcon(item.type);
 
     return (
@@ -448,7 +456,7 @@ export default function SignalsScreen() {
         </View>
       </TouchableOpacity>
     );
-  };
+  }, []);
 
   const FilterButton = ({ type, label }: { type: SignalType; label: string }) => (
     <TouchableOpacity
@@ -513,8 +521,14 @@ export default function SignalsScreen() {
       <FlatList
         data={filteredSignals}
         renderItem={renderSignal}
-        keyExtractor={(item) => item.id}
+        keyExtractor={signalKeyExtractor}
         contentContainerStyle={styles.listContent}
+        removeClippedSubviews
+        maxToRenderPerBatch={10}
+        windowSize={7}
+        initialNumToRender={8}
+        updateCellsBatchingPeriod={50}
+        getItemLayout={getSignalItemLayout}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}

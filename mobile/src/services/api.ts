@@ -639,6 +639,46 @@ export const brainAPI = {
     return response;
   },
 
+  async startSleepMode(userId: string): Promise<{ ok: boolean; message?: string; error?: string; duration_hours?: number }> {
+    const response = await brainPost('/api/brain/autotrader/sleep-start', { user_id: userId });
+    return response;
+  },
+
+  async stopSleepMode(userId: string): Promise<{ ok: boolean; message?: string }> {
+    const response = await brainPost('/api/brain/autotrader/sleep-stop', { user_id: userId });
+    return response;
+  },
+
+  async getSleepStatus(userId: string): Promise<{
+    ok: boolean;
+    active: boolean;
+    started_at?: number;
+    ends_at?: number;
+    elapsed_s?: number;
+    remaining_s?: number;
+    trade_count?: number;
+    realized_pnl?: number;
+    status?: string;
+    trades?: Array<{
+      symbol: string;
+      side: string;
+      amount: number;
+      entry_price: number;
+      leverage: number;
+      sl_price: number;
+      tp_price: number;
+      confidence: number;
+      opened_at: number;
+      status: string;
+      pnl_pct?: number;
+      closed_at?: number;
+    }>;
+    log?: string[];
+  }> {
+    const response = await brainGet(`/api/brain/autotrader/sleep-status/${userId}`);
+    return response;
+  },
+
   async getOpenPositions(params: {
     user_id: string;
     exchange: string;
