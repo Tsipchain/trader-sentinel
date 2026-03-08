@@ -139,15 +139,26 @@ export default function ConnectWalletScreen() {
       provider,
     });
 
+    // Preserve subscription tier across reconnections — never downgrade a paid user.
+    // The store's persisted `subscription` field is the source of truth.
+    const currentTier = useStore.getState().subscription;
+    const userTier = user?.subscription || 'free';
+    const bestTier = currentTier !== 'free' ? currentTier : userTier;
+
     setUser({
       id: user?.id || address,
       walletAddress: address,
-      subscription: user?.subscription || 'free',
+      subscription: bestTier,
       thronosBalance: user?.thronosBalance || 0,
       rewardsBalance: user?.rewardsBalance || 0,
       referralCode: user?.referralCode || address.slice(address.startsWith('THR') ? 3 : 2, address.startsWith('THR') ? 11 : 10).toUpperCase(),
       createdAt: user?.createdAt || new Date().toISOString(),
     });
+
+    // Also ensure store-level subscription matches
+    if (bestTier !== 'free') {
+      useStore.getState().setSubscription(bestTier as any);
+    }
 
     navigation.reset({
       index: 0,
