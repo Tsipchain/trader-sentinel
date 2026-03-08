@@ -285,7 +285,7 @@ export default function AutoTraderScreen() {
     if (!user?.id || !isEnabled) return;
     Alert.alert(
       'Activate Sleep Mode?',
-      `Sentinel will autonomously trade ${cfg.symbols.join(', ')} on ${cfg.exchange.toUpperCase()} for up to 8 hours while you rest.\n\nTarget: 25-30% portfolio profit.\nMax leverage: ${cfg.maxLeverage}x\nPortfolio: $${portfolio.equity.toFixed(2)}`,
+      `Sentinel will autonomously trade ${cfg.symbols.join(', ')} on ${(cfg.exchange || '').toUpperCase()} for up to 8 hours while you rest.\n\nTarget: 25-30% portfolio profit.\nMax leverage: ${cfg.maxLeverage}x\nPortfolio: $${(portfolio.equity ?? 0).toFixed(2)}`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -335,7 +335,7 @@ export default function AutoTraderScreen() {
   const handleCloseTrade = (trade: ActiveTrade) => {
     Alert.alert(
       'Close Position?',
-      `Market-close ${trade.side} ${trade.symbol} (${trade.pnl >= 0 ? '+' : ''}${trade.pnl.toFixed(2)}%)`,
+      `Market-close ${trade.side} ${trade.symbol} (${(trade.pnl ?? 0) >= 0 ? '+' : ''}${(trade.pnl ?? 0).toFixed(2)}%)`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -524,15 +524,15 @@ export default function AutoTraderScreen() {
                     <View style={styles.tradeBody}>
                       <Text style={styles.tradeSymbol}>{trade.symbol}</Text>
                       <Text style={styles.tradeDetail}>
-                        Entry ${trade.entry_price.toFixed(2)} | {trade.leverage}x
+                        Entry ${(trade.entry_price ?? 0).toFixed(2)} | {trade.leverage ?? 1}x
                       </Text>
                     </View>
                     <View style={{ alignItems: 'flex-end' }}>
                       <Text style={[styles.tradePnl, { color: '#8B5CF6' }]}>
-                        {(trade.confidence * 100).toFixed(0)}% conf
+                        {((trade.confidence ?? 0) * 100).toFixed(0)}% conf
                       </Text>
                       <Text style={styles.tradeDetail}>
-                        SL ${trade.sl_price.toFixed(2)}
+                        SL ${(trade.sl_price ?? 0).toFixed(2)}
                       </Text>
                     </View>
                   </View>
@@ -560,7 +560,7 @@ export default function AutoTraderScreen() {
                     <View style={styles.tradeBody}>
                       <Text style={styles.tradeSymbol}>{trade.symbol}</Text>
                       <Text style={styles.tradeDetail}>
-                        ${trade.entry_price.toFixed(2)} | {trade.leverage}x
+                        ${(trade.entry_price ?? 0).toFixed(2)} | {trade.leverage ?? 1}x
                       </Text>
                     </View>
                     <Text style={[styles.tradePnl, { color: pnlColor }]}>
@@ -659,7 +659,7 @@ export default function AutoTraderScreen() {
 
           {portfolio.lastSyncTs && (
             <Text style={styles.syncMeta}>
-              Synced {new Date(portfolio.lastSyncTs).toLocaleTimeString()} · Equity ${portfolio.equity.toFixed(2)} · Used Margin ${portfolio.usedMargin.toFixed(2)}
+              Synced {new Date(portfolio.lastSyncTs).toLocaleTimeString()} · Equity ${(portfolio.equity ?? 0).toFixed(2)} · Used Margin ${(portfolio.usedMargin ?? 0).toFixed(2)}
             </Text>
           )}
 
@@ -732,7 +732,10 @@ export default function AutoTraderScreen() {
           <>
             <Text style={styles.sectionTitle}>Active Trades</Text>
             {autoTrader.activeTrades.map((trade) => {
-              const pnlColor = trade.pnl >= 0 ? COLORS.success : COLORS.error;
+              const pnl = trade.pnl ?? 0;
+              const entryPrice = trade.entryPrice ?? 0;
+              const currentPrice = trade.currentPrice ?? 0;
+              const pnlColor = pnl >= 0 ? COLORS.success : COLORS.error;
               return (
                 <View key={trade.id} style={styles.tradeCard}>
                   <View style={styles.tradeRow}>
@@ -743,13 +746,13 @@ export default function AutoTraderScreen() {
                     </View>
                     <View style={styles.tradeBody}>
                       <Text style={styles.tradeSymbol}>{trade.symbol}</Text>
-                      <Text style={styles.tradeDetail}>Entry ${trade.entryPrice.toFixed(2)}</Text>
+                      <Text style={styles.tradeDetail}>Entry ${entryPrice.toFixed(2)}</Text>
                     </View>
                     <View style={{ alignItems: 'flex-end' }}>
                       <Text style={[styles.tradePnl, { color: pnlColor }]}>
-                        {trade.pnl >= 0 ? '+' : ''}{trade.pnl.toFixed(2)}%
+                        {pnl >= 0 ? '+' : ''}{pnl.toFixed(2)}%
                       </Text>
-                      <Text style={styles.tradeDetail}>${trade.currentPrice.toFixed(2)}</Text>
+                      <Text style={styles.tradeDetail}>${currentPrice.toFixed(2)}</Text>
                     </View>
                   </View>
                   <TouchableOpacity
