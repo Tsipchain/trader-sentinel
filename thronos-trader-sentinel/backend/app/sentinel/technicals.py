@@ -61,6 +61,18 @@ _CACHE: dict[str, tuple[float, "TechnicalResult"]] = {}
 _CACHE_TTL = 120  # 2 minutes
 
 
+def _smart_round(price: float, min_sig: int = 4) -> float:
+    """Round a price preserving at least min_sig significant digits.
+    Handles micro-cap coins like PEPE ($0.00001234) without zeroing them out.
+    """
+    if price == 0:
+        return 0.0
+    import math
+    magnitude = math.floor(math.log10(abs(price)))
+    decimals = max(0, min_sig - 1 - magnitude)
+    return round(price, decimals)
+
+
 @dataclass
 class FibLevel:
     ratio: float
@@ -309,7 +321,7 @@ def _bollinger(closes: list[float], period: int = 20,
     lower = middle - std_dev * std
     current = closes[-1]
     bb_pct = ((current - lower) / (upper - lower) * 100) if upper != lower else 50.0
-    return round(upper, 4), round(middle, 4), round(lower, 4), round(bb_pct, 2)
+    return _smart_round(upper), _smart_round(middle), _smart_round(lower), round(bb_pct, 2)
 
 
 def _williams_r(candles: list[list], period: int = 14) -> float | None:
@@ -335,7 +347,7 @@ def _fibonacci_levels(high: float, low: float, current: float) -> tuple[list[dic
         dist_pct = abs(current - price) / current * 100
         levels.append({
             "ratio": ratio,
-            "price": round(price, 4),
+            "price": _smart_round(price),
             "distance_pct": round(dist_pct, 2),
         })
     nearest = min(levels, key=lambda x: x["distance_pct"])
@@ -450,8 +462,8 @@ async def calculate(symbol: str = "BTC/USDT") -> TechnicalResult:
     # ── EMA 20 / EMA 50 crossover ─────────────────────────────────────────────
     ema20_series = _ema(closes, 20)
     ema50_series = _ema(closes, 50)
-    ema_20 = round(ema20_series[-1], 4) if ema20_series else None
-    ema_50 = round(ema50_series[-1], 4) if ema50_series else None
+    ema_20 = _smart_round(ema20_series[-1]) if ema20_series else None
+    ema_50 = _smart_round(ema50_series[-1]) if ema50_series else None
     if ema_20 is not None and ema_50 is not None:
         ema_cross = "bullish" if ema_20 > ema_50 else "bearish"
     else:
@@ -487,7 +499,7 @@ async def calculate(symbol: str = "BTC/USDT") -> TechnicalResult:
     result = TechnicalResult(
         score=score,
         symbol=symbol,
-        current_price=round(current, 4),
+        current_price=_smart_round(current),
         rsi_14=rsi,
         rsi_signal=rsi_signal,
         volatility_score=volatility_score,
