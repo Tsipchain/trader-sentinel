@@ -195,6 +195,38 @@ export const marketAPI = {
     return response.data;
   },
 
+  async getMarketSessions(): Promise<{
+    ok: boolean;
+    utc_time: string;
+    active_sessions: Array<{
+      name: string;
+      region: string;
+      is_open: boolean;
+      phase: string;
+      minutes_since_open: number;
+      minutes_to_close: number;
+      minutes_to_open: number;
+      impact: string;
+      crypto_correlation: number;
+      note?: string;
+    }>;
+    upcoming_events: Array<{
+      name: string;
+      in_minutes: number;
+      impact: string;
+      description: string;
+    }>;
+    opening_range: Array<{ name: string; note: string; minutes_since_open: number }>;
+    closing_sessions: Array<{ name: string; note: string; minutes_to_close: number }>;
+    session_overlap: string;
+    trading_recommendation: string;
+    volume_expectation: string;
+    crypto_impact_score: number;
+  }> {
+    const response = await api.get('/api/sentinel/sessions');
+    return response.data;
+  },
+
   async getTechnicals(symbol: string = 'BTC/USDT'): Promise<{
     ok: boolean;
     symbol: string;

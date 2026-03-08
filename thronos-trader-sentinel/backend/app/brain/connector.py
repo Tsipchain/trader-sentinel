@@ -408,6 +408,39 @@ def _normalise(raw: list, symbol: str) -> list[dict[str, Any]]:
 # ── Trade Execution (AutoTrader / Sleep Mode) ────────────────────────────────
 
 
+async def set_margin_mode(
+    exchange: str,
+    api_key: str,
+    api_secret: str,
+    symbol: str,
+    margin_mode: str = "cross",
+    passphrase: str | None = None,
+) -> bool:
+    """Set margin mode (cross/isolated) for a futures symbol."""
+    ex = _build_exchange(exchange, api_key, api_secret, passphrase, market_type="futures")
+    try:
+        futures_symbol = _adapt_symbol(symbol, "futures")
+        if hasattr(ex, "set_margin_mode"):
+            await ex.set_margin_mode(margin_mode, futures_symbol)
+        else:
+            # Some exchanges use different method names
+            await ex.private_post_set_margin_type({
+                "symbol": futures_symbol.replace("/", "").replace(":USDT", ""),
+                "marginType": margin_mode.upper(),
+            })
+        log.info("[exec] set margin mode %s for %s on %s", margin_mode, futures_symbol, exchange)
+        return True
+    except Exception as e:
+        # Often fails if already set — not critical
+        msg = str(e).lower()
+        if "no need" in msg or "already" in msg or "same" in msg:
+            return True
+        log.warning("[exec] set_margin_mode failed for %s: %s", symbol, e)
+        return False
+    finally:
+        await ex.close()
+
+
 async def set_leverage(
     exchange: str,
     api_key: str,

@@ -15,6 +15,7 @@ from typing import Any
 from app.brain import connector, store as brain_store
 from app.brain.predictor import PredictionEngine
 from app.sentinel import technicals as tech_module
+from app.sentinel import sessions as sessions_module
 
 log = logging.getLogger(__name__)
 
@@ -274,6 +275,7 @@ async def run_sleep_session(
 
     symbols = config.get("symbols", ["BTC/USDT"])
     max_leverage = int(config.get("max_leverage", 20))
+    margin_mode = config.get("margin_mode", "cross")  # cross or isolated
     sl_pct = float(config.get("stop_loss_pct", 2.0))
     tp_pct = float(config.get("take_profit_pct", 4.0))
     risk_pct = float(config.get("risk_per_trade_pct", 1.0))
@@ -298,7 +300,17 @@ async def run_sleep_session(
     }
     session["sleep_trades"] = []
     brain_store.save_autotrader(user_id, session)
-    _log_sleep(user_id, f"Sleep Mode started — scanning {len(symbols)} symbols, max {max_leverage}x leverage")
+    _log_sleep(user_id, f"Sleep Mode started — {len(symbols)} symbols, {max_leverage}x max leverage, {margin_mode} margin, futures")
+
+    # Set margin mode for all symbols at start
+    for sym in symbols:
+        try:
+            await connector.set_margin_mode(
+                creds["exchange"], creds["api_key"], creds["api_secret"],
+                sym, margin_mode, creds.get("passphrase"),
+            )
+        except Exception:
+            pass  # often already set
 
     try:
         while time.time() < end_time and trade_count < MAX_TRADES_PER_SESSION:
@@ -322,7 +334,21 @@ async def run_sleep_session(
             # Count current open sleep trades
             open_trades = [t for t in session.get("sleep_trades", []) if t.get("status") == "open"]
 
-            # 2. Scan for new entries if we have capacity
+            # 2. Check market session timing
+            session_bias = sessions_module.get_session_bias()
+            if session_bias.get("wait_minutes", 0) > 0:
+                wait_note = session_bias.get("bias_note", "")
+                _log_sleep(user_id, f"Session timing: waiting {session_bias['wait_minutes']}min — {wait_note[:80]}")
+                await asyncio.sleep(min(session_bias["wait_minutes"] * 60, SCAN_INTERVAL_S))
+                continue
+
+            # Boost confidence during high-volume sessions
+            volume_bonus = {"peak": 0.1, "high": 0.05, "medium": 0.0, "low": -0.1}.get(
+                session_bias.get("volume", "medium"), 0.0
+            )
+            is_opening_range = session_bias.get("opening_range", False)
+
+            # 3. Scan for new entries if we have capacity
             if len(open_trades) < max_open:
                 # Get portfolio equity
                 try:
@@ -377,12 +403,22 @@ async def run_sleep_session(
                             pass
 
                         side, confidence = _evaluate_entry(ta, brain_pred)
+                        # Apply session volume bonus to confidence
+                        confidence += volume_bonus
+                        # Opening range = higher confidence (trend confirmation)
+                        if is_opening_range:
+                            confidence += 0.08
+
                         if not side or confidence < MIN_CONFIDENCE:
                             continue
 
                         # Determine leverage (scale with confidence)
+                        # Higher leverage during peak volume (tighter spreads, better fills)
+                        vol_lev_mult = {"peak": 0.8, "high": 0.7, "medium": 0.6, "low": 0.4}.get(
+                            session_bias.get("volume", "medium"), 0.6
+                        )
                         use_leverage = min(
-                            max(int(max_leverage * confidence * 0.6), 5),
+                            max(int(max_leverage * confidence * vol_lev_mult), 5),
                             max_leverage,
                         )
 
@@ -445,11 +481,12 @@ async def run_sleep_session(
                                 trade_count += 1
 
                                 direction = "LONG" if side == "buy" else "SHORT"
+                                vol_label = session_bias.get("volume", "?")
                                 _log_sleep(
                                     user_id,
                                     f"Opened {direction} {symbol} @ ${fill_price:.2f} | "
-                                    f"{use_leverage}x | SL ${sl_price:.2f} TP ${tp_price:.2f} | "
-                                    f"Confidence {confidence:.0%}"
+                                    f"{use_leverage}x {margin_mode} | SL ${sl_price:.2f} TP ${tp_price:.2f} | "
+                                    f"Conf {confidence:.0%} | Vol: {vol_label}"
                                 )
                             else:
                                 _log_sleep(user_id, f"Order failed for {symbol}: {order.get('error', 'unknown')}")
