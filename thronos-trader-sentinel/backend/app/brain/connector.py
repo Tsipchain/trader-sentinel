@@ -288,47 +288,99 @@ async def fetch_open_positions(
     api_secret: str,
     passphrase: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Fetch currently open futures positions with live PnL."""
+    """Fetch currently open futures positions with live PnL.
+
+    If the exchange doesn't return mark prices in positions, we fetch
+    tickers to get the current price.
+    """
     ex = _build_exchange(exchange, api_key, api_secret, passphrase, market_type="futures")
     try:
         positions: list[dict[str, Any]] = []
-        if ex.has.get("fetchPositions"):
-            raw_positions = await ex.fetch_positions()
-            for pos in raw_positions:
-                symbol = str(pos.get("symbol") or "")
-                contracts = float(pos.get("contracts") or pos.get("positionAmt") or 0)
-                if not symbol or contracts == 0:
-                    continue
-                entry_price = float(pos.get("entryPrice") or 0)
-                mark_price = float(pos.get("markPrice") or 0)
-                unrealized_pnl = float(pos.get("unrealizedPnl") or 0)
-                leverage = float(pos.get("leverage") or 0)
-                notional = float(pos.get("notional") or abs(contracts * mark_price))
-                side = pos.get("side") or ("long" if contracts > 0 else "short")
+        if not ex.has.get("fetchPositions"):
+            return positions
 
-                # Calculate PnL percentage
-                if entry_price > 0 and abs(contracts) > 0:
-                    if side == "long":
-                        pnl_pct = ((mark_price - entry_price) / entry_price) * 100
-                    else:
-                        pnl_pct = ((entry_price - mark_price) / entry_price) * 100
+        raw_positions = await ex.fetch_positions()
+
+        # Filter to only active positions first
+        active_raw = []
+        for pos in raw_positions:
+            symbol = str(pos.get("symbol") or "")
+            contracts = float(pos.get("contracts") or pos.get("positionAmt") or 0)
+            if symbol and contracts != 0:
+                active_raw.append(pos)
+
+        if not active_raw:
+            return positions
+
+        # Fetch live prices for positions missing mark price
+        symbols_needing_price = set()
+        for pos in active_raw:
+            mark = float(pos.get("markPrice") or 0)
+            if mark <= 0:
+                symbols_needing_price.add(str(pos.get("symbol", "")))
+
+        live_prices: dict[str, float] = {}
+        if symbols_needing_price:
+            for sym in symbols_needing_price:
+                try:
+                    ticker = await ex.fetch_ticker(sym)
+                    live_prices[sym] = float(ticker.get("last") or ticker.get("close") or 0)
+                except Exception:
+                    live_prices[sym] = 0.0
+
+        for pos in active_raw:
+            symbol = str(pos.get("symbol") or "")
+            contracts = float(pos.get("contracts") or pos.get("positionAmt") or 0)
+            entry_price = float(pos.get("entryPrice") or 0)
+            mark_price = float(pos.get("markPrice") or 0)
+
+            # Use live ticker price if mark price is missing
+            if mark_price <= 0:
+                mark_price = live_prices.get(symbol, 0.0)
+
+            unrealized_pnl = float(pos.get("unrealizedPnl") or 0)
+            leverage = float(pos.get("leverage") or 0)
+
+            # Determine side — MEXC uses 'long'/'short', some exchanges use positive/negative contracts
+            side = pos.get("side")
+            if not side or side not in ("long", "short"):
+                side = "long" if contracts > 0 else "short"
+
+            abs_contracts = abs(contracts)
+            notional = float(pos.get("notional") or 0)
+            if notional <= 0:
+                notional = abs_contracts * mark_price
+
+            # Calculate PnL if exchange didn't provide it
+            if unrealized_pnl == 0 and entry_price > 0 and mark_price > 0:
+                if side == "long":
+                    unrealized_pnl = (mark_price - entry_price) * abs_contracts
                 else:
-                    pnl_pct = 0.0
+                    unrealized_pnl = (entry_price - mark_price) * abs_contracts
 
-                positions.append({
-                    "symbol": symbol,
-                    "side": side,
-                    "contracts": abs(contracts),
-                    "entryPrice": entry_price,
-                    "markPrice": mark_price,
-                    "unrealizedPnl": unrealized_pnl,
-                    "pnlPct": round(pnl_pct, 4),
-                    "leverage": leverage,
-                    "marginMode": pos.get("marginMode") or pos.get("marginType") or "",
-                    "liquidationPrice": float(pos.get("liquidationPrice") or 0),
-                    "notional": notional,
-                    "timestamp": pos.get("timestamp") or int(time.time() * 1000),
-                })
+            # Calculate PnL percentage
+            if entry_price > 0 and mark_price > 0:
+                if side == "long":
+                    pnl_pct = ((mark_price - entry_price) / entry_price) * 100 * leverage if leverage > 0 else ((mark_price - entry_price) / entry_price) * 100
+                else:
+                    pnl_pct = ((entry_price - mark_price) / entry_price) * 100 * leverage if leverage > 0 else ((entry_price - mark_price) / entry_price) * 100
+            else:
+                pnl_pct = 0.0
+
+            positions.append({
+                "symbol": symbol,
+                "side": side,
+                "contracts": abs_contracts,
+                "entryPrice": entry_price,
+                "markPrice": mark_price,
+                "unrealizedPnl": round(unrealized_pnl, 6),
+                "pnlPct": round(pnl_pct, 2),
+                "leverage": leverage,
+                "marginMode": pos.get("marginMode") or pos.get("marginType") or "",
+                "liquidationPrice": float(pos.get("liquidationPrice") or 0),
+                "notional": round(notional, 4),
+                "timestamp": pos.get("timestamp") or int(time.time() * 1000),
+            })
 
         return positions
     finally:

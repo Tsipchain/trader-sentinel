@@ -356,54 +356,147 @@ async def sentinel_technicals(request: Request, symbol: str = Query("BTC/USDT"),
 
 
 def _build_trade_records(trades: list[dict], exchange: str) -> tuple[list[dict], dict]:
-    """Match buy→sell pairs chronologically and return (records, stats)."""
-    buys = [t for t in trades if t.get("side") == "buy"]
-    sells = [t for t in trades if t.get("side") == "sell"]
+    """Build trade records from raw trade fills.
+
+    For futures, trades come as individual fills (open/close). We group by
+    symbol and match buys to sells using a running position approach:
+    each buy adds to a long, each sell closes it (and vice versa for shorts).
+    """
+    # Group trades by symbol
+    by_symbol: dict[str, list[dict]] = {}
+    for t in trades:
+        sym = t.get("symbol", "UNKNOWN")
+        by_symbol.setdefault(sym, []).append(t)
 
     records: list[dict] = []
     pnl_list: list[float] = []
     symbol_count: dict[str, int] = {}
 
-    for buy in buys:
-        later_sells = [s for s in sells if s["ts"] > buy["ts"]]
-        if not later_sells:
-            continue
-        sell = min(later_sells, key=lambda s: s["ts"])
-        entry = buy["price"]
-        exit_ = sell["price"]
-        qty = buy["amount"]
-        pnl_pct = (exit_ - entry) / entry * 100 if entry > 0 else 0.0
-        pnl_usd = (exit_ - entry) * qty - buy.get("fee", 0.0) - sell.get("fee", 0.0)
-        sym = buy["symbol"]
+    for sym, sym_trades in by_symbol.items():
+        sym_trades.sort(key=lambda x: x["ts"])
 
-        records.append({
-            "id": f"{buy['id']}-{sell['id']}",
-            "symbol": sym,
-            "side": "BUY",
-            "entryPrice": round(entry, 8),
-            "exitPrice": round(exit_, 8),
-            "quantity": qty,
-            "pnl": round(pnl_pct, 4),
-            "pnlUsd": round(pnl_usd, 4),
-            "openedAt": int(buy["ts"] * 1000),
-            "closedAt": int(sell["ts"] * 1000),
-            "exchange": exchange,
-        })
-        pnl_list.append(pnl_pct)
-        symbol_count[sym] = symbol_count.get(sym, 0) + 1
+        # Running position tracker
+        position_qty = 0.0  # positive = long, negative = short
+        position_cost = 0.0  # total cost of open position
+        position_open_ts = 0.0
+        position_open_id = ""
+
+        for t in sym_trades:
+            side = t.get("side", "")
+            price = float(t.get("price") or 0)
+            amount = float(t.get("amount") or 0)
+            cost = float(t.get("cost") or 0)
+            fee = float(t.get("fee") or 0)
+
+            if price <= 0 or amount <= 0:
+                continue
+
+            if side == "buy":
+                if position_qty < 0:
+                    # Closing a short position (buy to close)
+                    close_qty = min(amount, abs(position_qty))
+                    if close_qty > 0 and abs(position_qty) > 0:
+                        avg_entry = position_cost / abs(position_qty) if abs(position_qty) > 0 else 0
+                        pnl_pct = ((avg_entry - price) / avg_entry * 100) if avg_entry > 0 else 0.0
+                        pnl_usd = (avg_entry - price) * close_qty - fee
+
+                        records.append({
+                            "id": f"{position_open_id}-{t.get('id', '')}",
+                            "symbol": sym,
+                            "side": "SHORT",
+                            "entryPrice": round(avg_entry, 8),
+                            "exitPrice": round(price, 8),
+                            "quantity": close_qty,
+                            "pnl": round(pnl_pct, 4),
+                            "pnlUsd": round(pnl_usd, 4),
+                            "openedAt": int(position_open_ts * 1000),
+                            "closedAt": int(t["ts"] * 1000),
+                            "exchange": exchange,
+                        })
+                        pnl_list.append(pnl_pct)
+                        symbol_count[sym] = symbol_count.get(sym, 0) + 1
+
+                    # Adjust remaining position
+                    remaining = amount - close_qty
+                    position_qty += close_qty
+                    if abs(position_qty) > 0:
+                        position_cost = abs(position_qty) * (position_cost / (abs(position_qty) + close_qty)) if (abs(position_qty) + close_qty) > 0 else 0
+                    else:
+                        position_cost = 0
+
+                    # Any leftover opens a new long
+                    if remaining > 0:
+                        position_qty = remaining
+                        position_cost = remaining * price
+                        position_open_ts = t["ts"]
+                        position_open_id = str(t.get("id", ""))
+                else:
+                    # Adding to long position
+                    if position_qty == 0:
+                        position_open_ts = t["ts"]
+                        position_open_id = str(t.get("id", ""))
+                    position_qty += amount
+                    position_cost += amount * price
+
+            elif side == "sell":
+                if position_qty > 0:
+                    # Closing a long position (sell to close)
+                    close_qty = min(amount, position_qty)
+                    if close_qty > 0:
+                        avg_entry = position_cost / position_qty if position_qty > 0 else 0
+                        pnl_pct = ((price - avg_entry) / avg_entry * 100) if avg_entry > 0 else 0.0
+                        pnl_usd = (price - avg_entry) * close_qty - fee
+
+                        records.append({
+                            "id": f"{position_open_id}-{t.get('id', '')}",
+                            "symbol": sym,
+                            "side": "BUY",
+                            "entryPrice": round(avg_entry, 8),
+                            "exitPrice": round(price, 8),
+                            "quantity": close_qty,
+                            "pnl": round(pnl_pct, 4),
+                            "pnlUsd": round(pnl_usd, 4),
+                            "openedAt": int(position_open_ts * 1000),
+                            "closedAt": int(t["ts"] * 1000),
+                            "exchange": exchange,
+                        })
+                        pnl_list.append(pnl_pct)
+                        symbol_count[sym] = symbol_count.get(sym, 0) + 1
+
+                    remaining = amount - close_qty
+                    position_qty -= close_qty
+                    if position_qty > 0:
+                        position_cost = position_qty * (position_cost / (position_qty + close_qty)) if (position_qty + close_qty) > 0 else 0
+                    else:
+                        position_cost = 0
+
+                    if remaining > 0:
+                        position_qty = -remaining
+                        position_cost = remaining * price
+                        position_open_ts = t["ts"]
+                        position_open_id = str(t.get("id", ""))
+                else:
+                    # Adding to short position
+                    if position_qty == 0:
+                        position_open_ts = t["ts"]
+                        position_open_id = str(t.get("id", ""))
+                    position_qty -= amount
+                    position_cost += amount * price
 
     if not records:
         return records, {}
 
     wins = sum(1 for p in pnl_list if p > 0)
     most_traded = max(symbol_count, key=lambda s: symbol_count[s])
+    total_pnl = sum(r["pnlUsd"] for r in records)
+    avg_pnl = sum(pnl_list) / len(pnl_list) if pnl_list else 0
     hist_stats = {
         "total_trades": len(records),
         "win_rate": round(wins / len(records), 3),
-        "total_pnl_usd": round(sum(r["pnlUsd"] for r in records), 4),
-        "avg_pnl_pct": round(sum(pnl_list) / len(pnl_list), 4),
-        "best_trade_pct": round(max(pnl_list), 4),
-        "worst_trade_pct": round(min(pnl_list), 4),
+        "total_pnl_usd": round(total_pnl, 4),
+        "avg_pnl_pct": round(avg_pnl, 4),
+        "best_trade_pct": round(max(pnl_list), 4) if pnl_list else 0,
+        "worst_trade_pct": round(min(pnl_list), 4) if pnl_list else 0,
         "most_traded_symbol": most_traded,
     }
     return records, hist_stats
