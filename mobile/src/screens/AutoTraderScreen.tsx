@@ -897,7 +897,7 @@ export default function AutoTraderScreen() {
         {autoTrader.activeTrades.length > 0 && (
           <>
             <Text style={styles.sectionTitle}>Active Trades</Text>
-            {autoTrader.activeTrades.map((trade) => {
+            {autoTrader.activeTrades.map((trade, tradeIdx) => {
               const pnl = trade.pnl ?? 0;
               const entryPrice = trade.entryPrice ?? 0;
               const currentPrice = trade.currentPrice ?? 0;
@@ -905,7 +905,7 @@ export default function AutoTraderScreen() {
               const sl = trade.stopLoss ?? cfg.stopLossPct;
               const tp = trade.takeProfit ?? cfg.takeProfitPct;
               return (
-                <View key={trade.id} style={styles.tradeCard}>
+                <View key={trade.id || `${trade.symbol}-${trade.openedAt || tradeIdx}`} style={styles.tradeCard}>
                   <View style={styles.tradeRow}>
                     <View style={[styles.sideBadge, {
                       backgroundColor: trade.side === 'BUY' ? COLORS.success + '22' : COLORS.error + '22',
@@ -967,11 +967,11 @@ export default function AutoTraderScreen() {
                 Sentinel Observations
               </Text>
             </View>
-            {autoTrader.activeTrades.map((trade) => {
+            {autoTrader.activeTrades.map((trade, idx) => {
               const pnl = trade.pnl ?? 0;
               const leverageRisk = (trade as any).leverage >= 50 ? 'EXTREME' : (trade as any).leverage >= 20 ? 'HIGH' : 'MODERATE';
               return (
-                <View key={`obs-${trade.id}`} style={{ marginBottom: 4 }}>
+                <View key={`obs-${trade.id || trade.symbol || idx}`} style={{ marginBottom: 4 }}>
                   <Text style={{ color: COLORS.textSecondary, fontSize: FONT_SIZES.xs }}>
                     <Text style={{ fontWeight: '700', color: pnl >= 5 ? COLORS.success : pnl <= -3 ? COLORS.error : COLORS.textSecondary }}>
                       {trade.symbol}
