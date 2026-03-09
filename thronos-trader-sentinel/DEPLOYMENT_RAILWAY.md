@@ -137,3 +137,27 @@ For Brain, `openapi.json` should include `/api/brain/*` paths (e.g. `/api/brain/
    sh -c 'uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8083}'
    ```
 4. Redeploy and re-run the curl checks from section 4.
+
+
+## 8) If Railway shows **Queued** for a long time
+
+`Queued` usually means Railway has not started your build yet (capacity/concurrency),
+not that your code is failing to boot.
+
+### What to do
+
+1. Open the service → **Deployments** and cancel older queued/running deploys.
+2. Keep only the latest commit deployment for each service (backend/analyst/brain).
+3. Trigger **Redeploy latest** once.
+4. Check project usage limits (build minutes/concurrency) in Railway project settings.
+5. If multiple services are auto-deploying from one push, deploy Brain alone first, then the rest.
+
+### Quick check after queue clears
+
+```bash
+curl -s https://<brain-host>/
+curl -s https://<brain-host>/health
+curl -s https://<brain-host>/api/brain/health
+```
+
+All should return HTTP 200 JSON. If they do, initialization is complete and the queue issue was platform-side.
