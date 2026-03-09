@@ -34,6 +34,15 @@ type SleepTrade = {
   closed_at?: number;
 };
 
+/** Smart price formatting for micro-cap coins */
+function fmtPrice(price: number): string {
+  if (price <= 0) return '$0';
+  if (price >= 100) return `$${price.toFixed(2)}`;
+  if (price >= 1) return `$${price.toFixed(4)}`;
+  if (price >= 0.01) return `$${price.toFixed(5)}`;
+  return `$${price.toPrecision(4)}`;
+}
+
 type ProtectionAction = {
   id: string;
   type: 'hedge' | 'safe_order' | 'sl_adjust' | 'tp_adjust' | 'reduce';
@@ -622,7 +631,7 @@ export default function AutoTraderScreen() {
                     <View style={styles.tradeBody}>
                       <Text style={styles.tradeSymbol}>{trade.symbol}</Text>
                       <Text style={styles.tradeDetail}>
-                        Entry ${(trade.entry_price ?? 0).toFixed(2)} | {trade.leverage ?? 1}x
+                        Entry {fmtPrice(trade.entry_price ?? 0)} | {trade.leverage ?? 1}x
                       </Text>
                     </View>
                     <View style={{ alignItems: 'flex-end' }}>
@@ -635,11 +644,11 @@ export default function AutoTraderScreen() {
                   <View style={styles.slTpRow}>
                     <View style={styles.slTpItem}>
                       <Text style={[styles.slTpLabel, { color: COLORS.error }]}>SL</Text>
-                      <Text style={[styles.slTpValue, { color: COLORS.error }]}>${(trade.sl_price ?? 0).toFixed(2)}</Text>
+                      <Text style={[styles.slTpValue, { color: COLORS.error }]}>{fmtPrice(trade.sl_price ?? 0)}</Text>
                     </View>
                     <View style={styles.slTpItem}>
                       <Text style={[styles.slTpLabel, { color: COLORS.success }]}>TP</Text>
-                      <Text style={[styles.slTpValue, { color: COLORS.success }]}>${(trade.tp_price ?? 0).toFixed(2)}</Text>
+                      <Text style={[styles.slTpValue, { color: COLORS.success }]}>{fmtPrice(trade.tp_price ?? 0)}</Text>
                     </View>
                   </View>
                 </View>
@@ -678,11 +687,11 @@ export default function AutoTraderScreen() {
                   <View style={styles.slTpRow}>
                     <View style={styles.slTpItem}>
                       <Text style={[styles.slTpLabel, { color: COLORS.textMuted }]}>SL</Text>
-                      <Text style={[styles.slTpValue, { color: COLORS.textMuted }]}>${(trade.sl_price ?? 0).toFixed(2)}</Text>
+                      <Text style={[styles.slTpValue, { color: COLORS.textMuted }]}>{fmtPrice(trade.sl_price ?? 0)}</Text>
                     </View>
                     <View style={styles.slTpItem}>
                       <Text style={[styles.slTpLabel, { color: COLORS.textMuted }]}>TP</Text>
-                      <Text style={[styles.slTpValue, { color: COLORS.textMuted }]}>${(trade.tp_price ?? 0).toFixed(2)}</Text>
+                      <Text style={[styles.slTpValue, { color: COLORS.textMuted }]}>{fmtPrice(trade.tp_price ?? 0)}</Text>
                     </View>
                   </View>
                 </View>
@@ -916,13 +925,13 @@ export default function AutoTraderScreen() {
                     </View>
                     <View style={styles.tradeBody}>
                       <Text style={styles.tradeSymbol}>{trade.symbol}</Text>
-                      <Text style={styles.tradeDetail}>Entry ${entryPrice.toFixed(2)}</Text>
+                      <Text style={styles.tradeDetail}>Entry {fmtPrice(entryPrice)}</Text>
                     </View>
                     <View style={{ alignItems: 'flex-end' }}>
                       <Text style={[styles.tradePnl, { color: pnlColor }]}>
                         {pnl >= 0 ? '+' : ''}{pnl.toFixed(2)}%
                       </Text>
-                      <Text style={styles.tradeDetail}>${currentPrice.toFixed(2)}</Text>
+                      <Text style={styles.tradeDetail}>{fmtPrice(currentPrice)}</Text>
                     </View>
                   </View>
                   {/* SL/TP Display */}
@@ -1015,7 +1024,7 @@ export default function AutoTraderScreen() {
             </View>
 
             <Text style={{ color: COLORS.textSecondary, fontSize: FONT_SIZES.sm, marginBottom: SPACING.md }}>
-              {editingTrade?.side === 'BUY' ? 'LONG' : 'SHORT'} @ ${(editingTrade?.entryPrice ?? 0).toFixed(2)} | Current ${(editingTrade?.currentPrice ?? 0).toFixed(2)}
+              {editingTrade?.side === 'BUY' ? 'LONG' : 'SHORT'} @ {fmtPrice(editingTrade?.entryPrice ?? 0)} | Current {fmtPrice(editingTrade?.currentPrice ?? 0)}
             </Text>
 
             <Text style={styles.fieldLabel}>Stop Loss %</Text>

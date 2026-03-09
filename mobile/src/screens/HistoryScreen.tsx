@@ -62,6 +62,30 @@ function formatPrice(price: number): string {
   return `$${price.toPrecision(4)}`;
 }
 
+/** Smart PnL USD formatting — handles tiny and large values */
+function formatPnlUsd(pnl: number, entryPrice: number, markPrice: number, contracts: number, leverage: number): string {
+  // If the API returns a meaningful unrealizedPnl, use it
+  if (Math.abs(pnl) >= 0.005) {
+    if (Math.abs(pnl) >= 1000) return `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`;
+    if (Math.abs(pnl) >= 1) return `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(4)}`;
+    return `${pnl >= 0 ? '+' : ''}$${pnl.toPrecision(3)}`;
+  }
+  // Fallback: calculate from price diff * contracts * leverage
+  // This handles micro-cap coins where unrealizedPnl might round to 0
+  if (entryPrice > 0 && markPrice > 0 && contracts > 0) {
+    const priceDiff = markPrice - entryPrice;
+    const calculated = priceDiff * contracts * leverage;
+    if (Math.abs(calculated) >= 0.005) {
+      if (Math.abs(calculated) >= 1) return `${calculated >= 0 ? '+' : ''}$${calculated.toFixed(4)}`;
+      return `${calculated >= 0 ? '+' : ''}$${calculated.toPrecision(3)}`;
+    }
+    // Still too small — compute from PnL % if available
+  }
+  // Last resort: show the raw value with enough precision
+  if (pnl === 0) return '$0.00';
+  return `${pnl >= 0 ? '+' : ''}$${pnl.toPrecision(2)}`;
+}
+
 /** Calculate distance to liquidation as percentage */
 function liqDistancePct(pos: OpenPosition): number {
   if (!pos.liquidationPrice || pos.liquidationPrice <= 0 || !pos.markPrice) return 100;
@@ -709,7 +733,7 @@ function PositionRow({ position }: { position: OpenPosition }) {
           {position.pnlPct >= 0 ? '+' : ''}{position.pnlPct.toFixed(2)}%
         </Text>
         <Text style={[rowStyles.pnlUsd, { color: pnlColor }]}>
-          {position.unrealizedPnl >= 0 ? '+' : ''}${position.unrealizedPnl.toFixed(4)}
+          {formatPnlUsd(position.unrealizedPnl, position.entryPrice, position.markPrice, position.contracts, position.leverage)}
         </Text>
       </View>
     </View>
