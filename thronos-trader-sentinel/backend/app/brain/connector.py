@@ -371,12 +371,19 @@ async def fetch_open_positions(
             if notional <= 0:
                 notional = abs_contracts * mark_price
 
-            # Calculate PnL if exchange didn't provide it
-            if unrealized_pnl == 0 and entry_price > 0 and mark_price > 0:
+            # Calculate PnL if exchange didn't provide it (or returned 0)
+            if abs(unrealized_pnl) < 1e-8 and entry_price > 0 and mark_price > 0:
                 if side == "long":
                     unrealized_pnl = (mark_price - entry_price) * abs_contracts
                 else:
                     unrealized_pnl = (entry_price - mark_price) * abs_contracts
+                # Some exchanges return contracts as notional, not base amount
+                # If calculated PnL seems too small relative to %, recalculate from notional
+                if abs(unrealized_pnl) < 1e-6 and notional > 0 and entry_price > 0:
+                    price_change_pct = (mark_price - entry_price) / entry_price
+                    if side == "short":
+                        price_change_pct = -price_change_pct
+                    unrealized_pnl = notional * price_change_pct
 
             # Calculate PnL percentage
             if entry_price > 0 and mark_price > 0:
@@ -393,7 +400,7 @@ async def fetch_open_positions(
                 "contracts": abs_contracts,
                 "entryPrice": entry_price,
                 "markPrice": mark_price,
-                "unrealizedPnl": round(unrealized_pnl, 6),
+                "unrealizedPnl": round(unrealized_pnl, 8),
                 "pnlPct": round(pnl_pct, 2),
                 "leverage": leverage,
                 "marginMode": pos.get("marginMode") or pos.get("marginType")
