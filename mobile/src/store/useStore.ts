@@ -336,10 +336,10 @@ export const useStore = create<AppStore>()(
         // Protect subscription: never downgrade a persisted paid tier to 'free'
         // This prevents reset/rehydration bugs from losing paid subscriptions
         const persistedTier = persistedState.subscription || 'free';
-        const userTier = persistedState.user?.subscription || 'free';
-        const safeTier = persistedTier !== 'free' ? persistedTier
-          : userTier !== 'free' ? userTier
-          : 'free';
+        const persistedUserTier = persistedState.user?.subscription || 'free';
+        const currentTier = (current as AppStore).subscription || 'free';
+        const currentUserTier = (current as AppStore).user?.subscription || 'free';
+        const safeTier = [persistedTier, persistedUserTier, currentTier, currentUserTier].find((tier) => tier && tier !== 'free') || 'free';
 
         return {
           ...current,

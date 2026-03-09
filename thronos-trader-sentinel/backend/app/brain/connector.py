@@ -295,6 +295,12 @@ async def fetch_open_positions(
     """
     ex = _build_exchange(exchange, api_key, api_secret, passphrase, market_type="futures")
     try:
+        markets_by_symbol: dict[str, dict[str, Any]] = {}
+        try:
+            markets_by_symbol = await ex.load_markets()
+        except Exception:
+            markets_by_symbol = {}
+
         positions: list[dict[str, Any]] = []
         if not ex.has.get("fetchPositions"):
             return positions
@@ -331,12 +337,22 @@ async def fetch_open_positions(
         for pos in active_raw:
             symbol = str(pos.get("symbol") or "")
             contracts = float(pos.get("contracts") or pos.get("positionAmt") or 0)
+            info = pos.get("info") or {}
+
+            contract_size = float(
+                pos.get("contractSize")
+                or info.get("contractSize")
+                or info.get("contract_size")
+                or (markets_by_symbol.get(symbol) or {}).get("contractSize")
+                or 1
+            )
+            if contract_size <= 0:
+                contract_size = 1
 
             # CCXT normalizes to entryPrice, but some exchanges (MEXC, OKX)
             # store it differently in the info dict. Try multiple paths.
             entry_price = float(pos.get("entryPrice") or 0)
             if entry_price <= 0:
-                info = pos.get("info") or {}
                 entry_price = float(
                     info.get("entryPrice") or info.get("openAvgPrice")
                     or info.get("avgCost") or info.get("entry_price")
@@ -345,7 +361,6 @@ async def fetch_open_positions(
 
             mark_price = float(pos.get("markPrice") or 0)
             if mark_price <= 0:
-                info = pos.get("info") or {}
                 mark_price = float(
                     info.get("markPrice") or info.get("fairPrice")
                     or info.get("mark_price") or 0
@@ -358,7 +373,6 @@ async def fetch_open_positions(
             unrealized_pnl = float(pos.get("unrealizedPnl") or 0)
             leverage = float(pos.get("leverage") or 0)
             if leverage <= 0:
-                info = pos.get("info") or {}
                 leverage = float(info.get("leverage") or info.get("lever") or 1)
 
             # Determine side — MEXC uses 'long'/'short', some exchanges use positive/negative contracts
@@ -367,16 +381,17 @@ async def fetch_open_positions(
                 side = "long" if contracts > 0 else "short"
 
             abs_contracts = abs(contracts)
+            base_amount = abs_contracts * contract_size
             notional = float(pos.get("notional") or 0)
             if notional <= 0:
-                notional = abs_contracts * mark_price
+                notional = base_amount * mark_price
 
             # Calculate PnL if exchange didn't provide it (or returned 0)
             if abs(unrealized_pnl) < 1e-8 and entry_price > 0 and mark_price > 0:
                 if side == "long":
-                    unrealized_pnl = (mark_price - entry_price) * abs_contracts
+                    unrealized_pnl = (mark_price - entry_price) * base_amount
                 else:
-                    unrealized_pnl = (entry_price - mark_price) * abs_contracts
+                    unrealized_pnl = (entry_price - mark_price) * base_amount
                 # Some exchanges return contracts as notional, not base amount
                 # If calculated PnL seems too small relative to %, recalculate from notional
                 if abs(unrealized_pnl) < 1e-6 and notional > 0 and entry_price > 0:
@@ -398,6 +413,7 @@ async def fetch_open_positions(
                 "symbol": symbol,
                 "side": side,
                 "contracts": abs_contracts,
+                "contractSize": contract_size,
                 "entryPrice": entry_price,
                 "markPrice": mark_price,
                 "unrealizedPnl": round(unrealized_pnl, 8),
