@@ -29,6 +29,17 @@ ENTRY_COOLDOWN_S = 180       # min 3 min between entries on same symbol
 MIN_CONFIDENCE = 0.60        # brain confidence threshold
 
 
+def _is_contract_activation_error(error_text: str) -> bool:
+    msg = (error_text or '').lower()
+    return (
+        'contract not activated' in msg
+        or 'code\":1002' in msg
+        or "'code':1002" in msg
+        or '"code":1002' in msg
+    )
+
+
+
 def _sl_tp_for_leverage(leverage: float, side: str, price: float, sl_pct: float, tp_pct: float):
     """Calculate SL/TP prices accounting for leverage."""
     # Tighter SL for higher leverage
@@ -299,6 +310,7 @@ async def run_sleep_session(
         "status": "running",
     }
     session["sleep_trades"] = []
+    session["blocked_symbols"] = []
     brain_store.save_autotrader(user_id, session)
     _log_sleep(user_id, f"Sleep Mode started — {len(symbols)} symbols, {max_leverage}x max leverage, {margin_mode} margin, futures")
 
@@ -349,6 +361,7 @@ async def run_sleep_session(
             is_opening_range = session_bias.get("opening_range", False)
 
             # 3. Scan for new entries if we have capacity
+            blocked_symbols = set(session.get("blocked_symbols", []))
             if len(open_trades) < max_open:
                 # Get portfolio equity
                 try:
@@ -371,6 +384,9 @@ async def run_sleep_session(
 
                 if exposure_ok:
                     for symbol in symbols:
+                        if symbol in blocked_symbols:
+                            continue
+
                         # Cooldown check
                         last_entry = last_entry_by_symbol.get(symbol, 0)
                         if time.time() - last_entry < ENTRY_COOLDOWN_S:
@@ -489,7 +505,16 @@ async def run_sleep_session(
                                     f"Conf {confidence:.0%} | Vol: {vol_label}"
                                 )
                             else:
-                                _log_sleep(user_id, f"Order failed for {symbol}: {order.get('error', 'unknown')}")
+                                err_msg = str(order.get("error", "unknown"))
+                                _log_sleep(user_id, f"Order failed for {symbol}: {err_msg}")
+                                if _is_contract_activation_error(err_msg):
+                                    blocked_symbols.add(symbol)
+                                    session["blocked_symbols"] = sorted(blocked_symbols)
+                                    _log_sleep(
+                                        user_id,
+                                        f"Disabled {symbol} for this session: contract not activated on exchange. Activate it manually, then restart Sleep Mode.",
+                                    )
+                                    brain_store.save_autotrader(user_id, session)
 
                         except Exception as e:
                             _log_sleep(user_id, f"Execution error on {symbol}: {str(e)[:100]}")

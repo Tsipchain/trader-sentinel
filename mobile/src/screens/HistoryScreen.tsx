@@ -119,10 +119,6 @@ export default function HistoryScreen() {
   const [positionsLoading, setPositionsLoading] = useState(false);
   const hasShownBrainMisconfigAlert = useRef(false);
 
-  // Exchange credentials for sync (re-use autoTrader config if available)
-  const [exchange, setExchange] = useState(autoTrader.config.exchange);
-  const [apiKey, setApiKey] = useState(autoTrader.config.apiKey);
-  const [apiSecret, setApiSecret] = useState(autoTrader.config.apiSecret);
   const [showSetup, setShowSetup] = useState(false);
   const [marketType, setMarketType] = useState<'auto' | 'futures' | 'spot'>('auto');
   const [openPositions, setOpenPositions] = useState<OpenPosition[]>([]);
@@ -131,24 +127,24 @@ export default function HistoryScreen() {
   const positionPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [traderProfile, setTraderProfile] = useState<TraderProfile>(null);
   const [sentinelLearning, setSentinelLearning] = useState(false);
-
-  useEffect(() => {
-    // Keep History screen credentials in sync with shared AutoTrader config.
-    setExchange(autoTrader.config.exchange);
-    setApiKey(autoTrader.config.apiKey);
-    setApiSecret(autoTrader.config.apiSecret);
-  }, [autoTrader.config.exchange, autoTrader.config.apiKey, autoTrader.config.apiSecret]);
+  const cfg = autoTrader.config;
+  const exchange = cfg.exchange;
+  const apiKey = cfg.apiKey;
+  const apiSecret = cfg.apiSecret;
+  const updateSharedCfg = (patch: Partial<typeof cfg>) => setAutoTrader({ config: { ...cfg, ...patch } });
 
   // Position monitoring — poll every 15 minutes
   const fetchPositions = useCallback(async () => {
-    if (!user?.id || !apiKey || !apiSecret || !exchange) return;
+    const apiKeyTrimmed = apiKey.trim();
+    const apiSecretTrimmed = apiSecret.trim();
+    if (!user?.id || !apiKeyTrimmed || !apiSecretTrimmed || !exchange) return;
     setPositionsLoading(true);
     try {
       const result = await brainAPI.getOpenPositions({
         user_id: user.id,
         exchange,
-        api_key: apiKey,
-        api_secret: apiSecret,
+        api_key: apiKeyTrimmed,
+        api_secret: apiSecretTrimmed,
       });
       if (result.ok) {
         setOpenPositions(result.positions ?? []);
@@ -213,7 +209,10 @@ export default function HistoryScreen() {
       Alert.alert('Not Connected', 'Connect your wallet first.');
       return;
     }
-    if (!apiKey || !apiSecret) {
+    const apiKeyTrimmed = apiKey.trim();
+    const apiSecretTrimmed = apiSecret.trim();
+
+    if (!apiKeyTrimmed || !apiSecretTrimmed) {
       setShowSetup(true);
       return;
     }
@@ -243,8 +242,8 @@ export default function HistoryScreen() {
       const syncResult = await brainAPI.syncTrades({
         user_id: user.id,
         exchange,
-        api_key: apiKey,
-        api_secret: apiSecret,
+        api_key: apiKeyTrimmed,
+        api_secret: apiSecretTrimmed,
         days: 90,
         market_type: marketType,
       });
@@ -406,8 +405,7 @@ export default function HistoryScreen() {
                     key={ex}
                     style={[styles.chip, exchange === ex && styles.chipActive]}
                     onPress={() => {
-                      setExchange(ex);
-                      setAutoTrader({ config: { ...autoTrader.config, exchange: ex } });
+                      updateSharedCfg({ exchange: ex });
                     }}
                   >
                     <Text style={[styles.chipText, exchange === ex && styles.chipTextActive]}>
@@ -421,8 +419,7 @@ export default function HistoryScreen() {
                 style={styles.input}
                 value={apiKey}
                 onChangeText={(value) => {
-                  setApiKey(value);
-                  setAutoTrader({ config: { ...autoTrader.config, apiKey: value } });
+                  updateSharedCfg({ apiKey: value });
                 }}
                 placeholder="Read-only key"
                 placeholderTextColor={COLORS.textMuted}
@@ -433,8 +430,7 @@ export default function HistoryScreen() {
                 style={styles.input}
                 value={apiSecret}
                 onChangeText={(value) => {
-                  setApiSecret(value);
-                  setAutoTrader({ config: { ...autoTrader.config, apiSecret: value } });
+                  updateSharedCfg({ apiSecret: value });
                 }}
                 placeholder="API secret"
                 placeholderTextColor={COLORS.textMuted}
@@ -521,7 +517,7 @@ export default function HistoryScreen() {
                   const sym = pos.symbol.replace(':USDT', '').replace('/USDT', '');
                   const risk = leverageRisk(pos.leverage);
                   return (
-                    <View key={`obs-${i}`} style={{ flexDirection: 'row', alignItems: 'flex-start', marginBottom: 8, gap: 6 }}>
+                    <View key={`obs-${pos.symbol}-${pos.side}-${i}`} style={{ flexDirection: 'row', alignItems: 'flex-start', marginBottom: 8, gap: 6 }}>
                       <Ionicons name={risk.icon as any} size={14} color={risk.color} style={{ marginTop: 2 }} />
                       <Text style={{ color: COLORS.textSecondary, fontSize: FONT_SIZES.xs, flex: 1, lineHeight: 18 }}>
                         <Text style={{ fontWeight: '700', color: risk.color }}>{sym} </Text>
