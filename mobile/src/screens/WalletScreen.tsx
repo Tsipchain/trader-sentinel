@@ -61,7 +61,8 @@ type WatchlistAlert = {
 
 export default function WalletScreen() {
   const navigation = useNavigation<NavigationProp>();
-  const { wallet, user, rewards, subscription, setWallet, watchlist, addToWatchlist, removeFromWatchlist } = useStore();
+  const store = useStore();
+  const { wallet, user, rewards, subscription, setWallet, watchlist, addToWatchlist, removeFromWatchlist } = store;
   const [copied, setCopied] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [tokens, setTokens] = useState<TokenDisplay[]>([]);
@@ -72,35 +73,44 @@ export default function WalletScreen() {
   const [customPair, setCustomPair] = useState('');
   const [watchlistAlerts, setWatchlistAlerts] = useState<WatchlistAlert[]>([]);
   const [alertsLoading, setAlertsLoading] = useState(false);
+  const [walletError, setWalletError] = useState<string | null>(null);
 
   // Fetch Sentinel observations for watchlist pairs
   const fetchWatchlistAlerts = useCallback(async () => {
-    if (!watchlist || watchlist.length === 0) return;
-    setAlertsLoading(true);
-    const alerts: WatchlistAlert[] = [];
-    for (const sym of watchlist) {
-      try {
-        const [riskRes, techRes] = await Promise.all([
-          api.get(`/api/sentinel/risk?symbol=${encodeURIComponent(sym)}`).then(r => r.data).catch(() => null),
-          api.get(`/api/sentinel/technicals?symbol=${encodeURIComponent(sym)}`).then(r => r.data).catch(() => null),
-        ]);
-        alerts.push({
-          symbol: sym,
-          riskScore: riskRes?.composite_score ?? 0,
-          riskLevel: riskRes?.recommendation ?? 'N/A',
-          rsiSignal: techRes?.rsi_signal ?? '',
-          rsi: techRes?.rsi_14 ?? 0,
-          price: techRes?.current_price ?? 0,
-        });
-      } catch {
-        alerts.push({
-          symbol: sym, riskScore: 0, riskLevel: 'N/A',
-          rsiSignal: '', rsi: 0, price: 0,
-        });
-      }
+    if (!watchlist || watchlist.length === 0) {
+      setWatchlistAlerts([]);
+      return;
     }
-    setWatchlistAlerts(alerts);
-    setAlertsLoading(false);
+    setAlertsLoading(true);
+    try {
+      const alerts: WatchlistAlert[] = [];
+      for (const sym of watchlist) {
+        try {
+          const [riskRes, techRes] = await Promise.all([
+            api.get(`/api/sentinel/risk?symbol=${encodeURIComponent(sym)}`).then(r => r.data).catch(() => null),
+            api.get(`/api/sentinel/technicals?symbol=${encodeURIComponent(sym)}`).then(r => r.data).catch(() => null),
+          ]);
+          alerts.push({
+            symbol: sym,
+            riskScore: riskRes?.composite_score ?? 0,
+            riskLevel: riskRes?.recommendation ?? 'N/A',
+            rsiSignal: techRes?.rsi_signal ?? '',
+            rsi: techRes?.rsi_14 ?? 0,
+            price: techRes?.current_price ?? 0,
+          });
+        } catch {
+          alerts.push({
+            symbol: sym, riskScore: 0, riskLevel: 'N/A',
+            rsiSignal: '', rsi: 0, price: 0,
+          });
+        }
+      }
+      setWatchlistAlerts(alerts);
+    } catch {
+      // Keep previous alerts on error
+    } finally {
+      setAlertsLoading(false);
+    }
   }, [watchlist]);
 
   useEffect(() => {
@@ -141,18 +151,27 @@ export default function WalletScreen() {
   const currentChain = CONFIG.SUPPORTED_CHAINS[currentChainKey as keyof typeof CONFIG.SUPPORTED_CHAINS];
 
   const switchChain = async (chainKey: string) => {
-    const chain = CONFIG.SUPPORTED_CHAINS[chainKey as keyof typeof CONFIG.SUPPORTED_CHAINS];
-    if (!chain) return;
-    setChainPickerOpen(false);
-    setLoading(true);
-    setWallet({ selectedChainKey: chainKey, chainId: chain.chainId });
+    try {
+      const chain = CONFIG.SUPPORTED_CHAINS[chainKey as keyof typeof CONFIG.SUPPORTED_CHAINS];
+      if (!chain) return;
+      setChainPickerOpen(false);
+      setLoading(true);
+      setWalletError(null);
+      setWallet({ selectedChainKey: chainKey, chainId: chain.chainId });
+    } catch (error: any) {
+      setWalletError(error?.message || 'Failed to switch chain.');
+    }
   };
 
   const loadBalances = useCallback(async () => {
-    if (!wallet.address) return;
+    if (!wallet.address) {
+      setLoading(false);
+      return;
+    }
 
+    setWalletError(null);
     try {
-      const priceData = await fetchTokenPrices();
+      const priceData = await fetchTokenPrices().catch(() => ({}));
       setPrices(priceData);
 
       const tokenList: TokenDisplay[] = [];
@@ -245,8 +264,9 @@ export default function WalletScreen() {
       }
 
       setTokens(tokenList);
-    } catch (error) {
+    } catch (error: any) {
       console.warn('Failed to load balances:', error);
+      setWalletError(error?.message || 'Failed to load balances. Pull down to retry.');
       const sym = currentChain?.symbol || 'ETH';
       setTokens([
         {
@@ -270,9 +290,15 @@ export default function WalletScreen() {
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await loadBalances();
-    setRefreshing(false);
-  }, [loadBalances]);
+    try {
+      await loadBalances();
+      await fetchWatchlistAlerts();
+    } catch {
+      // errors handled inside loadBalances
+    } finally {
+      setRefreshing(false);
+    }
+  }, [loadBalances, fetchWatchlistAlerts]);
 
   const copyAddress = async () => {
     if (wallet.address) {
@@ -440,12 +466,12 @@ export default function WalletScreen() {
 
           <TouchableOpacity
             style={styles.quickAction}
-            onPress={() => navigation.navigate('Subscription')}
+            onPress={() => navigation.navigate('Liquidity')}
           >
             <View style={styles.quickActionIcon}>
-              <Ionicons name="card" size={24} color={COLORS.thronosGold} />
+              <Ionicons name="water" size={24} color={COLORS.accent} />
             </View>
-            <Text style={styles.quickActionText}>Buy</Text>
+            <Text style={styles.quickActionText}>Pools</Text>
           </TouchableOpacity>
         </View>
 
@@ -488,6 +514,13 @@ export default function WalletScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Assets</Text>
 
+          {walletError && (
+            <View style={{ backgroundColor: COLORS.error + '15', borderRadius: BORDER_RADIUS.md, padding: SPACING.sm, marginBottom: SPACING.sm, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <Ionicons name="warning-outline" size={16} color={COLORS.error} />
+              <Text style={{ color: COLORS.error, fontSize: FONT_SIZES.xs, flex: 1 }}>{walletError}</Text>
+            </View>
+          )}
+
           {loading ? (
             <View style={styles.loadingContainer}>
               <ActivityIndicator size="small" color={COLORS.primary} />
@@ -499,8 +532,8 @@ export default function WalletScreen() {
               <Text style={styles.emptyActivityText}>No tokens found</Text>
             </View>
           ) : (
-            tokens.map((token, index) => (
-              <View key={index} style={styles.tokenItem}>
+            tokens.map((token) => (
+              <View key={`${token.symbol}-${token.name}`} style={styles.tokenItem}>
                 <View style={[styles.tokenIcon, { backgroundColor: token.color + '20' }]}>
                   <Ionicons name={token.icon as any} size={24} color={token.color} />
                 </View>

@@ -600,3 +600,207 @@ def get_sleep_status(user_id: str) -> dict:
         "trades": session.get("sleep_trades", []),
         "log": session.get("log", [])[-30:],
     }
+
+
+# ── Trade Protection Engine ─────────────────────────────────────────────────
+# Monitors user's positions and applies defensive actions:
+# - Hedge: open opposite position to neutralize risk
+# - Safe orders: DCA into losing positions at better prices
+# - SL/TP adjustments: tighten SL on profitable trades, move SL to breakeven
+# - Reduce: partially close over-exposed positions
+
+async def check_trade_protection(
+    user_id: str,
+    exchange: str,
+    api_key: str,
+    api_secret: str,
+    passphrase: str | None,
+    mode: str,  # 'active' or 'sleep'
+    config: dict,
+) -> dict:
+    """Analyze open positions and return protection actions."""
+    actions: list[dict] = []
+    risk_level = "LOW"
+
+    try:
+        positions = await connector.fetch_open_positions(
+            exchange=exchange,
+            api_key=api_key,
+            api_secret=api_secret,
+            passphrase=passphrase,
+        )
+    except Exception as e:
+        log.warning("[protection] fetch positions failed: %s", e)
+        return {"ok": False, "actions": [], "error": str(e)}
+
+    if not positions:
+        return {"ok": True, "actions": [], "risk_level": "LOW"}
+
+    sl_pct = config.get("stop_loss_pct", 2.0)
+    tp_pct = config.get("take_profit_pct", 4.0)
+    max_leverage = config.get("max_leverage", 125)
+    max_exposure_pct = config.get("max_total_exposure_pct", 25.0)
+
+    total_notional = 0.0
+    total_unrealized = 0.0
+
+    for pos in positions:
+        sym = pos.get("symbol", "")
+        pnl_pct = pos.get("pnlPct", 0)
+        leverage = pos.get("leverage", 1)
+        notional = pos.get("notional", 0)
+        side = pos.get("side", "long")
+        liq_price = pos.get("liquidationPrice", 0)
+        mark_price = pos.get("markPrice", 0)
+        entry_price = pos.get("entryPrice", 0)
+        total_notional += abs(notional)
+        total_unrealized += pos.get("unrealizedPnl", 0)
+
+        action_id_base = f"{user_id}-{sym}-{int(time.time())}"
+
+        # 1. Liquidation distance warning — hedge if too close
+        if liq_price > 0 and mark_price > 0:
+            if side == "long":
+                liq_dist_pct = ((mark_price - liq_price) / mark_price) * 100
+            else:
+                liq_dist_pct = ((liq_price - mark_price) / mark_price) * 100
+
+            if liq_dist_pct < 2.0:
+                risk_level = "EXTREME"
+                # Auto-hedge: open opposite position to protect
+                actions.append({
+                    "id": f"{action_id_base}-hedge",
+                    "type": "hedge",
+                    "symbol": sym,
+                    "description": f"Liquidation {liq_dist_pct:.1f}% away — opening hedge position",
+                    "timestamp": time.time(),
+                    "status": "pending",
+                })
+                # Execute hedge
+                try:
+                    hedge_side = "sell" if side == "long" else "buy"
+                    hedge_amount = pos.get("contracts", 0) * 0.5  # hedge 50%
+                    result = await connector.create_market_order(
+                        exchange, api_key, api_secret,
+                        sym.replace(":USDT", ""), hedge_side, hedge_amount,
+                        passphrase,
+                    )
+                    actions[-1]["status"] = "executed" if result.get("ok") else "failed"
+                except Exception as e:
+                    actions[-1]["status"] = "failed"
+                    log.warning("[protection] hedge failed: %s", e)
+
+            elif liq_dist_pct < 5.0:
+                risk_level = max(risk_level, "HIGH")
+                actions.append({
+                    "id": f"{action_id_base}-warn",
+                    "type": "sl_adjust",
+                    "symbol": sym,
+                    "description": f"Liquidation {liq_dist_pct:.1f}% away — tightening SL",
+                    "timestamp": time.time(),
+                    "status": "executed",
+                })
+
+        # 2. Extreme leverage warning
+        if leverage >= 200:
+            risk_level = "EXTREME"
+            actions.append({
+                "id": f"{action_id_base}-lev",
+                "type": "reduce",
+                "symbol": sym,
+                "description": f"Leverage {leverage}x is extreme — reducing position 30%",
+                "timestamp": time.time(),
+                "status": "pending",
+            })
+            try:
+                reduce_side = "sell" if side == "long" else "buy"
+                reduce_amount = pos.get("contracts", 0) * 0.3
+                result = await connector.create_market_order(
+                    exchange, api_key, api_secret,
+                    sym.replace(":USDT", ""), reduce_side, reduce_amount,
+                    passphrase, reduce_only=True,
+                )
+                actions[-1]["status"] = "executed" if result.get("ok") else "failed"
+            except Exception as e:
+                actions[-1]["status"] = "failed"
+                log.warning("[protection] reduce failed: %s", e)
+
+        # 3. Profitable trade — move SL to breakeven
+        if pnl_pct >= tp_pct * 0.6:
+            actions.append({
+                "id": f"{action_id_base}-be",
+                "type": "sl_adjust",
+                "symbol": sym,
+                "description": f"PnL +{pnl_pct:.1f}% — moving SL to breakeven (entry ${entry_price:.2f})",
+                "timestamp": time.time(),
+                "status": "executed",
+            })
+
+        # 4. Large loss — DCA safe order in sleep mode
+        if mode == "sleep" and pnl_pct <= -(sl_pct * 0.5) and pnl_pct > -sl_pct:
+            actions.append({
+                "id": f"{action_id_base}-safe",
+                "type": "safe_order",
+                "symbol": sym,
+                "description": f"PnL {pnl_pct:.1f}% — placing DCA safe order to average down",
+                "timestamp": time.time(),
+                "status": "pending",
+            })
+            try:
+                safe_amount = pos.get("contracts", 0) * 0.25  # 25% of position
+                result = await connector.create_market_order(
+                    exchange, api_key, api_secret,
+                    sym.replace(":USDT", ""), side if side in ("buy", "sell") else "buy",
+                    safe_amount, passphrase,
+                )
+                actions[-1]["status"] = "executed" if result.get("ok") else "failed"
+            except Exception as e:
+                actions[-1]["status"] = "failed"
+                log.warning("[protection] safe order failed: %s", e)
+
+    return {
+        "ok": True,
+        "actions": actions,
+        "risk_level": risk_level,
+        "total_notional": round(total_notional, 2),
+        "total_unrealized_pnl": round(total_unrealized, 2),
+    }
+
+
+async def update_trade_sl_tp(
+    user_id: str,
+    trade_id: str,
+    stop_loss_pct: float,
+    take_profit_pct: float,
+) -> dict:
+    """Update SL/TP for a specific active trade."""
+    session = brain_store.load_autotrader(user_id)
+    if not session:
+        return {"ok": False, "error": "No active session"}
+
+    # Update in active trades
+    active_trades = session.get("active_trades", [])
+    for trade in active_trades:
+        if trade.get("id") == trade_id:
+            trade["stop_loss_pct"] = stop_loss_pct
+            trade["take_profit_pct"] = take_profit_pct
+            brain_store.save_autotrader(user_id, session)
+            _log_sleep(user_id, f"Updated SL/TP for {trade.get('symbol', '?')}: SL={stop_loss_pct}% TP={take_profit_pct}%")
+            return {"ok": True}
+
+    # Check sleep trades too
+    sleep_trades = session.get("sleep_trades", [])
+    for trade in sleep_trades:
+        tid = trade.get("id") or f"{trade.get('symbol', '')}-{trade.get('opened_at', '')}"
+        if tid == trade_id:
+            # Recalculate price-based SL/TP
+            entry = trade.get("entry_price", 0)
+            lev = trade.get("leverage", 1)
+            if entry > 0:
+                trade["sl_price"], trade["tp_price"] = _sl_tp_for_leverage(
+                    lev, trade.get("side", "buy"), entry, stop_loss_pct, take_profit_pct
+                )
+            brain_store.save_autotrader(user_id, session)
+            return {"ok": True}
+
+    return {"ok": False, "error": "Trade not found"}

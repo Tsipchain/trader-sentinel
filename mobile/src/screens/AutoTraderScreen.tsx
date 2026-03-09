@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, Switch, TouchableOpacity,
-  Alert, TextInput, ActivityIndicator,
+  Alert, TextInput, ActivityIndicator, Modal,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -16,8 +16,10 @@ const SYMBOL_OPTIONS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USD
 const EXCHANGE_OPTIONS = ['binance', 'bybit', 'okx', 'mexc'];
 const SNAPSHOT_MAX_AGE_MS = 5 * 60 * 1000;
 const SLEEP_POLL_MS = 15000; // poll sleep status every 15s
+const PROTECTION_POLL_MS = 30000; // check protection status every 30s
 
 type SleepTrade = {
+  id?: string;
   symbol: string;
   side: string;
   amount: number;
@@ -30,6 +32,15 @@ type SleepTrade = {
   status: string;
   pnl_pct?: number;
   closed_at?: number;
+};
+
+type ProtectionAction = {
+  id: string;
+  type: 'hedge' | 'safe_order' | 'sl_adjust' | 'tp_adjust' | 'reduce';
+  symbol: string;
+  description: string;
+  timestamp: number;
+  status: 'pending' | 'executed' | 'failed';
 };
 
 type SleepStatus = {
@@ -63,6 +74,18 @@ export default function AutoTraderScreen() {
   const [stoppingSleep, setStoppingSleep] = useState(false);
   const hasShownBrainMisconfigAlert = useRef(false);
   const sleepPollRef = useRef<NodeJS.Timeout | null>(null);
+  const protectionPollRef = useRef<NodeJS.Timeout | null>(null);
+
+  // SL/TP edit modal state
+  const [editingTrade, setEditingTrade] = useState<ActiveTrade | null>(null);
+  const [editSL, setEditSL] = useState('');
+  const [editTP, setEditTP] = useState('');
+  const [savingSlTp, setSavingSlTp] = useState(false);
+
+  // Trade protection state
+  const [protectionEnabled, setProtectionEnabled] = useState(true);
+  const [protectionActions, setProtectionActions] = useState<ProtectionAction[]>([]);
+  const [protectionChecking, setProtectionChecking] = useState(false);
 
   const isEnabled = autoTrader.enabled;
   const cfg = autoTrader.config;
@@ -109,6 +132,80 @@ export default function AutoTraderScreen() {
       if (sleepPollRef.current) clearInterval(sleepPollRef.current);
     };
   }, [sleepStatus.active, isEnabled, pollSleepStatus]);
+
+  // Trade protection: monitor and protect user positions
+  const checkProtection = useCallback(async () => {
+    if (!user?.id || !isEnabled || !protectionEnabled) return;
+    if (!cfg.apiKey || !cfg.apiSecret) return;
+    setProtectionChecking(true);
+    try {
+      const res = await brainAPI.checkTradeProtection({
+        user_id: user.id,
+        exchange: cfg.exchange,
+        api_key: cfg.apiKey,
+        api_secret: cfg.apiSecret,
+        passphrase: cfg.passphrase || undefined,
+        mode: sleepStatus.active ? 'sleep' : 'active',
+        config: {
+          stop_loss_pct: cfg.stopLossPct,
+          take_profit_pct: cfg.takeProfitPct,
+          max_leverage: cfg.maxLeverage,
+          max_total_exposure_pct: cfg.maxTotalExposurePct,
+        },
+      }).catch(() => ({ ok: false, actions: [] }));
+      if (res.ok && res.actions) {
+        setProtectionActions((prev) => {
+          const existing = new Set(prev.map((a) => a.id));
+          const newActions = res.actions.filter((a: ProtectionAction) => !existing.has(a.id));
+          return [...newActions, ...prev].slice(0, 20);
+        });
+      }
+    } catch {
+      // silent
+    } finally {
+      setProtectionChecking(false);
+    }
+  }, [user?.id, isEnabled, protectionEnabled, cfg, sleepStatus.active]);
+
+  useEffect(() => {
+    if (isEnabled && protectionEnabled) {
+      checkProtection();
+      protectionPollRef.current = setInterval(checkProtection, PROTECTION_POLL_MS);
+    }
+    return () => {
+      if (protectionPollRef.current) clearInterval(protectionPollRef.current);
+    };
+  }, [isEnabled, protectionEnabled, checkProtection]);
+
+  // SL/TP editing
+  const openEditSlTp = (trade: ActiveTrade) => {
+    setEditingTrade(trade);
+    setEditSL(String(trade.stopLoss ?? cfg.stopLossPct));
+    setEditTP(String(trade.takeProfit ?? cfg.takeProfitPct));
+  };
+
+  const handleSaveSlTp = async () => {
+    if (!editingTrade || !user?.id) return;
+    const sl = parseFloat(editSL);
+    const tp = parseFloat(editTP);
+    if (isNaN(sl) || isNaN(tp) || sl <= 0 || tp <= 0) {
+      Alert.alert('Invalid', 'Enter valid SL and TP values.');
+      return;
+    }
+    setSavingSlTp(true);
+    try {
+      await brainAPI.updateTradeSlTp(user.id, editingTrade.id, sl, tp).catch(() => {});
+      // Update local state
+      setAutoTrader({
+        activeTrades: autoTrader.activeTrades.map((t) =>
+          t.id === editingTrade.id ? { ...t, stopLoss: sl, takeProfit: tp } : t
+        ),
+      });
+      setEditingTrade(null);
+    } finally {
+      setSavingSlTp(false);
+    }
+  };
 
   const refreshStatus = useCallback(async () => {
     setLoadingStatus(true);
@@ -509,10 +606,11 @@ export default function AutoTraderScreen() {
         {sleepStatus.active && openSleepTrades.length > 0 && (
           <>
             <Text style={styles.sectionTitle}>Sleep Mode Open Trades</Text>
-            {openSleepTrades.map((trade, idx) => {
+            {openSleepTrades.map((trade) => {
               const isLong = trade.side === 'buy';
+              const tradeKey = trade.id || `sleep-${trade.symbol}-${trade.opened_at}`;
               return (
-                <View key={`sleep-${idx}`} style={[styles.tradeCard, { borderLeftWidth: 3, borderLeftColor: isLong ? COLORS.success : COLORS.error }]}>
+                <View key={tradeKey} style={[styles.tradeCard, { borderLeftWidth: 3, borderLeftColor: isLong ? COLORS.success : COLORS.error }]}>
                   <View style={styles.tradeRow}>
                     <View style={[styles.sideBadge, {
                       backgroundColor: isLong ? COLORS.success + '22' : COLORS.error + '22',
@@ -531,9 +629,17 @@ export default function AutoTraderScreen() {
                       <Text style={[styles.tradePnl, { color: '#8B5CF6' }]}>
                         {((trade.confidence ?? 0) * 100).toFixed(0)}% conf
                       </Text>
-                      <Text style={styles.tradeDetail}>
-                        SL ${(trade.sl_price ?? 0).toFixed(2)}
-                      </Text>
+                    </View>
+                  </View>
+                  {/* SL/TP for sleep trades */}
+                  <View style={styles.slTpRow}>
+                    <View style={styles.slTpItem}>
+                      <Text style={[styles.slTpLabel, { color: COLORS.error }]}>SL</Text>
+                      <Text style={[styles.slTpValue, { color: COLORS.error }]}>${(trade.sl_price ?? 0).toFixed(2)}</Text>
+                    </View>
+                    <View style={styles.slTpItem}>
+                      <Text style={[styles.slTpLabel, { color: COLORS.success }]}>TP</Text>
+                      <Text style={[styles.slTpValue, { color: COLORS.success }]}>${(trade.tp_price ?? 0).toFixed(2)}</Text>
                     </View>
                   </View>
                 </View>
@@ -546,11 +652,12 @@ export default function AutoTraderScreen() {
         {closedSleepTrades.length > 0 && (
           <>
             <Text style={styles.sectionTitle}>Sleep Mode Closed Trades</Text>
-            {closedSleepTrades.slice(-5).map((trade, idx) => {
+            {closedSleepTrades.slice(-5).map((trade) => {
               const pnl = trade.pnl_pct ?? 0;
               const pnlColor = pnl >= 0 ? COLORS.success : COLORS.error;
+              const tradeKey = trade.id || `closed-${trade.symbol}-${trade.closed_at ?? trade.opened_at}`;
               return (
-                <View key={`closed-${idx}`} style={[styles.tradeCard, { opacity: 0.8 }]}>
+                <View key={tradeKey} style={[styles.tradeCard, { opacity: 0.8 }]}>
                   <View style={styles.tradeRow}>
                     <View style={[styles.sideBadge, { backgroundColor: pnlColor + '22' }]}>
                       <Text style={[styles.sideText, { color: pnlColor }]}>
@@ -567,6 +674,17 @@ export default function AutoTraderScreen() {
                       {pnl >= 0 ? '+' : ''}{pnl.toFixed(1)}%
                     </Text>
                   </View>
+                  {/* SL/TP for closed sleep trades */}
+                  <View style={styles.slTpRow}>
+                    <View style={styles.slTpItem}>
+                      <Text style={[styles.slTpLabel, { color: COLORS.textMuted }]}>SL</Text>
+                      <Text style={[styles.slTpValue, { color: COLORS.textMuted }]}>${(trade.sl_price ?? 0).toFixed(2)}</Text>
+                    </View>
+                    <View style={styles.slTpItem}>
+                      <Text style={[styles.slTpLabel, { color: COLORS.textMuted }]}>TP</Text>
+                      <Text style={[styles.slTpValue, { color: COLORS.textMuted }]}>${(trade.tp_price ?? 0).toFixed(2)}</Text>
+                    </View>
+                  </View>
                 </View>
               );
             })}
@@ -579,7 +697,7 @@ export default function AutoTraderScreen() {
             <Text style={styles.sectionTitle}>Sleep Mode Log</Text>
             <View style={styles.logCard}>
               {sleepLog.slice(-8).map((entry, idx) => (
-                <Text key={idx} style={styles.logEntry}>{entry}</Text>
+                <Text key={`log-${sleepLog.length - 8 + idx}-${entry.slice(0, 20)}`} style={styles.logEntry}>{entry}</Text>
               ))}
             </View>
           </>
@@ -728,6 +846,54 @@ export default function AutoTraderScreen() {
           </View>
         </View>
 
+        {/* Trade Protection Controls */}
+        {isEnabled && (
+          <View style={styles.card}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: SPACING.sm }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <Ionicons name="shield-checkmark" size={18} color={COLORS.success} />
+                <Text style={[styles.sectionTitle, { marginLeft: 8, marginBottom: 0, marginTop: 0 }]}>
+                  Trade Protection
+                </Text>
+              </View>
+              <Switch
+                value={protectionEnabled}
+                onValueChange={setProtectionEnabled}
+                trackColor={{ false: COLORS.surface, true: COLORS.success + '60' }}
+                thumbColor={protectionEnabled ? COLORS.success : COLORS.textMuted}
+              />
+            </View>
+            <Text style={{ color: COLORS.textSecondary, fontSize: FONT_SIZES.xs, marginBottom: SPACING.sm, lineHeight: 16 }}>
+              {sleepStatus.active
+                ? 'Sleep Guard: Sentinel monitors your positions and applies hedge/safe orders if markets move against you.'
+                : 'Active Guard: Sentinel watches for anomalies and protects existing positions with SL adjustments and hedging.'}
+            </Text>
+            {protectionChecking && (
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <ActivityIndicator size="small" color={COLORS.info} />
+                <Text style={{ color: COLORS.textMuted, fontSize: FONT_SIZES.xs }}>Scanning positions...</Text>
+              </View>
+            )}
+            {protectionActions.length > 0 && (
+              <View style={{ marginTop: SPACING.sm }}>
+                <Text style={{ color: COLORS.textSecondary, fontSize: FONT_SIZES.xs, fontWeight: '600', marginBottom: 4 }}>Recent Actions:</Text>
+                {protectionActions.slice(0, 5).map((action) => (
+                  <View key={action.id} style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 3, gap: 6 }}>
+                    <Ionicons
+                      name={action.type === 'hedge' ? 'swap-horizontal' : action.type === 'safe_order' ? 'layers' : 'trending-down'}
+                      size={12}
+                      color={action.status === 'executed' ? COLORS.success : action.status === 'failed' ? COLORS.error : COLORS.warning}
+                    />
+                    <Text style={{ color: COLORS.textMuted, fontSize: 10, flex: 1, fontFamily: 'monospace' as any }}>
+                      [{action.type.toUpperCase()}] {action.symbol}: {action.description}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            )}
+          </View>
+        )}
+
         {autoTrader.activeTrades.length > 0 && (
           <>
             <Text style={styles.sectionTitle}>Active Trades</Text>
@@ -736,13 +902,17 @@ export default function AutoTraderScreen() {
               const entryPrice = trade.entryPrice ?? 0;
               const currentPrice = trade.currentPrice ?? 0;
               const pnlColor = pnl >= 0 ? COLORS.success : COLORS.error;
+              const sl = trade.stopLoss ?? cfg.stopLossPct;
+              const tp = trade.takeProfit ?? cfg.takeProfitPct;
               return (
                 <View key={trade.id} style={styles.tradeCard}>
                   <View style={styles.tradeRow}>
                     <View style={[styles.sideBadge, {
                       backgroundColor: trade.side === 'BUY' ? COLORS.success + '22' : COLORS.error + '22',
                     }]}>
-                      <Text style={[styles.sideText, { color: pnlColor }]}>{trade.side}</Text>
+                      <Text style={[styles.sideText, { color: trade.side === 'BUY' ? COLORS.success : COLORS.error }]}>
+                        {trade.side === 'BUY' ? 'LONG' : 'SHORT'}
+                      </Text>
                     </View>
                     <View style={styles.tradeBody}>
                       <Text style={styles.tradeSymbol}>{trade.symbol}</Text>
@@ -754,6 +924,24 @@ export default function AutoTraderScreen() {
                       </Text>
                       <Text style={styles.tradeDetail}>${currentPrice.toFixed(2)}</Text>
                     </View>
+                  </View>
+                  {/* SL/TP Display */}
+                  <View style={styles.slTpRow}>
+                    <View style={styles.slTpItem}>
+                      <Text style={[styles.slTpLabel, { color: COLORS.error }]}>SL</Text>
+                      <Text style={[styles.slTpValue, { color: COLORS.error }]}>{sl}%</Text>
+                    </View>
+                    <View style={styles.slTpItem}>
+                      <Text style={[styles.slTpLabel, { color: COLORS.success }]}>TP</Text>
+                      <Text style={[styles.slTpValue, { color: COLORS.success }]}>{tp}%</Text>
+                    </View>
+                    <TouchableOpacity
+                      style={styles.editSlTpBtn}
+                      onPress={() => openEditSlTp(trade)}
+                    >
+                      <Ionicons name="pencil" size={14} color={COLORS.primary} />
+                      <Text style={styles.editSlTpText}>Edit SL/TP</Text>
+                    </TouchableOpacity>
                   </View>
                   <TouchableOpacity
                     style={styles.closeBtn}
@@ -770,15 +958,103 @@ export default function AutoTraderScreen() {
           </>
         )}
 
+        {/* Sentinel Observations for active trades */}
+        {isEnabled && autoTrader.activeTrades.length > 0 && (
+          <View style={styles.card}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: SPACING.sm }}>
+              <Ionicons name="eye" size={18} color={COLORS.info} />
+              <Text style={[styles.sectionTitle, { marginLeft: 8, marginBottom: 0, marginTop: 0 }]}>
+                Sentinel Observations
+              </Text>
+            </View>
+            {autoTrader.activeTrades.map((trade) => {
+              const pnl = trade.pnl ?? 0;
+              const leverageRisk = (trade as any).leverage >= 50 ? 'EXTREME' : (trade as any).leverage >= 20 ? 'HIGH' : 'MODERATE';
+              return (
+                <View key={`obs-${trade.id}`} style={{ marginBottom: 4 }}>
+                  <Text style={{ color: COLORS.textSecondary, fontSize: FONT_SIZES.xs }}>
+                    <Text style={{ fontWeight: '700', color: pnl >= 5 ? COLORS.success : pnl <= -3 ? COLORS.error : COLORS.textSecondary }}>
+                      {trade.symbol}
+                    </Text>
+                    {' '}
+                    {pnl >= 5 ? 'Consider taking partial profit.' : pnl <= -3 ? 'Position at risk — tighten SL.' : 'Position within parameters.'}
+                    {leverageRisk === 'EXTREME' && ' Leverage risk: EXTREME.'}
+                  </Text>
+                </View>
+              );
+            })}
+          </View>
+        )}
+
         <View style={styles.infoBox}>
           <Ionicons name="information-circle-outline" size={16} color={COLORS.info} />
           <Text style={styles.infoText}>
-            AutoTrader uses Sentinel AI&apos;s market analysis and executes via your exchange API. Sleep Mode runs autonomously for 8 hours with TA-driven entries. You can stop it or close positions at any time.
+            AutoTrader uses Sentinel AI&apos;s market analysis and executes via your exchange API. Sleep Mode runs autonomously for 8 hours with TA-driven entries. Trade Protection monitors your positions and applies hedge orders or SL adjustments when anomalies are detected. You can stop it or close positions at any time.
           </Text>
         </View>
 
         <View style={{ height: 32 }} />
       </ScrollView>
+
+      {/* SL/TP Edit Modal */}
+      <Modal
+        visible={!!editingTrade}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setEditingTrade(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>
+                Edit SL/TP — {editingTrade?.symbol}
+              </Text>
+              <TouchableOpacity onPress={() => setEditingTrade(null)}>
+                <Ionicons name="close" size={24} color={COLORS.text} />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={{ color: COLORS.textSecondary, fontSize: FONT_SIZES.sm, marginBottom: SPACING.md }}>
+              {editingTrade?.side === 'BUY' ? 'LONG' : 'SHORT'} @ ${(editingTrade?.entryPrice ?? 0).toFixed(2)} | Current ${(editingTrade?.currentPrice ?? 0).toFixed(2)}
+            </Text>
+
+            <Text style={styles.fieldLabel}>Stop Loss %</Text>
+            <TextInput
+              style={styles.paramInput}
+              value={editSL}
+              onChangeText={setEditSL}
+              keyboardType="numeric"
+              placeholder="e.g. 2"
+              placeholderTextColor={COLORS.textMuted}
+            />
+
+            <Text style={[styles.fieldLabel, { marginTop: SPACING.md }]}>Take Profit %</Text>
+            <TextInput
+              style={styles.paramInput}
+              value={editTP}
+              onChangeText={setEditTP}
+              keyboardType="numeric"
+              placeholder="e.g. 4"
+              placeholderTextColor={COLORS.textMuted}
+            />
+
+            <TouchableOpacity
+              style={[styles.sleepBtn, { marginTop: SPACING.lg, backgroundColor: COLORS.primary }]}
+              onPress={handleSaveSlTp}
+              disabled={savingSlTp}
+            >
+              {savingSlTp ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <>
+                  <Ionicons name="checkmark" size={18} color="#fff" />
+                  <Text style={styles.sleepBtnText}>Save SL/TP</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -883,5 +1159,67 @@ const styles = StyleSheet.create({
     fontFamily: 'monospace' as any,
     lineHeight: 16,
     paddingVertical: 1,
+  },
+  slTpRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: SPACING.sm,
+    paddingTop: SPACING.sm,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+    gap: SPACING.md,
+  },
+  slTpItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  slTpLabel: {
+    fontSize: FONT_SIZES.xs,
+    fontWeight: '700',
+  },
+  slTpValue: {
+    fontSize: FONT_SIZES.xs,
+    fontWeight: '600',
+  },
+  editSlTpBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginLeft: 'auto',
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: 4,
+    borderRadius: BORDER_RADIUS.sm,
+    backgroundColor: COLORS.primary + '15',
+    borderWidth: 1,
+    borderColor: COLORS.primary + '30',
+  },
+  editSlTpText: {
+    color: COLORS.primary,
+    fontSize: FONT_SIZES.xs,
+    fontWeight: '600',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    justifyContent: 'flex-end',
+  },
+  modalContent: {
+    backgroundColor: COLORS.backgroundCard,
+    borderTopLeftRadius: BORDER_RADIUS.xl,
+    borderTopRightRadius: BORDER_RADIUS.xl,
+    padding: SPACING.lg,
+    paddingBottom: SPACING.xl,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: SPACING.md,
+  },
+  modalTitle: {
+    color: COLORS.text,
+    fontSize: FONT_SIZES.lg,
+    fontWeight: '700',
   },
 });
