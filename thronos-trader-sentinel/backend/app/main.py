@@ -1037,6 +1037,39 @@ def brain_sleep_status(user_id: str, _: str = Security(verify_api_key)):
     return {"ok": True, **sleep_trader.get_sleep_status(user_id)}
 
 
+@app.post("/api/brain/autotrader/update-sl-tp")
+async def brain_update_sl_tp(payload: dict = Body(default_factory=dict), _: str = Security(verify_api_key)):
+    """Update SL/TP for a specific active trade."""
+    user_id = payload.get("user_id")
+    trade_id = payload.get("trade_id")
+    sl = payload.get("stop_loss_pct")
+    tp = payload.get("take_profit_pct")
+    if not user_id or not trade_id:
+        raise HTTPException(400, "user_id and trade_id required")
+    if sl is None or tp is None:
+        raise HTTPException(400, "stop_loss_pct and take_profit_pct required")
+    result = await sleep_trader.update_trade_sl_tp(user_id, trade_id, float(sl), float(tp))
+    return result
+
+
+@app.post("/api/brain/autotrader/protection-check")
+async def brain_protection_check(payload: dict = Body(default_factory=dict), _: str = Security(verify_api_key)):
+    """Check and apply trade protection for user's positions."""
+    user_id = payload.get("user_id")
+    exchange = payload.get("exchange")
+    api_key = payload.get("api_key")
+    api_secret = payload.get("api_secret")
+    passphrase = payload.get("passphrase")
+    mode = payload.get("mode", "active")
+    config = payload.get("config", {})
+    if not user_id or not exchange or not api_key or not api_secret:
+        raise HTTPException(400, "user_id, exchange, api_key, and api_secret required")
+    result = await sleep_trader.check_trade_protection(
+        user_id, exchange, api_key, api_secret, passphrase, mode, config,
+    )
+    return result
+
+
 @app.get("/api/tts")
 async def tts(text: str = Query(...), lang: str = Query("en-US"), voice: str = Query("en-US-Neural2-D")):
     if not settings.google_tts_enabled:

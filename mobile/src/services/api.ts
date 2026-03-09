@@ -341,6 +341,9 @@ export interface ActiveTrade {
   quantity: number;
   pnl: number;           // % unrealised P&L
   openedAt: number;      // unix ms
+  stopLoss?: number;     // % SL
+  takeProfit?: number;   // % TP
+  leverage?: number;
 }
 
 export interface TradeRecord {
@@ -708,6 +711,45 @@ export const brainAPI = {
     log?: string[];
   }> {
     const response = await brainGet(`/api/brain/autotrader/sleep-status/${userId}`);
+    return response;
+  },
+
+  async updateTradeSlTp(userId: string, tradeId: string, stopLoss: number, takeProfit: number): Promise<{ ok: boolean }> {
+    const response = await brainPost('/api/brain/autotrader/update-sl-tp', {
+      user_id: userId,
+      trade_id: tradeId,
+      stop_loss_pct: stopLoss,
+      take_profit_pct: takeProfit,
+    });
+    return response;
+  },
+
+  async checkTradeProtection(params: {
+    user_id: string;
+    exchange: string;
+    api_key: string;
+    api_secret: string;
+    passphrase?: string;
+    mode: 'active' | 'sleep';
+    config: {
+      stop_loss_pct: number;
+      take_profit_pct: number;
+      max_leverage: number;
+      max_total_exposure_pct: number;
+    };
+  }): Promise<{
+    ok: boolean;
+    actions: Array<{
+      id: string;
+      type: 'hedge' | 'safe_order' | 'sl_adjust' | 'tp_adjust' | 'reduce';
+      symbol: string;
+      description: string;
+      timestamp: number;
+      status: 'pending' | 'executed' | 'failed';
+    }>;
+    risk_level?: string;
+  }> {
+    const response = await brainPost('/api/brain/autotrader/protection-check', params);
     return response;
   },
 
