@@ -640,7 +640,7 @@ export default function AutoTraderScreen() {
             <Text style={styles.sectionTitle}>Sleep Mode Open Trades</Text>
             {openSleepTrades.map((trade, idx) => {
               const isLong = trade.side === 'buy';
-              const tradeKey = trade.id ?? `sleep-${trade.symbol}-${trade.opened_at}-${idx}`;
+              const tradeKey = `${trade.id ?? `sleep-${trade.symbol}-${trade.opened_at}`}-${idx}`;
               return (
                 <View key={tradeKey} style={[styles.tradeCard, { borderLeftWidth: 3, borderLeftColor: isLong ? COLORS.success : COLORS.error }]}>
                   <View style={styles.tradeRow}>
@@ -687,7 +687,7 @@ export default function AutoTraderScreen() {
             {closedSleepTrades.slice(-5).map((trade, idx) => {
               const pnl = trade.pnl_pct ?? 0;
               const pnlColor = pnl >= 0 ? COLORS.success : COLORS.error;
-              const tradeKey = trade.id ?? `closed-${trade.symbol}-${trade.closed_at ?? trade.opened_at}-${idx}`;
+              const tradeKey = `${trade.id ?? `closed-${trade.symbol}-${trade.closed_at ?? trade.opened_at}`}-${idx}`;
               return (
                 <View key={tradeKey} style={[styles.tradeCard, { opacity: 0.8 }]}>
                   <View style={styles.tradeRow}>
@@ -917,8 +917,8 @@ export default function AutoTraderScreen() {
             {protectionActions.length > 0 && (
               <View style={{ marginTop: SPACING.sm }}>
                 <Text style={{ color: COLORS.textSecondary, fontSize: FONT_SIZES.xs, fontWeight: '600', marginBottom: 4 }}>Recent Actions:</Text>
-                {protectionActions.slice(0, 5).map((action) => (
-                  <View key={action.id} style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 3, gap: 6 }}>
+                {protectionActions.slice(0, 5).map((action, idx) => (
+                  <View key={`${action.id}-${action.symbol}-${idx}`} style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 3, gap: 6 }}>
                     <Ionicons
                       name={action.type === 'hedge' ? 'swap-horizontal' : action.type === 'safe_order' ? 'layers' : 'trending-down'}
                       size={12}
@@ -945,7 +945,7 @@ export default function AutoTraderScreen() {
               const sl = trade.stopLoss ?? cfg.stopLossPct;
               const tp = trade.takeProfit ?? cfg.takeProfitPct;
               return (
-                <View key={trade.id ?? `${trade.symbol}-${trade.openedAt || tradeIdx}-${tradeIdx}`} style={styles.tradeCard}>
+                <View key={`${trade.id ?? `${trade.symbol}-${trade.openedAt || tradeIdx}`}-${tradeIdx}`} style={styles.tradeCard}>
                   <View style={styles.tradeRow}>
                     <View style={[styles.sideBadge, {
                       backgroundColor: trade.side === 'BUY' ? COLORS.success + '22' : COLORS.error + '22',
