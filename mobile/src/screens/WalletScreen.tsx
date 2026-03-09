@@ -93,7 +93,9 @@ export default function WalletScreen() {
           alerts.push({
             symbol: sym,
             riskScore: riskRes?.composite_score ?? 0,
-            riskLevel: riskRes?.recommendation ?? 'N/A',
+            riskLevel: typeof riskRes?.recommendation === 'object'
+              ? (riskRes.recommendation?.level ?? 'N/A')
+              : (riskRes?.recommendation ?? 'N/A'),
             rsiSignal: techRes?.rsi_signal ?? '',
             rsi: techRes?.rsi_14 ?? 0,
             price: techRes?.current_price ?? 0,
