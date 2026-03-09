@@ -29,6 +29,23 @@ ENTRY_COOLDOWN_S = 180       # min 3 min between entries on same symbol
 MIN_CONFIDENCE = 0.60        # brain confidence threshold
 
 
+def _is_contract_activation_error(error_text: str) -> bool:
+    msg = (error_text or '').lower()
+    return (
+        'contract not activated' in msg
+        or 'code\":1002' in msg
+        or "'code':1002" in msg
+        or '"code":1002' in msg
+    )
+
+
+def _canonical_symbol(symbol: str) -> str:
+    s = (symbol or '').strip()
+    return s.replace(':USDT', '')
+
+
+
+
 def _sl_tp_for_leverage(leverage: float, side: str, price: float, sl_pct: float, tp_pct: float):
     """Calculate SL/TP prices accounting for leverage."""
     # Tighter SL for higher leverage
@@ -195,7 +212,7 @@ async def _manage_open_positions(
     sleep_trade_symbols = {t["symbol"] for t in sleep_trades if t.get("status") == "open"}
 
     for pos in positions:
-        sym = pos.get("symbol", "")
+        sym = _canonical_symbol(pos.get("symbol", ""))
         if sym not in sleep_trade_symbols:
             continue  # not our trade
 
@@ -299,6 +316,7 @@ async def run_sleep_session(
         "status": "running",
     }
     session["sleep_trades"] = []
+    session["blocked_symbols"] = []
     brain_store.save_autotrader(user_id, session)
     _log_sleep(user_id, f"Sleep Mode started — {len(symbols)} symbols, {max_leverage}x max leverage, {margin_mode} margin, futures")
 
@@ -349,6 +367,7 @@ async def run_sleep_session(
             is_opening_range = session_bias.get("opening_range", False)
 
             # 3. Scan for new entries if we have capacity
+            blocked_symbols = {_canonical_symbol(sym) for sym in session.get("blocked_symbols", [])}
             if len(open_trades) < max_open:
                 # Get portfolio equity
                 try:
@@ -371,6 +390,9 @@ async def run_sleep_session(
 
                 if exposure_ok:
                     for symbol in symbols:
+                        if _canonical_symbol(symbol) in blocked_symbols:
+                            continue
+
                         # Cooldown check
                         last_entry = last_entry_by_symbol.get(symbol, 0)
                         if time.time() - last_entry < ENTRY_COOLDOWN_S:
@@ -489,7 +511,16 @@ async def run_sleep_session(
                                     f"Conf {confidence:.0%} | Vol: {vol_label}"
                                 )
                             else:
-                                _log_sleep(user_id, f"Order failed for {symbol}: {order.get('error', 'unknown')}")
+                                err_msg = str(order.get("error", "unknown"))
+                                _log_sleep(user_id, f"Order failed for {symbol}: {err_msg}")
+                                if _is_contract_activation_error(err_msg):
+                                    blocked_symbols.add(_canonical_symbol(symbol))
+                                    session["blocked_symbols"] = sorted(blocked_symbols)
+                                    _log_sleep(
+                                        user_id,
+                                        f"Disabled {symbol} for this session: contract not activated on exchange. Activate it manually, then restart Sleep Mode.",
+                                    )
+                                    brain_store.save_autotrader(user_id, session)
 
                         except Exception as e:
                             _log_sleep(user_id, f"Execution error on {symbol}: {str(e)[:100]}")
@@ -621,6 +652,9 @@ async def check_trade_protection(
     """Analyze open positions and return protection actions."""
     actions: list[dict] = []
     risk_level = "LOW"
+    session = brain_store.load_autotrader(user_id) or {}
+    blocked_symbols = {_canonical_symbol(sym) for sym in session.get("blocked_symbols", [])}
+    blocked_updated = False
 
     try:
         positions = await connector.fetch_open_positions(
@@ -645,7 +679,9 @@ async def check_trade_protection(
     total_unrealized = 0.0
 
     for pos in positions:
-        sym = pos.get("symbol", "")
+        sym = _canonical_symbol(pos.get("symbol", ""))
+        if sym in blocked_symbols:
+            continue
         pnl_pct = pos.get("pnlPct", 0)
         leverage = pos.get("leverage", 1)
         notional = pos.get("notional", 0)
@@ -686,6 +722,9 @@ async def check_trade_protection(
                         passphrase,
                     )
                     actions[-1]["status"] = "executed" if result.get("ok") else "failed"
+                    if not result.get("ok") and _is_contract_activation_error(str(result.get("error", ""))):
+                        blocked_symbols.add(sym)
+                        blocked_updated = True
                 except Exception as e:
                     actions[-1]["status"] = "failed"
                     log.warning("[protection] hedge failed: %s", e)
@@ -721,6 +760,9 @@ async def check_trade_protection(
                     passphrase, reduce_only=True,
                 )
                 actions[-1]["status"] = "executed" if result.get("ok") else "failed"
+                if not result.get("ok") and _is_contract_activation_error(str(result.get("error", ""))):
+                    blocked_symbols.add(sym)
+                    blocked_updated = True
             except Exception as e:
                 actions[-1]["status"] = "failed"
                 log.warning("[protection] reduce failed: %s", e)
@@ -754,9 +796,19 @@ async def check_trade_protection(
                     safe_amount, passphrase,
                 )
                 actions[-1]["status"] = "executed" if result.get("ok") else "failed"
+                if not result.get("ok") and _is_contract_activation_error(str(result.get("error", ""))):
+                    blocked_symbols.add(sym)
+                    blocked_updated = True
             except Exception as e:
                 actions[-1]["status"] = "failed"
                 log.warning("[protection] safe order failed: %s", e)
+
+    if blocked_updated:
+        session["blocked_symbols"] = sorted(blocked_symbols)
+        session.setdefault("log", []).append(
+            f"Protection blocked symbols this session (contract activation required): {', '.join(sorted(blocked_symbols))}"
+        )
+        brain_store.save_autotrader(user_id, session)
 
     return {
         "ok": True,

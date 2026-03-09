@@ -420,6 +420,27 @@ export interface PortfolioSnapshot {
 const _BRAIN_SERVICE_CHECK_TTL_MS = 60000;
 let _brainServiceCheckCache: { at: number; value: BrainServiceCheck } | null = null;
 
+
+const normalizeActiveTrade = (trade: Record<string, any>): ActiveTrade => {
+  const sideRaw = String(trade.side ?? '').toLowerCase();
+  const normalizedSide: 'BUY' | 'SELL' =
+    sideRaw === 'long' || sideRaw === 'buy' ? 'BUY' : 'SELL';
+
+  return {
+    id: String(trade.id ?? `${trade.symbol ?? 'unknown'}-${trade.timestamp ?? trade.opened_at ?? Date.now()}`),
+    symbol: String(trade.symbol ?? ''),
+    side: normalizedSide,
+    entryPrice: Number(trade.entryPrice ?? trade.entry_price ?? 0),
+    currentPrice: Number(trade.currentPrice ?? trade.current_price ?? trade.markPrice ?? trade.mark_price ?? 0),
+    quantity: Number(trade.quantity ?? trade.contracts ?? trade.amount ?? 0),
+    pnl: Number(trade.pnl ?? trade.pnlPct ?? trade.pnl_pct ?? 0),
+    openedAt: Number(trade.openedAt ?? trade.opened_at ?? trade.timestamp ?? Date.now()),
+    stopLoss: trade.stopLoss ?? trade.stop_loss ?? trade.stop_loss_pct,
+    takeProfit: trade.takeProfit ?? trade.take_profit ?? trade.take_profit_pct,
+    leverage: Number(trade.leverage ?? 1),
+  };
+};
+
 export const brainAPI = {
   async checkHealth(): Promise<{ ok: boolean; ts?: number }> {
     const response = await brainGet('/health');
@@ -548,7 +569,11 @@ export const brainAPI = {
 
   async getAutoTraderStatus(userId: string): Promise<AutoTraderStatus> {
     const response = await brainGet(`/api/brain/autotrader/${userId}`);
-    return response;
+    const rawTrades = Array.isArray(response.active_trades) ? response.active_trades : [];
+    return {
+      ...response,
+      active_trades: rawTrades.map((trade: Record<string, any>) => normalizeActiveTrade(trade)),
+    };
   },
 
   async enableAutoTrader(params: {
