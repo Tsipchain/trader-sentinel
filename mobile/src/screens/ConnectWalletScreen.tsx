@@ -32,6 +32,8 @@ import { CONFIG } from '../config';
 
 type NavigationProp = NativeStackNavigationProp<RootStackParamList, 'ConnectWallet'>;
 
+type ThronosModalMode = 'choose' | 'create' | 'import';
+
 interface WalletOption {
   id: string;
   name: string;
