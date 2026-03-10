@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import {
   View,
   Text,
@@ -261,19 +261,29 @@ export default function SignalsScreen() {
         return;
       }
 
-      const cached = marketData[selectedSignal.symbol];
+      // Signal symbol might be "PEPE" or "PEPE/USDT" — try both
+      const rawSym = selectedSignal.symbol;
+      const fullSym = rawSym.includes('/') ? rawSym : `${rawSym}/USDT`;
+      const shortSym = rawSym.replace('/USDT', '');
+
+      const cached = marketData[fullSym] || marketData[shortSym] || marketData[rawSym];
       const cachedRef = cached?.bestAsk || cached?.bestBid || cached?.prices?.[0]?.price || null;
       if (cachedRef) {
         setModalRefPrice(cachedRef);
         return;
       }
 
+      // Also try extracting price from the signal message itself (e.g. "at $0.00001234")
+      const priceMatch = selectedSignal.message.match(/\$([0-9]+\.?[0-9]*)/);
+      const msgPrice = priceMatch ? parseFloat(priceMatch[1]) : null;
+
       try {
-        const snapshot = await marketAPI.getSnapshot(selectedSignal.symbol);
+        const snapshot = await marketAPI.getSnapshot(fullSym);
         const fresh = snapshot.venues.find((v) => v.last !== null)?.last ?? null;
-        if (!cancelled) setModalRefPrice(fresh);
+        if (!cancelled) setModalRefPrice(fresh || msgPrice);
       } catch {
-        if (!cancelled) setModalRefPrice(null);
+        // Fallback: use price from the signal message
+        if (!cancelled) setModalRefPrice(msgPrice);
       }
     };
 
@@ -285,9 +295,33 @@ export default function SignalsScreen() {
 
   const inferTradePlan = useCallback((signal: Signal) => {
     const isShort = /short|defensive|bear/i.test(signal.message);
+    const isPositionAlert = signal.venues?.includes('sentinel-position') || signal.venues?.includes('sentinel-portfolio');
     const base = Math.abs(signal.profit ?? 1.2);
     const highVolatility = /critical|caution|warning|volatile|risk\s[7-9]|risk\s10/i.test(signal.message);
     const liquidityTight = /limited|early listing|low liquidity|thin/i.test(signal.message);
+    const isHighLeverage = /\d{3}x|[1-9]\d{2}x/.test(signal.message); // 100x+
+    const isExtremeLeerage = /[2-3]\d{2}x/.test(signal.message); // 200x-300x
+
+    // Extract leverage from position alerts (e.g., "145x cross", "235x")
+    const leverageMatch = signal.message.match(/(\d+)x\s*(cross|isolated)?/i);
+    const detectedLeverage = leverageMatch ? parseInt(leverageMatch[1], 10) : 0;
+
+    // Dynamic leverage suggestion based on signal context
+    let leverage: string;
+    if (isPositionAlert && detectedLeverage > 0) {
+      // For position alerts, show the actual leverage and suggest adjustment
+      leverage = `Current: ${detectedLeverage}x`;
+    } else if (isExtremeLeerage) {
+      leverage = '50x-150x (scale down from current extreme)';
+    } else if (isHighLeverage) {
+      leverage = '25x-75x (reduce from high leverage zone)';
+    } else if (liquidityTight) {
+      leverage = '5x-20x (thin liquidity — lower exposure)';
+    } else if (highVolatility) {
+      leverage = '10x-50x (volatility elevated — manage size)';
+    } else {
+      leverage = '20x-100x (adjust based on conviction & structure)';
+    }
 
     const entry = highVolatility
       ? 'Scale-in around key S/R zones (avoid full-size market entry)'
@@ -309,10 +343,27 @@ export default function SignalsScreen() {
       return isShort ? refPrice * (1 - factor) : refPrice * (1 + factor);
     };
 
+    let note: string;
+    if (isPositionAlert) {
+      if (detectedLeverage >= 200) {
+        note = `Extreme leverage (${detectedLeverage}x) — use incremental leverage adjustments to protect position. Trail stop at breakeven once in profit.`;
+      } else if (detectedLeverage >= 100) {
+        note = `High leverage (${detectedLeverage}x) — tighten stops progressively. Consider partial close at TP1 to reduce risk.`;
+      } else {
+        note = 'Position management signal — evaluate current exposure and adjust accordingly.';
+      }
+    } else if (liquidityTight) {
+      note = 'Lower leverage due to thinner liquidity / higher slippage risk.';
+    } else if (highVolatility) {
+      note = 'Volatility elevated — scale in, use tighter stops, and consider splitting across leverage tiers.';
+    } else {
+      note = 'Standard risk profile. Adjust leverage based on conviction — increase on strong structure, reduce on uncertainty.';
+    }
+
     return {
       side: isShort ? 'SHORT bias' : 'LONG bias',
       entry,
-      entryPrice: refPrice ? refPrice.toFixed(4) : 'N/A',
+      entryPrice: refPrice ? (refPrice >= 1 ? `$${refPrice.toFixed(4)}` : `$${refPrice.toPrecision(4)}`) : 'N/A',
       sl: `${sl.toFixed(2)}%`,
       tp1: `${tp1.toFixed(2)}%`,
       tp2: `${tp2.toFixed(2)}%`,
@@ -321,11 +372,7 @@ export default function SignalsScreen() {
       tp2Price: toAbsPrice(tp2, 'tp'),
       leverage,
       validationWindow,
-      note: liquidityTight
-        ? 'Lower leverage due to thinner liquidity / higher slippage risk.'
-        : (highVolatility
-          ? 'Reduce size and tighten execution because volatility is elevated.'
-          : 'Standard risk profile; re-check structure before adding size.'),
+      note,
     };
   }, [marketData, modalRefPrice]);
 
@@ -348,10 +395,10 @@ export default function SignalsScreen() {
     setRefreshing(false);
   }, [fetchSignals]);
 
-  const filteredSignals = signals.filter((s) => {
+  const filteredSignals = useMemo(() => signals.filter((s) => {
     if (filter === 'all') return true;
     return s.type === filter;
-  });
+  }), [signals, filter]);
 
   const getSignalIcon = (type: Signal['type']) => {
     switch (type) {
@@ -377,7 +424,7 @@ export default function SignalsScreen() {
     return new Date(timestamp).toLocaleDateString();
   };
 
-  const renderSignal = ({ item }: { item: Signal }) => {
+  const renderSignal = useCallback(({ item }: { item: Signal }) => {
     const icon = getSignalIcon(item.type);
 
     return (
@@ -409,7 +456,7 @@ export default function SignalsScreen() {
         </View>
       </TouchableOpacity>
     );
-  };
+  }, []);
 
   const FilterButton = ({ type, label }: { type: SignalType; label: string }) => (
     <TouchableOpacity
@@ -446,9 +493,9 @@ export default function SignalsScreen() {
       {/* Subscription Notice */}
       {subscription === 'free' && (
         <View style={styles.subscriptionNotice}>
-          <Ionicons name="lock-closed" size={16} color={COLORS.warning} />
+          <Ionicons name="information-circle-outline" size={16} color={COLORS.info} />
           <Text style={styles.subscriptionNoticeText}>
-            Free tier: 1 directional signal + arbitrage. Upgrade for more pairs/faster updates.
+            Arbitrage scanning: all pairs. Directional signals: BTC only. Upgrade for more pairs & AI insights.
           </Text>
         </View>
       )}
@@ -457,7 +504,7 @@ export default function SignalsScreen() {
         <View style={styles.subscriptionNotice}>
           <Ionicons name="information-circle-outline" size={16} color={COLORS.info} />
           <Text style={styles.subscriptionNoticeText}>
-            Starter tier: up to 2 directional pairs. Upgrade to Pro+ for new-coin opportunities.
+            Arbitrage scanning: all pairs. Directional signals: BTC + ETH. Upgrade to Pro+ for all pairs & new-coin alerts.
           </Text>
         </View>
       )}
@@ -474,8 +521,14 @@ export default function SignalsScreen() {
       <FlatList
         data={filteredSignals}
         renderItem={renderSignal}
-        keyExtractor={(item) => item.id}
+        keyExtractor={signalKeyExtractor}
         contentContainerStyle={styles.listContent}
+        removeClippedSubviews
+        maxToRenderPerBatch={10}
+        windowSize={7}
+        initialNumToRender={8}
+        updateCellsBatchingPeriod={50}
+        getItemLayout={getSignalItemLayout}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
@@ -526,9 +579,9 @@ export default function SignalsScreen() {
                         <Text style={styles.planTitle}>{plan.side}</Text>
                         <Text style={styles.planLine}>Entry: {plan.entry}</Text>
                         <Text style={styles.planLine}>Entry ref price: {plan.entryPrice}</Text>
-                        <Text style={styles.planLine}>SL: {plan.sl}{plan.slPrice ? ` (${plan.slPrice.toFixed(4)})` : ''}</Text>
-                        <Text style={styles.planLine}>TP1: {plan.tp1}{plan.tp1Price ? ` (${plan.tp1Price.toFixed(4)})` : ''}</Text>
-                        <Text style={styles.planLine}>TP2: {plan.tp2}{plan.tp2Price ? ` (${plan.tp2Price.toFixed(4)})` : ''}</Text>
+                        <Text style={styles.planLine}>SL: {plan.sl}{plan.slPrice ? ` (${fmtPrice(plan.slPrice)})` : ''}</Text>
+                        <Text style={styles.planLine}>TP1: {plan.tp1}{plan.tp1Price ? ` (${fmtPrice(plan.tp1Price)})` : ''}</Text>
+                        <Text style={styles.planLine}>TP2: {plan.tp2}{plan.tp2Price ? ` (${fmtPrice(plan.tp2Price)})` : ''}</Text>
                         <Text style={styles.planLine}>Leverage: {plan.leverage}</Text>
                         <Text style={styles.planLine}>Validation window: {plan.validationWindow}</Text>
                         <Text style={styles.planHint}>{plan.note}</Text>

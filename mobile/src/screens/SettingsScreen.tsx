@@ -17,6 +17,7 @@ import { RootStackParamList } from '../../App';
 import { COLORS, SPACING, FONT_SIZES, BORDER_RADIUS } from '../constants/theme';
 import { useStore } from '../store/useStore';
 import { CONFIG } from '../config';
+import { disconnectThronosWallet } from '../services/walletConnect';
 
 type NavigationProp = NativeStackNavigationProp<RootStackParamList>;
 
@@ -61,7 +62,10 @@ export default function SettingsScreen() {
         {
           text: 'Disconnect',
           style: 'destructive',
-          onPress: logout,
+          onPress: async () => {
+            await disconnectThronosWallet().catch(() => {});
+            logout();
+          },
         },
       ]
     );

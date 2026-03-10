@@ -9,6 +9,7 @@ import {
   ActivityIndicator,
   Alert,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import * as WebBrowser from 'expo-web-browser';
@@ -24,7 +25,7 @@ interface Package {
   id: string;
   name: string;
   priceUSD: number;
-  priceThronos: number;
+  priceTHR: number;
   features: string[];
   rewardsMultiplier: number;
   popular?: boolean;
@@ -32,7 +33,7 @@ interface Package {
 
 const packages: Package[] = [
   { ...CONFIG.PACKAGES.STARTER },
-  { ...CONFIG.PACKAGES.PRO, popular: true },
+  { ...CONFIG.PACKAGES.PRO },
   { ...CONFIG.PACKAGES.ELITE },
   { ...CONFIG.PACKAGES.WHALE },
 ];
@@ -47,12 +48,73 @@ export default function SubscriptionScreen() {
   const [processing, setProcessing] = useState(false);
 
   const chains = Object.entries(CONFIG.SUPPORTED_CHAINS).filter(
-    ([key]) => key !== 'SOLANA'
+    ([key]) => key !== 'SOLANA'  // Solana support coming soon
   );
 
   const handleSelectPackage = (pkg: Package) => {
     setSelectedPackage(pkg);
     setShowPaymentModal(true);
+  };
+
+  /**
+   * Save payment receipt locally so it's never lost even if Brain is down.
+   */
+  const savePaymentReceipt = async (receipt: Record<string, any>) => {
+    try {
+      const key = 'sentinel_payment_receipts';
+      const raw = await AsyncStorage.getItem(key);
+      const receipts: Record<string, any>[] = raw ? JSON.parse(raw) : [];
+      receipts.push({ ...receipt, savedAt: new Date().toISOString() });
+      await AsyncStorage.setItem(key, JSON.stringify(receipts));
+    } catch {
+      // Best-effort — payment is already on-chain
+    }
+  };
+
+  /**
+   * Register subscription with Brain service (best-effort with retry).
+   * The payment is already confirmed on-chain — this is just for Brain tracking.
+   */
+  const registerWithBrain = async (userId: string, tier: string, walletAddr: string) => {
+    const url = `${CONFIG.BRAIN_URL}/api/brain/subscription/register`;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (CONFIG.API_KEY) headers['X-API-Key'] = CONFIG.API_KEY;
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            user_id: userId,
+            tier,
+            source: 'mobile',
+            wallet_address: walletAddr,
+          }),
+        });
+        if (resp.ok) return true;
+      } catch {
+        // Retry after delay
+      }
+      // Also try via backend proxy as fallback
+      try {
+        const resp = await fetch(`${CONFIG.API_URL}/api/brain/subscription/register`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            user_id: userId,
+            tier,
+            source: 'mobile',
+            wallet_address: walletAddr,
+          }),
+        });
+        if (resp.ok) return true;
+      } catch {
+        // Continue retrying
+      }
+      await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+    }
+    return false;
   };
 
   const handleCryptoPayment = async () => {
@@ -61,7 +123,8 @@ export default function SubscriptionScreen() {
     setProcessing(true);
     try {
       const chainInfo = CONFIG.SUPPORTED_CHAINS[selectedChain];
-      const tokens = CONFIG.PAYMENT_TOKENS[chainInfo.chainId as keyof typeof CONFIG.PAYMENT_TOKENS];
+      const chainId = chainInfo.chainId;
+      const tokens = CONFIG.PAYMENT_TOKENS[chainId as keyof typeof CONFIG.PAYMENT_TOKENS];
       const token = tokens?.find((t) => t.symbol === selectedToken);
 
       if (!token) {
@@ -69,25 +132,52 @@ export default function SubscriptionScreen() {
         return;
       }
 
-      // Determine price
-      const price = selectedToken === 'THRONOS'
-        ? selectedPackage.priceThronos.toString()
+      // THR native payment uses THR price, stablecoins use USD price
+      const price = selectedToken === 'THR'
+        ? selectedPackage.priceTHR.toString()
         : selectedPackage.priceUSD.toString();
 
+      // All payments route through Thronos blockchain for verification
       const result = await thronosService.processPayment({
         packageId: selectedPackage.id,
-        chainId: chainInfo.chainId as number,
+        chainId,
+        tokenSymbol: token.symbol,
         tokenAddress: token.address,
         amount: price,
         userAddress: wallet.address,
       });
 
       if (result.success) {
+        // 1. Save receipt locally (never lose payment proof)
+        await savePaymentReceipt({
+          packageId: selectedPackage.id,
+          tier: selectedPackage.id,
+          amount: price,
+          token: token.symbol,
+          chain: selectedChain,
+          txHash: result.txHash,
+          blockchainRef: result.blockchainRef,
+          walletAddress: wallet.address,
+        });
+
+        // 2. Update local subscription state immediately
         setSubscription(selectedPackage.id as any);
         setShowPaymentModal(false);
+
+        // 3. Register with Brain (best-effort, payment already confirmed on-chain)
+        const userId = wallet.address;
+        registerWithBrain(userId, selectedPackage.id, wallet.address).then((ok) => {
+          if (!ok) {
+            console.warn('Brain registration failed — will retry on next app launch');
+          }
+        });
+
+        const ref = result.blockchainRef
+          ? `\nBlockchain Ref: ${result.blockchainRef}`
+          : '';
         Alert.alert(
           'Success!',
-          `You are now subscribed to ${selectedPackage.name}!\n\nTransaction: ${result.txHash?.slice(0, 20)}...`,
+          `You are now subscribed to ${selectedPackage.name}!\n\nTx: ${result.txHash?.slice(0, 20)}...${ref}`,
         );
       } else {
         Alert.alert('Payment Failed', result.error || 'Unknown error');
@@ -146,7 +236,7 @@ export default function SubscriptionScreen() {
           <View style={styles.savingsInfo}>
             <Ionicons name="star" size={16} color={COLORS.thronosGold} />
             <Text style={styles.savingsText}>
-              Pay with THRONOS & save up to 25%
+              Pay with THR & save up to 25%
             </Text>
           </View>
         </View>
@@ -184,7 +274,7 @@ export default function SubscriptionScreen() {
                 <View style={styles.priceContainer}>
                   <Text style={styles.priceUSD}>${pkg.priceUSD}</Text>
                   <Text style={styles.priceThronos}>
-                    or {pkg.priceThronos} THRONOS
+                    or {pkg.priceTHR} THR
                   </Text>
                   <Text style={styles.pricePeriod}>/month</Text>
                 </View>
@@ -228,33 +318,115 @@ export default function SubscriptionScreen() {
           </TouchableOpacity>
         ))}
 
-        {/* Thronos Benefits */}
+        {/* Free Tier Info */}
         <View style={styles.benefitsSection}>
-          <Text style={styles.benefitsTitle}>Thronos Ecosystem Benefits</Text>
+          <Text style={styles.benefitsTitle}>Free Plan Includes</Text>
+          <View style={styles.benefitItem}>
+            <Ionicons name="pulse" size={24} color={COLORS.primary} />
+            <View style={styles.benefitText}>
+              <Text style={styles.benefitName}>BTC Market Signals</Text>
+              <Text style={styles.benefitDesc}>
+                Real-time Bitcoin signals with 20s refresh
+              </Text>
+            </View>
+          </View>
+          <View style={styles.benefitItem}>
+            <Ionicons name="shield-checkmark" size={24} color={COLORS.success} />
+            <View style={styles.benefitText}>
+              <Text style={styles.benefitName}>Basic Risk Monitor</Text>
+              <Text style={styles.benefitDesc}>
+                Composite risk score from calendar + technical indicators
+              </Text>
+            </View>
+          </View>
+          <View style={styles.benefitItem}>
+            <Ionicons name="swap-horizontal" size={24} color={COLORS.accent} />
+            <View style={styles.benefitText}>
+              <Text style={styles.benefitName}>Arbitrage Scanner</Text>
+              <Text style={styles.benefitDesc}>
+                Cross-exchange price difference alerts for BTC
+              </Text>
+            </View>
+          </View>
+        </View>
+
+        {/* Platform Features */}
+        <View style={styles.benefitsSection}>
+          <Text style={styles.benefitsTitle}>Powered by Sentinel AI</Text>
+          <View style={styles.benefitItem}>
+            <Ionicons name="hardware-chip" size={24} color={COLORS.thronosPurple} />
+            <View style={styles.benefitText}>
+              <Text style={styles.benefitName}>Neural Brain</Text>
+              <Text style={styles.benefitDesc}>
+                Personal MLP model trained on YOUR trade history
+              </Text>
+            </View>
+          </View>
+          <View style={styles.benefitItem}>
+            <Ionicons name="analytics" size={24} color={COLORS.primary} />
+            <View style={styles.benefitText}>
+              <Text style={styles.benefitName}>7 Technical Indicators</Text>
+              <Text style={styles.benefitDesc}>
+                RSI, MACD, Bollinger, EMA, Williams %R, Fibonacci, ATR
+              </Text>
+            </View>
+          </View>
+          <View style={styles.benefitItem}>
+            <Ionicons name="earth" size={24} color={COLORS.error} />
+            <View style={styles.benefitText}>
+              <Text style={styles.benefitName}>Geopolitical Intelligence</Text>
+              <Text style={styles.benefitDesc}>
+                Live news sentiment analysis — Iran, Energy, Conflict
+              </Text>
+            </View>
+          </View>
+          <View style={styles.benefitItem}>
+            <Ionicons name="eye" size={24} color={COLORS.thronosGold} />
+            <View style={styles.benefitText}>
+              <Text style={styles.benefitName}>24/7 Position Monitoring</Text>
+              <Text style={styles.benefitDesc}>
+                Live futures position tracking with auto-refresh
+              </Text>
+            </View>
+          </View>
+        </View>
+
+        {/* Thronos Ecosystem */}
+        <View style={styles.benefitsSection}>
+          <Text style={styles.benefitsTitle}>Thronos Ecosystem</Text>
           <View style={styles.benefitItem}>
             <Ionicons name="gift" size={24} color={COLORS.thronosGold} />
             <View style={styles.benefitText}>
-              <Text style={styles.benefitName}>Earn Rewards</Text>
+              <Text style={styles.benefitName}>Earn THR Rewards</Text>
               <Text style={styles.benefitDesc}>
-                Get THRONOS tokens for using signals
+                Up to 5x multiplier · Daily login + signal usage rewards
               </Text>
             </View>
           </View>
           <View style={styles.benefitItem}>
             <Ionicons name="water" size={24} color={COLORS.accent} />
             <View style={styles.benefitText}>
-              <Text style={styles.benefitName}>Liquidity Pools</Text>
+              <Text style={styles.benefitName}>Liquidity Pools — 12% APY</Text>
               <Text style={styles.benefitDesc}>
-                Earn up to 12% APY providing liquidity
+                Provide liquidity and earn passive income in THR
+              </Text>
+            </View>
+          </View>
+          <View style={styles.benefitItem}>
+            <Ionicons name="flame" size={24} color={COLORS.error} />
+            <View style={styles.benefitText}>
+              <Text style={styles.benefitName}>25% Fee Burn</Text>
+              <Text style={styles.benefitDesc}>
+                Every subscription burns 25% of fees — deflationary
               </Text>
             </View>
           </View>
           <View style={styles.benefitItem}>
             <Ionicons name="people" size={24} color={COLORS.success} />
             <View style={styles.benefitText}>
-              <Text style={styles.benefitName}>Referrals</Text>
+              <Text style={styles.benefitName}>Referrals — 50 THR Each</Text>
               <Text style={styles.benefitDesc}>
-                Earn 50 THRONOS per referred friend
+                Invite friends and earn THR for every signup
               </Text>
             </View>
           </View>
@@ -365,7 +537,7 @@ export default function SubscriptionScreen() {
                 {/* Token Selection */}
                 <Text style={styles.sectionLabel}>Pay with</Text>
                 <View style={styles.tokenSelector}>
-                  {['USDT', 'USDC', 'THRONOS'].map((token) => (
+                  {['USDT', 'USDC', 'THR'].map((token) => (
                     <TouchableOpacity
                       key={token}
                       style={[
@@ -382,7 +554,7 @@ export default function SubscriptionScreen() {
                       >
                         {token}
                       </Text>
-                      {token === 'THRONOS' && (
+                      {token === 'THR' && (
                         <View style={styles.discountBadge}>
                           <Text style={styles.discountText}>-25%</Text>
                         </View>
@@ -395,8 +567,8 @@ export default function SubscriptionScreen() {
                 <View style={styles.priceSummary}>
                   <Text style={styles.summaryLabel}>Total</Text>
                   <Text style={styles.summaryValue}>
-                    {selectedToken === 'THRONOS'
-                      ? `${selectedPackage?.priceThronos} THRONOS`
+                    {selectedToken === 'THR'
+                      ? `${selectedPackage?.priceTHR} THR`
                       : `${selectedPackage?.priceUSD} ${selectedToken}`
                     }
                   </Text>
@@ -469,7 +641,7 @@ export default function SubscriptionScreen() {
 
             <Text style={styles.securityNote}>
               <Ionicons name="lock-closed" size={12} color={COLORS.textMuted} />
-              {' '}Secured by Thronos Gateway
+              {' '}Secured by Thronos Blockchain
             </Text>
           </View>
         </View>
