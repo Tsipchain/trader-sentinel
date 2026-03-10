@@ -113,8 +113,20 @@ function formatDuration(seconds: number): string {
   return `${m}m`;
 }
 
+function normalizeSymbol(symbol: string): string {
+  if (!symbol) return '';
+  const raw = String(symbol).trim().toUpperCase();
+  if (raw.includes('/')) return raw;
+  if (raw.includes('_')) {
+    const [base, quote] = raw.split('_');
+    return `${base}/${quote || 'USDT'}`;
+  }
+  if (raw.endsWith('USDT')) return `${raw.slice(0, -4)}/USDT`;
+  return raw;
+}
+
 export default function AutoTraderScreen() {
-  const { user, subscription, autoTrader, setAutoTrader } = useStore();
+  const { user, subscription, watchlist, autoTrader, setAutoTrader } = useStore();
   const [toggling, setToggling] = useState(false);
   const [loadingStatus, setLoadingStatus] = useState(false);
   const [closingId, setClosingId] = useState<string | null>(null);
@@ -143,6 +155,91 @@ export default function AutoTraderScreen() {
   const clampMaxOpenTrades = (value: number) => Math.max(1, Math.min(value, tierMaxOpenTrades));
   const effectiveMaxOpenTrades = clampMaxOpenTrades(cfg.maxOpenTrades);
   const formatOpenTradesCap = (value: number) => (Number.isFinite(value) ? String(value) : '∞');
+  const mergedSymbolOptions = useMemo(() => {
+    const normalized = [...SYMBOL_OPTIONS, ...watchlist].map(normalizeSymbol).filter(Boolean);
+    return Array.from(new Set(normalized));
+  }, [watchlist]);
+
+  const [sleepStatus, setSleepStatus] = useState<SleepStatus>({ active: false, trades: [], log: [] });
+  const [startingSleep, setStartingSleep] = useState(false);
+  const [stoppingSleep, setStoppingSleep] = useState(false);
+  const [protectionEnabled, setProtectionEnabled] = useState(true);
+  const [protectionChecking, setProtectionChecking] = useState(false);
+  const [protectionActions, setProtectionActions] = useState<ProtectionAction[]>([]);
+  const [editingTrade, setEditingTrade] = useState<ActiveTrade | null>(null);
+  const [editSL, setEditSL] = useState('');
+  const [editTP, setEditTP] = useState('');
+  const [savingSlTp, setSavingSlTp] = useState(false);
+
+  const pollSleepStatus = useCallback(async () => {
+    if (!user?.id) return;
+    try {
+      const status = await brainAPI.getSleepStatus(user.id);
+      if (status.ok) {
+        setSleepStatus((prev) => ({
+          ...prev,
+          ...status,
+          active: !!status.active,
+          trades: status.trades ?? prev.trades ?? [],
+          log: status.log ?? prev.log ?? [],
+        }));
+      }
+    } catch {
+      // silent background polling
+    }
+  }, [user?.id]);
+
+  const refreshProtection = useCallback(async () => {
+    if (!user?.id || !isEnabled || !protectionEnabled) return;
+    setProtectionChecking(true);
+    try {
+      const response = await brainAPI.checkTradeProtection({
+        user_id: user.id,
+        exchange: cfg.exchange,
+        api_key: cfg.apiKey.trim(),
+        api_secret: cfg.apiSecret.trim(),
+        passphrase: cfg.passphrase || undefined,
+        mode: sleepStatus.active ? 'sleep' : 'active',
+        config: {
+          stop_loss_pct: cfg.stopLossPct,
+          take_profit_pct: cfg.takeProfitPct,
+          max_leverage: cfg.maxLeverage,
+          max_total_exposure_pct: cfg.maxTotalExposurePct,
+        },
+      });
+      if (response?.ok && Array.isArray(response.actions) && response.actions.length > 0) {
+        const normalized: ProtectionAction[] = response.actions.map((a: any, idx: number) => ({
+          id: String(a.id ?? `${Date.now()}-${idx}`),
+          type: a.type ?? 'sl_adjust',
+          symbol: a.symbol ?? 'UNKNOWN',
+          description: a.description ?? a.message ?? 'Protection action',
+          timestamp: Number(a.timestamp ?? Date.now()),
+          status: a.status ?? 'executed',
+        }));
+        setProtectionActions((prev) => [...normalized, ...prev].slice(0, 20));
+
+        if (sleepStatus.active) {
+          const derivedLogs = normalized.map((action) => {
+            const actionName = action.type === 'hedge'
+              ? 'HEDGE'
+              : action.type === 'dca'
+                ? 'DCA'
+                : action.type.toUpperCase();
+            return `[${new Date(action.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}] ${actionName} ${action.symbol}: ${action.description}`;
+          });
+
+          setSleepStatus((prev) => ({
+            ...prev,
+            log: [...(prev.log ?? []), ...derivedLogs].slice(-30),
+          }));
+        }
+      }
+    } catch {
+      // silent background polling
+    } finally {
+      setProtectionChecking(false);
+    }
+  }, [user?.id, isEnabled, protectionEnabled, sleepStatus.active, cfg.exchange, cfg.apiKey, cfg.apiSecret, cfg.passphrase, cfg.stopLossPct, cfg.takeProfitPct, cfg.maxLeverage, cfg.maxTotalExposurePct]);
 
   const [sleepStatus, setSleepStatus] = useState<SleepStatus>({ active: false, trades: [], log: [] });
   const [startingSleep, setStartingSleep] = useState(false);
@@ -803,9 +900,9 @@ export default function AutoTraderScreen() {
         )}
 
         {/* Sleep Log */}
-        {sleepStatus.active && sleepLog.length > 0 && (
+        {sleepLog.length > 0 && (
           <>
-            <Text style={styles.sectionTitle}>Sleep Mode Log</Text>
+            <Text style={styles.sectionTitle}>Sleep Mode Log (latest)</Text>
             <View style={styles.logCard}>
               {sleepLog.slice(-8).map((entry, idx) => (
                 <Text key={`log-${idx}-${entry.slice(0, 20)}`} style={styles.logEntry}>{entry}</Text>
@@ -902,7 +999,7 @@ export default function AutoTraderScreen() {
         <View style={styles.card}>
           <Text style={styles.fieldLabel}>Symbols to Trade</Text>
           <View style={styles.chips}>
-            {SYMBOL_OPTIONS.map((sym) => (
+            {mergedSymbolOptions.map((sym) => (
               <TouchableOpacity
                 key={sym}
                 style={[styles.chip, cfg.symbols.includes(sym) && styles.chipActive]}

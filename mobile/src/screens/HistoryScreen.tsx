@@ -34,6 +34,8 @@ type OpenPosition = {
   tradeId?: string;
   stopLossPct?: number;
   takeProfitPct?: number;
+  stopLossPrice?: number;
+  takeProfitPrice?: number;
 };
 
 type TraderProfile = {
@@ -102,7 +104,17 @@ function liqDistancePct(pos: OpenPosition): number {
 
 
 function normalizeSymbol(symbol: string): string {
-  return symbol.replace(':USDT', '/USDT').replace('USDT', '/USDT').replace('//USDT', '/USDT').toUpperCase();
+  if (!symbol) return '';
+  const raw = String(symbol).trim().toUpperCase();
+  const cleaned = raw.replace(/:USDT|_USDT|-USDT|\s+/g, '/USDT');
+  if (cleaned.includes('/')) {
+    const [base, quote] = cleaned.split('/');
+    return `${base}/${(quote || 'USDT').replace(/[^A-Z0-9]/g, '')}`;
+  }
+  if (cleaned.endsWith('USDT')) {
+    return `${cleaned.slice(0, -4)}/USDT`;
+  }
+  return cleaned;
 }
 
 function sentinelNote(pos: OpenPosition): string | null {
@@ -162,6 +174,11 @@ export default function HistoryScreen() {
         api_secret: apiSecretTrimmed,
       });
       if (result.ok) {
+        const toFinite = (value: unknown): number | undefined => {
+          const n = typeof value === 'number' ? value : Number(value);
+          return Number.isFinite(n) ? n : undefined;
+        };
+
         const normalizedPositions: OpenPosition[] = (result.positions ?? []).map((p: any) => ({
           symbol: p.symbol,
           side: p.side,
@@ -175,8 +192,10 @@ export default function HistoryScreen() {
           liquidationPrice: p.liquidationPrice,
           notional: p.notional,
           tradeId: p.tradeId ?? p.trade_id,
-          stopLossPct: p.stopLossPct ?? p.stop_loss_pct ?? p.sl_pct,
-          takeProfitPct: p.takeProfitPct ?? p.take_profit_pct ?? p.tp_pct,
+          stopLossPct: toFinite(p.stopLossPct ?? p.stop_loss_pct ?? p.sl_pct ?? p.stopLossPercent ?? p.slPercent),
+          takeProfitPct: toFinite(p.takeProfitPct ?? p.take_profit_pct ?? p.tp_pct ?? p.takeProfitPercent ?? p.tpPercent),
+          stopLossPrice: toFinite(p.stopLossPrice ?? p.stop_loss_price ?? p.sl_price ?? p.stopPx),
+          takeProfitPrice: toFinite(p.takeProfitPrice ?? p.take_profit_price ?? p.tp_price ?? p.takePx),
         }));
 
         setOpenPositions(normalizedPositions);
@@ -609,6 +628,8 @@ export default function HistoryScreen() {
                   position={pos}
                   stopLossPct={pos.stopLossPct ?? matched?.stopLoss}
                   takeProfitPct={pos.takeProfitPct ?? matched?.takeProfit}
+                  stopLossPrice={pos.stopLossPrice}
+                  takeProfitPrice={pos.takeProfitPrice}
                   managed={!!matched}
                   onPress={() => openPositionManager(pos)}
                 />
@@ -856,7 +877,7 @@ function TradeRow({ trade }: { trade: TradeRecord }) {
   );
 }
 
-function PositionRow({ position, stopLossPct, takeProfitPct, managed, onPress }: { position: OpenPosition; stopLossPct?: number; takeProfitPct?: number; managed: boolean; onPress: () => void }) {
+function PositionRow({ position, stopLossPct, takeProfitPct, stopLossPrice, takeProfitPrice, managed, onPress }: { position: OpenPosition; stopLossPct?: number; takeProfitPct?: number; stopLossPrice?: number; takeProfitPrice?: number; managed: boolean; onPress: () => void }) {
   const pnlColor = position.unrealizedPnl >= 0 ? COLORS.success : COLORS.error;
   const isLong = position.side === 'long';
   const displaySymbol = position.symbol.replace(':USDT', '').replace('/USDT', '');
@@ -885,7 +906,9 @@ function PositionRow({ position, stopLossPct, takeProfitPct, managed, onPress }:
           Mark {formatPrice(position.markPrice)} · Liq {position.liquidationPrice > 0 ? `${formatPrice(position.liquidationPrice)} (${liqDist.toFixed(1)}%)` : '–'}
         </Text>
         <Text style={[rowStyles.date, { color: COLORS.primary }]}>
-          SL {stopLossPct ? `${stopLossPct.toFixed(2)}%` : '—'} · TP {takeProfitPct ? `${takeProfitPct.toFixed(2)}%` : '—'}
+          SL {Number.isFinite(stopLossPct as number) ? `${(stopLossPct as number).toFixed(2)}%` : stopLossPrice && stopLossPrice > 0 ? formatPrice(stopLossPrice) : '—'}
+          {' · '}
+          TP {Number.isFinite(takeProfitPct as number) ? `${(takeProfitPct as number).toFixed(2)}%` : takeProfitPrice && takeProfitPrice > 0 ? formatPrice(takeProfitPrice) : '—'}
         </Text>
       </View>
       <View style={{ alignItems: 'flex-end' }}>
