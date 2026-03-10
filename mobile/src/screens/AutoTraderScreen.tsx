@@ -445,7 +445,7 @@ export default function AutoTraderScreen() {
     if (!user?.id || !isEnabled) return;
     Alert.alert(
       'Activate Sleep Mode?',
-      `Sentinel will autonomously trade ${cfg.symbols.join(', ')} on ${(cfg.exchange || '').toUpperCase()} for up to 8 hours while you rest.\n\nTarget: ${sleepTargetRange} portfolio profit.\nMax leverage: ${cfg.maxLeverage}x\nPortfolio: $${(portfolio.equity ?? 0).toFixed(2)}`,
+      `Sentinel will autonomously trade ${cfg.symbols.join(', ')} on ${(cfg.exchange || '').toUpperCase()} for up to 8 hours while you rest.\n\nObjective: ${sleepTargetRange} portfolio return range (not guaranteed).\nRisk controls: SL/TP + protection checks.\nMax leverage: ${cfg.maxLeverage}x\nPortfolio: $${(portfolio.equity ?? 0).toFixed(2)}`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -676,7 +676,7 @@ export default function AutoTraderScreen() {
               </Text>
             </View>
             <Text style={{ color: COLORS.textSecondary, fontSize: FONT_SIZES.xs, marginBottom: SPACING.md, lineHeight: 16 }}>
-              {`Activate when you go to sleep. Sentinel will autonomously trade for 8 hours targeting ${sleepTargetRange} portfolio profit using TA-driven entries with SL/TP protection.`}
+              {`Activate when you go to sleep. Sentinel runs for up to 8 hours with an objective of ${sleepTargetRange} portfolio return (not guaranteed), using TA-driven entries and SL/TP protection.`}
             </Text>
 
             {!sleepModeStatus.active ? (
