@@ -45,6 +45,15 @@ def _canonical_symbol(symbol: str) -> str:
     return s.replace(':USDT', '')
 
 
+def _risk_rank(level: str) -> int:
+    order = {"LOW": 0, "HIGH": 1, "EXTREME": 2}
+    return order.get((level or "").upper(), 0)
+
+
+def _max_risk(a: str, b: str) -> str:
+    return a if _risk_rank(a) >= _risk_rank(b) else b
+
+
 
 
 def _sl_tp_for_leverage(leverage: float, side: str, price: float, sl_pct: float, tp_pct: float):
@@ -331,6 +340,22 @@ async def run_sleep_session(
             )
         except Exception:
             pass  # often already set
+
+    # Visibility: confirm we are managing already-open positions too (via protection flow)
+    try:
+        existing_positions = await connector.fetch_open_positions(
+            exchange=creds["exchange"],
+            api_key=creds["api_key"],
+            api_secret=creds["api_secret"],
+            passphrase=creds.get("passphrase"),
+        )
+        if existing_positions:
+            _log_sleep(
+                user_id,
+                f"Detected {len(existing_positions)} existing open positions — Sleep Mode will manage protection/SL behavior while scanning for new entries (max open {max_open}).",
+            )
+    except Exception:
+        pass
 
     try:
         while time.time() < end_time and trade_count < MAX_TRADES_PER_SESSION:
@@ -808,7 +833,7 @@ async def check_trade_protection(
                     log.warning("[protection] hedge failed: %s", e)
 
             elif liq_dist_pct < 5.0:
-                risk_level = max(risk_level, "HIGH")
+                risk_level = _max_risk(risk_level, "HIGH")
                 actions.append({
                     "id": f"{action_id_base}-warn",
                     "type": "sl_adjust",
@@ -868,9 +893,10 @@ async def check_trade_protection(
             })
             try:
                 safe_amount = pos.get("contracts", 0) * 0.25  # 25% of position
+                safe_side = "buy" if side == "long" else "sell" if side == "short" else (side if side in ("buy", "sell") else "buy")
                 result = await connector.create_market_order(
                     exchange, api_key, api_secret,
-                    sym.replace(":USDT", ""), side if side in ("buy", "sell") else "buy",
+                    sym.replace(":USDT", ""), safe_side,
                     safe_amount, passphrase,
                 )
                 actions[-1]["status"] = "executed" if result.get("ok") else "failed"

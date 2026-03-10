@@ -449,7 +449,18 @@ export default function AutoTraderScreen() {
             try {
               const res = await brainAPI.startSleepMode(user.id);
               if (res.ok) {
-                setSleepStatus({ active: true, status: 'running', trade_count: 0, realized_pnl: 0 });
+                const startedAt = Date.now() / 1000;
+                const endsAt = startedAt + (8 * 3600);
+                setSleepStatus({
+                  active: true,
+                  status: 'running',
+                  trade_count: 0,
+                  realized_pnl: 0,
+                  started_at: startedAt,
+                  ends_at: endsAt,
+                  elapsed_s: 0,
+                  remaining_s: 8 * 3600,
+                });
               } else {
                 Alert.alert('Sleep Mode', res.error || 'Could not start sleep mode.');
               }
