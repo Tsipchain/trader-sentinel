@@ -12,7 +12,7 @@ import * as Notifications from 'expo-notifications';
 function fmtPrice(price: number): string {
   if (!price || price <= 0) return '$0';
   if (price >= 100) return `$${price.toFixed(2)}`;
-  if (price >= 1) return `${fmtPrice(price)}`;
+  if (price >= 1) return `$${price.toFixed(4)}`;
   if (price >= 0.01) return `$${price.toFixed(5)}`;
   return `$${price.toPrecision(4)}`;
 }
@@ -24,11 +24,11 @@ type TierSignalPolicy = {
 };
 
 const SIGNAL_POLICY: Record<string, TierSignalPolicy> = {
-  free: { directionalLimit: 1, allowNewCoinSignals: false, refreshMs: 20000 },
-  starter: { directionalLimit: 2, allowNewCoinSignals: false, refreshMs: 15000 },
-  pro: { directionalLimit: 5, allowNewCoinSignals: true, refreshMs: 12000 },
-  elite: { directionalLimit: 10, allowNewCoinSignals: true, refreshMs: 9000 },
-  whale: { directionalLimit: 99, allowNewCoinSignals: true, refreshMs: 7000 },
+  free: { directionalLimit: 1, allowNewCoinSignals: false, refreshMs: 30000 },
+  starter: { directionalLimit: 2, allowNewCoinSignals: false, refreshMs: 25000 },
+  pro: { directionalLimit: 5, allowNewCoinSignals: true, refreshMs: 20000 },
+  elite: { directionalLimit: 10, allowNewCoinSignals: true, refreshMs: 18000 },
+  whale: { directionalLimit: 99, allowNewCoinSignals: true, refreshMs: 15000 },
 };
 
 // Extra pairs Sentinel scans beyond the user's watchlist
@@ -476,10 +476,14 @@ export function useSignalPolling() {
     const ARB_SIGNIFICANT_SPREAD = 0.15;            // 0.15% = significant opportunity
 
     try {
-      // Merge watchlist + extra scan pairs for broader arb detection
+      // Merge watchlist + extra scan pairs, but scan in rotating batches
+      // to avoid request bursts and backend 429s.
       const arbPairs = [...new Set([...watchlist, ...SENTINEL_SCAN_PAIRS])];
+      const arbBatchSize = subscription === 'whale' ? 8 : (subscription === 'elite' ? 6 : 4);
+      const arbOffset = Math.floor((Date.now() / tierPolicy.refreshMs) % Math.max(1, Math.ceil(arbPairs.length / arbBatchSize))) * arbBatchSize;
+      const arbBatch = arbPairs.slice(arbOffset, arbOffset + arbBatchSize);
       const results = await Promise.allSettled(
-        arbPairs.map(async (symbol) => {
+        arbBatch.map(async (symbol) => {
           const arb = await marketAPI.getArbitrage(symbol);
           const signal = marketAPI.detectArbitrageSignal(arb, 0.05);
           return { symbol, arb, signal };
