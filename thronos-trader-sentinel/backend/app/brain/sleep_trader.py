@@ -47,23 +47,6 @@ def _canonical_symbol(symbol: str) -> str:
 
 
 
-def _is_contract_activation_error(error_text: str) -> bool:
-    msg = (error_text or '').lower()
-    return (
-        'contract not activated' in msg
-        or 'code\":1002' in msg
-        or "'code':1002" in msg
-        or '"code":1002' in msg
-    )
-
-
-def _canonical_symbol(symbol: str) -> str:
-    s = (symbol or '').strip()
-    return s.replace(':USDT', '')
-
-
-
-
 def _sl_tp_for_leverage(leverage: float, side: str, price: float, sl_pct: float, tp_pct: float):
     """Calculate SL/TP prices accounting for leverage."""
     # Tighter SL for higher leverage
