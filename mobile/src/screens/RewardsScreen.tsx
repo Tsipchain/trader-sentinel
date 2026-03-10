@@ -32,7 +32,7 @@ export default function RewardsScreen() {
         claimRewards();
         Alert.alert(
           'Success!',
-          `You have claimed ${rewards.pending.toFixed(2)} THRONOS tokens!`,
+          `You have claimed ${rewards.pending.toFixed(2)} THR tokens!`,
         );
       } else {
         Alert.alert('Claim Failed', result.error || 'Unknown error');
@@ -110,7 +110,7 @@ export default function RewardsScreen() {
 
         <Text style={styles.totalRewardsLabel}>Total Rewards Earned</Text>
         <Text style={styles.totalRewardsValue}>
-          {rewards.total.toFixed(2)} THRONOS
+          {rewards.total.toFixed(2)} THR
         </Text>
 
         <View style={styles.rewardsBreakdown}>
@@ -137,7 +137,7 @@ export default function RewardsScreen() {
               <Ionicons name="download" size={20} color={COLORS.thronosGold} />
               <Text style={styles.claimButtonText}>
                 {rewards.pending > 0
-                  ? `Claim ${rewards.pending.toFixed(2)} THRONOS`
+                  ? `Claim ${rewards.pending.toFixed(2)} THR`
                   : 'No rewards to claim'
                 }
               </Text>
@@ -153,7 +153,7 @@ export default function RewardsScreen() {
             <Ionicons name="lock-closed" size={24} color={COLORS.thronosPurple} />
           </View>
           <View style={styles.stakingInfo}>
-            <Text style={styles.stakingTitle}>Stake THRONOS</Text>
+            <Text style={styles.stakingTitle}>Stake THR</Text>
             <Text style={styles.stakingApy}>Earn {CONFIG.REWARDS.STAKING_APY * 100}% APY</Text>
           </View>
         </View>
@@ -161,11 +161,11 @@ export default function RewardsScreen() {
         <View style={styles.stakingStats}>
           <View style={styles.stakingStat}>
             <Text style={styles.stakingStatLabel}>Your Stake</Text>
-            <Text style={styles.stakingStatValue}>0 THRONOS</Text>
+            <Text style={styles.stakingStatValue}>0 THR</Text>
           </View>
           <View style={styles.stakingStat}>
             <Text style={styles.stakingStatLabel}>Rewards</Text>
-            <Text style={styles.stakingStatValue}>0 THRONOS</Text>
+            <Text style={styles.stakingStatValue}>0 THR</Text>
           </View>
         </View>
 
@@ -192,7 +192,7 @@ export default function RewardsScreen() {
                 {reward.isPercent ? `${reward.amount}%` : `+${reward.amount}`}
               </Text>
               {!reward.isPercent && (
-                <Text style={styles.rewardTypeUnit}>THRONOS</Text>
+                <Text style={styles.rewardTypeUnit}>THR</Text>
               )}
             </View>
           </View>
@@ -215,7 +215,7 @@ export default function RewardsScreen() {
                   {new Date(item.date).toLocaleDateString()}
                 </Text>
               </View>
-              <Text style={styles.historyAmount}>+{item.amount} THRONOS</Text>
+              <Text style={styles.historyAmount}>+{item.amount} THR</Text>
             </View>
           ))
         ) : (

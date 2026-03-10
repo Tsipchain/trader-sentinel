@@ -85,6 +85,7 @@ export default function DashboardScreen() {
           }
 
           return {
+            ...arb,
             symbol,
             price: bestBid || bestAsk || dexLast,
             change24h: 0,
@@ -198,7 +199,7 @@ export default function DashboardScreen() {
           </View>
           <TouchableOpacity
             style={styles.notificationButton}
-            onPress={() => {}}
+            onPress={() => navigation.navigate('MainTabs', { screen: 'Signals' } as any)}
           >
             <Ionicons name="notifications-outline" size={24} color={COLORS.text} />
             {signals.length > 0 && <View style={styles.notificationBadge} />}
@@ -242,7 +243,7 @@ export default function DashboardScreen() {
                 <Ionicons name="star" size={20} color={COLORS.thronosGold} />
               </View>
               <Text style={styles.statValue}>{rewards.total.toFixed(2)}</Text>
-              <Text style={styles.statLabel}>THRONOS Rewards</Text>
+              <Text style={styles.statLabel}>THR Rewards</Text>
             </LinearGradient>
           </TouchableOpacity>
 
@@ -269,7 +270,7 @@ export default function DashboardScreen() {
             <Text style={styles.sectionTitle}>
               <Ionicons name="flash" size={18} color={COLORS.primary} /> Arbitrage Opportunities
             </Text>
-            <TouchableOpacity>
+            <TouchableOpacity onPress={() => navigation.navigate('MainTabs', { screen: 'Signals' } as any)}>
               <Text style={styles.seeAll}>See All</Text>
             </TouchableOpacity>
           </View>
@@ -322,13 +323,56 @@ export default function DashboardScreen() {
           )}
         </View>
 
+        {/* Recent Signals (all types) */}
+        {recentSignals.length > 0 && (
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>
+                <Ionicons name="pulse" size={18} color={COLORS.warning} /> Recent Signals
+              </Text>
+              <TouchableOpacity onPress={() => navigation.navigate('MainTabs', { screen: 'Signals' } as any)}>
+                <Text style={styles.seeAll}>See All</Text>
+              </TouchableOpacity>
+            </View>
+
+            {recentSignals.map((sig, index) => {
+              const iconMap: Record<string, { name: string; color: string }> = {
+                arbitrage: { name: 'swap-horizontal', color: COLORS.success },
+                alert: { name: 'warning', color: COLORS.warning },
+                opportunity: { name: 'trending-up', color: COLORS.primary },
+              };
+              const icon = iconMap[sig.type] || { name: 'information-circle', color: COLORS.info };
+              const minutes = Math.floor((Date.now() - sig.timestamp) / 60000);
+              const timeText = minutes < 1 ? 'Just now' : minutes < 60 ? `${minutes}m ago` : `${Math.floor(minutes / 60)}h ago`;
+
+              return (
+                <TouchableOpacity
+                  key={`recent-${index}`}
+                  style={styles.arbCard}
+                  activeOpacity={0.7}
+                  onPress={() => navigation.navigate('MainTabs', { screen: 'Signals' } as any)}
+                >
+                  <View style={styles.arbHeader}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                      <Ionicons name={icon.name as any} size={18} color={icon.color} style={{ marginRight: 6 }} />
+                      <Text style={styles.arbSymbol}>{sig.symbol}</Text>
+                    </View>
+                    <Text style={{ fontSize: 11, color: COLORS.textMuted }}>{timeText}</Text>
+                  </View>
+                  <Text style={styles.arbVenueLabel}>{sig.message}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        )}
+
         {/* Watchlist */}
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>
               <Ionicons name="eye" size={18} color={COLORS.accent} /> Watchlist
             </Text>
-            <TouchableOpacity>
+            <TouchableOpacity onPress={() => navigation.navigate('MainTabs', { screen: 'Signals' } as any)}>
               <Ionicons name="add-circle-outline" size={24} color={COLORS.primary} />
             </TouchableOpacity>
           </View>
@@ -394,7 +438,7 @@ export default function DashboardScreen() {
             <Text style={styles.quickActionText}>Liquidity</Text>
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.quickAction}>
+          <TouchableOpacity style={styles.quickAction} onPress={() => navigation.navigate('Rewards')}>
             <View style={[styles.quickActionIcon, { backgroundColor: COLORS.success + '20' }]}>
               <Ionicons name="people" size={24} color={COLORS.success} />
             </View>
