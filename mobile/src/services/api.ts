@@ -782,7 +782,7 @@ export const brainAPI = {
     ok: boolean;
     actions: Array<{
       id: string;
-      type: 'hedge' | 'safe_order' | 'sl_adjust' | 'tp_adjust' | 'reduce';
+      type: 'hedge' | 'safe_order' | 'sl_adjust' | 'tp_adjust' | 'reduce' | 'dca';
       symbol: string;
       description: string;
       timestamp: number;
@@ -815,6 +815,19 @@ export const brainAPI = {
       liquidationPrice: number;
       notional: number;
       timestamp: number;
+      tradeId?: string;
+      stopLossPct?: number;
+      takeProfitPct?: number;
+      stopLossPrice?: number;
+      takeProfitPrice?: number;
+      stop_loss_pct?: number;
+      take_profit_pct?: number;
+      sl_pct?: number;
+      tp_pct?: number;
+      stop_loss_price?: number;
+      take_profit_price?: number;
+      sl_price?: number;
+      tp_price?: number;
     }>;
     count: number;
     total_unrealized_pnl: number;
