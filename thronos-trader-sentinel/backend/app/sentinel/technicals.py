@@ -37,11 +37,20 @@ def _ccxt_module():
     if _CCXT_MODULE is False:
         return None
     if _CCXT_MODULE is None:
-        if importlib.util.find_spec("ccxt.async_support") is None:
-            log.warning("ccxt.async_support unavailable; technical OHLCV will use HTTP fallback where possible")
+        try:
+            if importlib.util.find_spec("ccxt.async_support") is None:
+                log.warning("ccxt.async_support unavailable; technical OHLCV will use HTTP fallback where possible")
+                _CCXT_MODULE = False
+                return None
+            _CCXT_MODULE = importlib.import_module("ccxt.async_support")
+        except ModuleNotFoundError as exc:
+            log.warning("ccxt async_support disabled for technicals due to missing dependency: %s", exc)
             _CCXT_MODULE = False
             return None
-        _CCXT_MODULE = importlib.import_module("ccxt.async_support")
+        except Exception as exc:
+            log.warning("ccxt async_support disabled for technicals due to import failure: %s", exc)
+            _CCXT_MODULE = False
+            return None
     return _CCXT_MODULE
 
 
@@ -149,6 +158,11 @@ async def _fetch_ohlcv(symbol: str, exchange_id: str = "binance",
     Chain: CCXT binance → CCXT bybit → CCXT okx → direct OKX HTTP (httpx)
     """
     order = [exchange_id] + [e for e in _FALLBACK_EXCHANGES if e != exchange_id]
+
+    # If ccxt cannot be imported, skip noisy per-exchange attempts and jump to HTTP fallback.
+    if _ccxt_module() is None:
+        order = []
+
     for ex_id in order:
         blocked_until = _BLOCKED_EXCHANGES_UNTIL.get(ex_id, 0)
         if blocked_until > time.time():
