@@ -26,6 +26,33 @@ type TierSignalPolicy = {
   refreshMs: number;
 };
 
+
+const resolveSignalSymbolKeys = (rawSymbol: string) => {
+  const normalized = rawSymbol.trim().toUpperCase();
+  if (!normalized) return [] as string[];
+
+  const withSlash = normalized.includes('/')
+    ? normalized
+    : normalized.endsWith('USDT')
+      ? `${normalized.slice(0, -4)}/USDT`
+      : `${normalized}/USDT`;
+  const compact = withSlash.replace('/', '');
+  const base = withSlash.replace('/USDT', '');
+
+  return Array.from(new Set([rawSymbol, normalized, withSlash, compact, base]));
+};
+
+const extractReferencePriceFromSignalMessage = (message: string): number | null => {
+  const entry = message.match(/entry\s*\$([0-9]*\.?[0-9]+)/i);
+  if (entry) return parseFloat(entry[1]);
+
+  const mark = message.match(/mark\s*\$([0-9]*\.?[0-9]+)/i);
+  if (mark) return parseFloat(mark[1]);
+
+  const generic = message.match(/\$([0-9]*\.?[0-9]+)/);
+  return generic ? parseFloat(generic[1]) : null;
+};
+
 const SIGNAL_REFRESH_MS: Record<string, number> = {
   free: 20000,
   starter: 15000,
@@ -261,24 +288,21 @@ export default function SignalsScreen() {
         return;
       }
 
-      // Signal symbol might be "PEPE" or "PEPE/USDT" — try both
-      const rawSym = selectedSignal.symbol;
-      const fullSym = rawSym.includes('/') ? rawSym : `${rawSym}/USDT`;
-      const shortSym = rawSym.replace('/USDT', '');
-
-      const cached = marketData[fullSym] || marketData[shortSym] || marketData[rawSym];
+      const symbolKeys = resolveSignalSymbolKeys(selectedSignal.symbol);
+      const cached = symbolKeys
+        .map((key) => marketData[key])
+        .find((value) => value != null);
       const cachedRef = cached?.bestAsk || cached?.bestBid || cached?.prices?.[0]?.price || null;
+      const msgPrice = extractReferencePriceFromSignalMessage(selectedSignal.message);
+
       if (cachedRef) {
         setModalRefPrice(cachedRef);
         return;
       }
 
-      // Also try extracting price from the signal message itself (e.g. "at $0.00001234")
-      const priceMatch = selectedSignal.message.match(/\$([0-9]+\.?[0-9]*)/);
-      const msgPrice = priceMatch ? parseFloat(priceMatch[1]) : null;
-
+      const snapshotSymbol = symbolKeys.find((key) => key.includes('/')) || selectedSignal.symbol;
       try {
-        const snapshot = await marketAPI.getSnapshot(fullSym);
+        const snapshot = await marketAPI.getSnapshot(snapshotSymbol);
         const fresh = snapshot.venues.find((v) => v.last !== null)?.last ?? null;
         if (!cancelled) setModalRefPrice(fresh || msgPrice);
       } catch {
@@ -332,8 +356,11 @@ export default function SignalsScreen() {
     const leverageBand = liquidityTight ? '1x-2x' : (highVolatility ? '2x-3x' : '3x-5x');
     const validationWindow = highVolatility ? '15-45 min' : '30-120 min';
 
-    const symbolMarket = marketData[signal.symbol];
-    const refPrice = modalRefPrice || symbolMarket?.bestAsk || symbolMarket?.bestBid || symbolMarket?.prices?.[0]?.price;
+    const symbolMarket = resolveSignalSymbolKeys(signal.symbol)
+      .map((key) => marketData[key])
+      .find((value) => value != null);
+    const messagePrice = extractReferencePriceFromSignalMessage(signal.message);
+    const refPrice = modalRefPrice || messagePrice || symbolMarket?.bestAsk || symbolMarket?.bestBid || symbolMarket?.prices?.[0]?.price;
     const toAbsPrice = (pct: number, target: 'sl' | 'tp') => {
       if (!refPrice) return null;
       const factor = pct / 100;
@@ -426,7 +453,15 @@ export default function SignalsScreen() {
 
   const signalKeyExtractor = (item: Signal) => item.id;
 
-  const renderSignal = ({ item }: { item: Signal }) => {
+  const getSignalItemLayout = (_data: ArrayLike<Signal> | null | undefined, index: number) => ({
+    length: 96,
+    offset: 96 * index,
+    index,
+  });
+
+  const fmtPrice = (value: number) => (value >= 1 ? `$${value.toFixed(4)}` : `$${value.toPrecision(4)}`);
+
+  const renderSignal = useCallback(({ item }: { item: Signal }) => {
     const icon = getSignalIcon(item.type);
 
     return (
@@ -458,7 +493,7 @@ export default function SignalsScreen() {
         </View>
       </TouchableOpacity>
     );
-  }, []);
+  }, [setSelectedSignal]);
 
   const FilterButton = ({ type, label }: { type: SignalType; label: string }) => (
     <TouchableOpacity

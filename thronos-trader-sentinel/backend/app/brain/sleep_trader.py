@@ -28,6 +28,7 @@ SCAN_INTERVAL_S = 60         # re-scan every 60s
 MAX_TRADES_PER_SESSION = 40  # cap total trades in one sleep
 ENTRY_COOLDOWN_S = 180       # min 3 min between entries on same symbol
 MIN_CONFIDENCE = 0.52        # lower threshold to increase trade frequency in 8h mode
+DEFAULT_ENTRY_MARGIN_PCT = 0.088  # default margin allocation per new sleep entry
 
 
 def _is_contract_activation_error(error_text: str) -> bool:
@@ -56,6 +57,44 @@ def _max_risk(a: str, b: str) -> str:
 
 
 
+def _margin_utilization_pct(snapshot: dict[str, Any], max_leverage: int) -> float:
+    equity = float(snapshot.get("equity") or 0)
+    if equity <= 0:
+        return 0.0
+    used_margin = float(snapshot.get("usedMargin") or 0)
+    if used_margin > 0:
+        return max(0.0, (used_margin / equity) * 100)
+
+    # Fallback when exchange doesn't expose used margin clearly.
+    notional = sum(float(p.get("notional") or 0) for p in snapshot.get("positions", []))
+    if notional <= 0 or max_leverage <= 0:
+        return 0.0
+    approx_used = notional / max(max_leverage, 1)
+    return max(0.0, (approx_used / equity) * 100)
+
+
+def _position_risk_score(pos: dict[str, Any]) -> float:
+    leverage = float(pos.get("leverage") or 1)
+    pnl = float(pos.get("unrealizedPnl") or 0)
+    mark = float(pos.get("markPrice") or 0)
+    liq = float(pos.get("liquidationPrice") or 0)
+
+    score = leverage
+    if pnl < 0:
+        score += min(50.0, abs(pnl) * 0.4)
+
+    if mark > 0 and liq > 0:
+        side = str(pos.get("side") or "").lower()
+        if side == "long":
+            liq_dist_pct = ((mark - liq) / mark) * 100
+        else:
+            liq_dist_pct = ((liq - mark) / mark) * 100
+        if liq_dist_pct < 8:
+            score += (8 - max(liq_dist_pct, 0)) * 4
+
+    return score
+
+
 def _sl_tp_for_leverage(leverage: float, side: str, price: float, sl_pct: float, tp_pct: float):
     """Calculate SL/TP prices accounting for leverage."""
     # Tighter SL for higher leverage
@@ -75,11 +114,29 @@ def _sl_tp_for_leverage(leverage: float, side: str, price: float, sl_pct: float,
     return round(sl_price, 6), round(tp_price, 6)
 
 
-def _position_size(equity: float, price: float, risk_pct: float, max_position_pct: float, leverage: int) -> float:
+def _position_size(
+    equity: float,
+    price: float,
+    risk_pct: float,
+    max_position_pct: float,
+    leverage: int,
+    entry_margin_pct: float = DEFAULT_ENTRY_MARGIN_PCT,
+) -> float:
     """Calculate position size in contracts (base asset amount)."""
     risk_usd = equity * (risk_pct / 100)
     max_usd = equity * (max_position_pct / 100)
-    notional = min(risk_usd * leverage, max_usd * leverage, equity * 0.5 * leverage)
+
+    # Standard sleep entry sizing: allocate a small fixed margin slice per new trade.
+    target_margin_usd = equity * (max(entry_margin_pct, 0.0) / 100)
+    capped_margin_usd = min(max(target_margin_usd, 0.0), max_usd)
+
+    # Respect risk caps while providing deterministic entry sizing.
+    notional = min(
+        capped_margin_usd * leverage,
+        risk_usd * leverage,
+        max_usd * leverage,
+        equity * 0.5 * leverage,
+    )
     if price <= 0:
         return 0.0
     amount = notional / price
@@ -309,6 +366,7 @@ async def run_sleep_session(
     max_position_pct = float(config.get("max_position_pct", 10.0))
     max_open = max(1, int(config.get("max_open_trades", 3)))
     max_exposure_pct = float(config.get("max_total_exposure_pct", 25.0))
+    entry_margin_pct = float(config.get("entry_margin_pct", DEFAULT_ENTRY_MARGIN_PCT))
 
     start_time = time.time()
     end_time = start_time + SLEEP_DURATION_S
@@ -330,13 +388,14 @@ async def run_sleep_session(
     session["blocked_symbols"] = []
     brain_store.save_autotrader(user_id, session)
     _log_sleep(user_id, f"Sleep Mode started — {len(symbols)} symbols, {max_leverage}x max leverage, {margin_mode} margin, futures")
+    _log_sleep(user_id, f"Entry sizing set to {entry_margin_pct:.3f}% margin allocation per new trade (target baseline).")
 
     # Set margin mode for all symbols at start
     for sym in symbols:
         try:
             await connector.set_margin_mode(
                 creds["exchange"], creds["api_key"], creds["api_secret"],
-                sym, margin_mode, creds.get("passphrase"),
+                sym, margin_mode, creds.get("passphrase"), max_leverage,
             )
         except Exception:
             pass  # often already set
@@ -447,6 +506,53 @@ async def run_sleep_session(
                     await asyncio.sleep(SCAN_INTERVAL_S)
                     continue
 
+                # Cross-margin stress de-risking: if margin utilization is high, reduce riskiest positions first.
+                mm_util_pct = _margin_utilization_pct(snapshot, max_leverage)
+                if margin_mode == "cross" and mm_util_pct > 15 and snapshot.get("positions"):
+                    positions_sorted = sorted(snapshot.get("positions", []), key=_position_risk_score, reverse=True)
+                    de_risked = 0
+                    for pos in positions_sorted:
+                        if mm_util_pct <= 12:
+                            break
+                        sym = str(pos.get("symbol") or "")
+                        contracts = float(pos.get("contracts") or 0)
+                        side = str(pos.get("side") or "long")
+                        if not sym or contracts <= 0:
+                            continue
+
+                        reduce_side = "sell" if side == "long" else "buy"
+                        reduce_amount = max(contracts * 0.35, 0.0)
+                        if reduce_amount <= 0:
+                            continue
+
+                        result = await connector.create_market_order(
+                            exchange=creds["exchange"],
+                            api_key=creds["api_key"],
+                            api_secret=creds["api_secret"],
+                            symbol=sym.replace(":USDT", ""),
+                            side=reduce_side,
+                            amount=reduce_amount,
+                            passphrase=creds.get("passphrase"),
+                            reduce_only=True,
+                        )
+                        if result.get("ok"):
+                            de_risked += 1
+                            _log_sleep(
+                                user_id,
+                                f"Cross MM {mm_util_pct:.1f}% > 15% — reduced risky position {sym} by {reduce_amount:.4f} contracts.",
+                            )
+                            await asyncio.sleep(1)
+                            try:
+                                snapshot = await connector.fetch_exchange_snapshot(
+                                    creds["exchange"], creds["api_key"], creds["api_secret"], creds.get("passphrase")
+                                )
+                                mm_util_pct = _margin_utilization_pct(snapshot, max_leverage)
+                            except Exception:
+                                break
+
+                    if de_risked == 0:
+                        _log_sleep(user_id, f"Cross MM {mm_util_pct:.1f}% is elevated but no reducible position executed this cycle.")
+
                 # Check total exposure
                 current_notional = sum(p.get("notional", 0) for p in snapshot.get("positions", []))
                 max_notional = equity * (max_exposure_pct / 100) * max_leverage
@@ -497,10 +603,10 @@ async def run_sleep_session(
 
                         elapsed_s = time.time() - start_time
                         dynamic_min_conf = MIN_CONFIDENCE
-                        if trade_count == 0 and elapsed_s > 2 * 3600:
-                            dynamic_min_conf = 0.35
-                        elif trade_count == 0 and elapsed_s > 3600:
-                            dynamic_min_conf = 0.42
+                        if trade_count == 0 and elapsed_s > 45 * 60:
+                            dynamic_min_conf = 0.40
+                        elif trade_count == 0 and elapsed_s > 15 * 60:
+                            dynamic_min_conf = 0.46
 
                         if dynamic_min_conf < MIN_CONFIDENCE and not forced_aggressive_logged:
                             _log_sleep(user_id, f"No fills yet after {elapsed_s/3600:.1f}h — entering aggressive mode (min confidence {dynamic_min_conf:.2f}).")
@@ -520,7 +626,7 @@ async def run_sleep_session(
                         )
 
                         # Calculate position size
-                        amount = _position_size(equity, price, risk_pct, max_position_pct, use_leverage)
+                        amount = _position_size(equity, price, risk_pct, max_position_pct, use_leverage, entry_margin_pct)
                         if amount <= 0:
                             continue
 
@@ -722,12 +828,26 @@ def get_sleep_status(user_id: str) -> dict:
     sleep = session.get("sleep_mode", {})
     is_active = user_id in _active_sessions and not _active_sessions[user_id].done()
 
+    started_at = float(sleep.get("started_at") or 0)
+    ends_at = float(sleep.get("ends_at") or 0)
+
+    # Keep status responsive between polling ticks by deriving elapsed/remaining on read.
+    elapsed_s = int(sleep.get("elapsed_s") or 0)
+    remaining_s = int(sleep.get("remaining_s") or 0)
+    now = time.time()
+    if is_active and started_at > 0 and ends_at > 0:
+        elapsed_s = max(0, int(now - started_at))
+        remaining_s = max(0, int(ends_at - now))
+    elif started_at > 0 and ends_at > 0 and (elapsed_s <= 0 or remaining_s <= 0):
+        elapsed_s = max(0, int((sleep.get("ended_at") or now) - started_at))
+        remaining_s = max(0, int(ends_at - (sleep.get("ended_at") or now)))
+
     return {
         "active": is_active,
         "started_at": sleep.get("started_at"),
         "ends_at": sleep.get("ends_at"),
-        "elapsed_s": sleep.get("elapsed_s", 0),
-        "remaining_s": sleep.get("remaining_s", 0),
+        "elapsed_s": elapsed_s,
+        "remaining_s": remaining_s,
         "trade_count": sleep.get("trade_count", 0),
         "realized_pnl": sleep.get("realized_pnl", 0),
         "status": sleep.get("status", "idle"),
