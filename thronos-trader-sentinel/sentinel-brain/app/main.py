@@ -538,7 +538,7 @@ def autotrader_enable(payload: dict = Body(default_factory=dict), _: str = Secur
             "max_position_pct": float(payload.get("max_position_pct") or payload.get("maxPositionPct") or 10.0),
             "max_open_trades": int(payload.get("max_open_trades") or payload.get("maxOpenTrades") or 3),
             "margin_mode": payload.get("margin_mode") or payload.get("marginMode") or "isolated",
-            "max_leverage": float(payload.get("max_leverage") or payload.get("maxLeverage") or 3),
+            "max_leverage": float(payload.get("max_leverage") or payload.get("maxLeverage") or payload.get("leverage") or 3),
             "risk_per_trade_pct": float(payload.get("risk_per_trade_pct") or payload.get("riskPerTradePct") or 1),
             "max_total_exposure_pct": float(payload.get("max_total_exposure_pct") or payload.get("maxTotalExposurePct") or 25),
         },

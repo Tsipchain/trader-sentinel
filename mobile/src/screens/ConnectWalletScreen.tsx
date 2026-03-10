@@ -86,7 +86,23 @@ const WALLET_OPTIONS: WalletOption[] = [
   },
 ];
 
-type ThronosModalMode = 'choose' | 'create' | 'import';
+const _mockAddressFromWallet = (walletId: string): string => {
+  // Deterministic demo-only address so testers keep the same identity across reconnects.
+  let hash = 0x811c9dc5;
+  const seed = `trader-sentinel-demo:${walletId.toLowerCase()}`;
+  for (let i = 0; i < seed.length; i += 1) {
+    hash ^= seed.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+
+  let hex = '';
+  for (let i = 0; i < 5; i += 1) {
+    const part = (Math.imul(hash ^ (i * 0x9e3779b1), 0x85ebca6b) >>> 0).toString(16).padStart(8, '0');
+    hex += part;
+  }
+
+  return `0x${hex.slice(0, 40)}`;
+};
 
 export default function ConnectWalletScreen() {
   const navigation = useNavigation<NavigationProp>();
@@ -189,11 +205,37 @@ export default function ConnectWalletScreen() {
 
     setConnecting('thronos');
     try {
-      const result = await importThronosWallet(importAddress.trim(), importSecret.trim());
-      setThronosModalVisible(false);
-      await finalizeConnection(result.address, 'thronos', 'thronos', 'thronos', 'THRONOS');
-    } catch (error: any) {
-      Alert.alert('Import Failed', error.message || 'Invalid Thronos wallet credentials.');
+      // Simulate wallet connection
+      // In production, this would use WalletConnect or native wallet SDKs
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+
+      // Demo wallet connection (deterministic mock until WalletConnect SDK integration is added).
+      const mockAddress = wallet.address ?? user?.walletAddress ?? _mockAddressFromWallet(walletId);
+
+      setWallet({
+        isConnected: true,
+        address: mockAddress,
+        chainId: 1,
+        balance: wallet.balance || '0.5',
+      });
+
+      setUser({
+        id: user?.id || mockAddress,
+        walletAddress: mockAddress,
+        subscription: user?.subscription || 'free',
+        thronosBalance: user?.thronosBalance || 0,
+        rewardsBalance: user?.rewardsBalance || 0,
+        referralCode: user?.referralCode || mockAddress.slice(2, 10).toUpperCase(),
+        createdAt: user?.createdAt || new Date().toISOString(),
+      });
+
+      // Navigate to main app
+      navigation.reset({
+        index: 0,
+        routes: [{ name: 'MainTabs' }],
+      });
+    } catch (error) {
+      Alert.alert('Connection Failed', 'Failed to connect wallet. Please try again.');
     } finally {
       setConnecting(null);
     }
@@ -327,6 +369,9 @@ export default function ConnectWalletScreen() {
           <Text style={styles.descTitle}>Choose your wallet</Text>
           <Text style={styles.descText}>
             Connect your wallet to access Trader Sentinel and start earning Thronos rewards
+          </Text>
+          <Text style={styles.descNote}>
+            Demo build: wallet connection is simulated (no real on-chain transaction signing yet).
           </Text>
         </View>
 
@@ -683,6 +728,12 @@ const styles = StyleSheet.create({
     fontSize: FONT_SIZES.md,
     color: COLORS.textSecondary,
     lineHeight: 22,
+  },
+  descNote: {
+    marginTop: SPACING.xs,
+    fontSize: FONT_SIZES.sm,
+    color: COLORS.warning,
+    lineHeight: 18,
   },
   walletList: {
     flex: 1,

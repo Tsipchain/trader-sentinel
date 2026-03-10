@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, Switch, TouchableOpacity,
   Alert, TextInput, ActivityIndicator, Modal,
@@ -111,23 +111,7 @@ export default function AutoTraderScreen() {
   const [loadingStatus, setLoadingStatus] = useState(false);
   const [closingId, setClosingId] = useState<string | null>(null);
   const [syncingPortfolio, setSyncingPortfolio] = useState(false);
-  const [sleepStatus, setSleepStatus] = useState<SleepStatus>({ active: false });
-  const [startingSleep, setStartingSleep] = useState(false);
-  const [stoppingSleep, setStoppingSleep] = useState(false);
   const hasShownBrainMisconfigAlert = useRef(false);
-  const sleepPollRef = useRef<NodeJS.Timeout | null>(null);
-  const protectionPollRef = useRef<NodeJS.Timeout | null>(null);
-
-  // SL/TP edit modal state
-  const [editingTrade, setEditingTrade] = useState<ActiveTrade | null>(null);
-  const [editSL, setEditSL] = useState('');
-  const [editTP, setEditTP] = useState('');
-  const [savingSlTp, setSavingSlTp] = useState(false);
-
-  // Trade protection state
-  const [protectionEnabled, setProtectionEnabled] = useState(true);
-  const [protectionActions, setProtectionActions] = useState<ProtectionAction[]>([]);
-  const [protectionChecking, setProtectionChecking] = useState(false);
 
   const isEnabled = autoTrader.enabled;
   const cfg = autoTrader.config;
@@ -146,113 +130,10 @@ export default function AutoTraderScreen() {
   };
   const exchangeAvailability = autoTrader.exchangeAvailability ?? {};
 
-  const pollSleepStatus = useCallback(async () => {
-    if (!user?.id) return;
-    try {
-      const res = await brainAPI.getSleepStatus(user.id);
-      if (res.ok) {
-        setSleepStatus({
-          active: res.active,
-          started_at: res.started_at,
-          ends_at: res.ends_at,
-          elapsed_s: res.elapsed_s,
-          remaining_s: res.remaining_s,
-          trade_count: res.trade_count,
-          realized_pnl: res.realized_pnl,
-          status: res.status,
-          trades: res.trades,
-          log: res.log,
-        });
-      }
-    } catch {
-      // silent
-    }
-  }, [user?.id]);
-
-  // Poll sleep status when active
-  useEffect(() => {
-    if (sleepStatus.active || isEnabled) {
-      pollSleepStatus();
-      sleepPollRef.current = setInterval(pollSleepStatus, SLEEP_POLL_MS);
-    }
-    return () => {
-      if (sleepPollRef.current) clearInterval(sleepPollRef.current);
-    };
-  }, [sleepStatus.active, isEnabled, pollSleepStatus]);
-
-  // Trade protection: monitor and protect user positions
-  const checkProtection = useCallback(async () => {
-    if (!user?.id || !isEnabled || !protectionEnabled) return;
-    if (!cfg.apiKey || !cfg.apiSecret) return;
-    setProtectionChecking(true);
-    try {
-      const res = await brainAPI.checkTradeProtection({
-        user_id: user.id,
-        exchange: cfg.exchange,
-        api_key: cfg.apiKey,
-        api_secret: cfg.apiSecret,
-        passphrase: cfg.passphrase || undefined,
-        mode: sleepStatus.active ? 'sleep' : 'active',
-        config: {
-          stop_loss_pct: cfg.stopLossPct,
-          take_profit_pct: cfg.takeProfitPct,
-          max_leverage: cfg.maxLeverage,
-          max_total_exposure_pct: cfg.maxTotalExposurePct,
-        },
-      }).catch(() => ({ ok: false, actions: [] }));
-      if (res.ok && res.actions) {
-        setProtectionActions((prev) => {
-          const existing = new Set(prev.map((a) => a.id));
-          const newActions = res.actions.filter((a: ProtectionAction) => !existing.has(a.id));
-          return [...newActions, ...prev].slice(0, 20);
-        });
-      }
-    } catch {
-      // silent
-    } finally {
-      setProtectionChecking(false);
-    }
-  }, [user?.id, isEnabled, protectionEnabled, cfg, sleepStatus.active]);
-
-  useEffect(() => {
-    if (isEnabled && protectionEnabled) {
-      checkProtection();
-      protectionPollRef.current = setInterval(checkProtection, PROTECTION_POLL_MS);
-    }
-    return () => {
-      if (protectionPollRef.current) clearInterval(protectionPollRef.current);
-    };
-  }, [isEnabled, protectionEnabled, checkProtection]);
-
-  // SL/TP editing
-  const openEditSlTp = (trade: ActiveTrade) => {
-    setEditingTrade(trade);
-    setEditSL(String(trade.stopLoss ?? cfg.stopLossPct));
-    setEditTP(String(trade.takeProfit ?? cfg.takeProfitPct));
-  };
-
-  const handleSaveSlTp = async () => {
-    if (!editingTrade || !user?.id) return;
-    const sl = parseFloat(editSL);
-    const tp = parseFloat(editTP);
-    if (isNaN(sl) || isNaN(tp) || sl <= 0 || tp <= 0) {
-      Alert.alert('Invalid', 'Enter valid SL and TP values.');
-      return;
-    }
-    setSavingSlTp(true);
-    try {
-      await brainAPI.updateTradeSlTp(user.id, editingTrade.id, sl, tp).catch(() => {});
-      // Update local state
-      setAutoTrader({
-        activeTrades: autoTrader.activeTrades.map((t) =>
-          t.id === editingTrade.id ? { ...t, stopLoss: sl, takeProfit: tp } : t
-        ),
-      });
-      setEditingTrade(null);
-    } finally {
-      setSavingSlTp(false);
-    }
-  };
+  const tierMaxOpenTrades = CONFIG.TIER_LIMITS[subscription] ?? CONFIG.TIER_LIMITS.free;
+  const clampMaxOpenTrades = (value: number) => Math.max(1, Math.min(value, tierMaxOpenTrades));
+  const effectiveMaxOpenTrades = clampMaxOpenTrades(cfg.maxOpenTrades);
+  const displayedMaxOpenTrades = Number.isFinite(tierMaxOpenTrades) ? String(effectiveMaxOpenTrades) : '∞';
 
   const refreshStatus = useCallback(async () => {
     setLoadingStatus(true);
@@ -279,6 +160,12 @@ export default function AutoTraderScreen() {
 
   const updateCfg = (patch: Partial<typeof cfg>) =>
     setAutoTrader({ config: { ...cfg, ...patch } });
+
+  useEffect(() => {
+    if (Number.isFinite(tierMaxOpenTrades) && cfg.maxOpenTrades > tierMaxOpenTrades) {
+      setAutoTrader({ config: { maxOpenTrades: tierMaxOpenTrades } });
+    }
+  }, [cfg.maxOpenTrades, tierMaxOpenTrades, setAutoTrader]);
 
   const toggleSymbol = (sym: string) => {
     if (isEnabled) return;
@@ -312,6 +199,7 @@ export default function AutoTraderScreen() {
             );
           }
         }
+        // Do not hard-block here: continue and let real API call/fallback decide.
       } else {
         hasShownBrainMisconfigAlert.current = false;
       }
@@ -397,16 +285,15 @@ export default function AutoTraderScreen() {
               const ok = await ensureFreshSnapshot();
               if (!ok) return;
 
-              const equityNow = portfolio.equity || 0;
-              if (equityNow < 50) {
-                const needed = Math.max(0, 50 - equityNow);
+              if ((portfolio.equity || 0) < 50) {
                 Alert.alert(
                   'Minimum Balance Required',
-                  `AutoTrader requires at least 50 USDT equity before activation. Current equity: $${equityNow.toFixed(2)}. Add about $${needed.toFixed(2)} more and sync portfolio again.`,
+                  'AutoTrader requires at least 50 USDT equity in your trading account before activation.',
                 );
                 return;
               }
 
+              const requestedLeverage = Math.max(1, Number(cfg.maxLeverage) || 1);
               await brainAPI.enableAutoTrader({
                 user_id: user.id,
                 exchange: cfg.exchange,
@@ -417,11 +304,10 @@ export default function AutoTraderScreen() {
                 stop_loss_pct: cfg.stopLossPct,
                 take_profit_pct: cfg.takeProfitPct,
                 max_position_pct: cfg.maxPositionPct,
-                max_open_trades: Number.isFinite(allowedMaxOpenTrades)
-                  ? Math.min(cfg.maxOpenTrades, allowedMaxOpenTrades)
-                  : cfg.maxOpenTrades,
+                max_open_trades: effectiveMaxOpenTrades,
                 margin_mode: cfg.marginMode,
-                max_leverage: cfg.maxLeverage,
+                max_leverage: requestedLeverage,
+                leverage: requestedLeverage,
                 risk_per_trade_pct: cfg.riskPerTradePct,
                 max_total_exposure_pct: cfg.maxTotalExposurePct,
               }).catch(() => {});
@@ -588,9 +474,7 @@ export default function AutoTraderScreen() {
                   {sleepStatus.active ? 'Sleep Mode' : 'AutoTrader'}
                 </Text>
                 <Text style={styles.toggleSub}>
-                  {sleepStatus.active
-                    ? 'Sentinel is trading while you rest'
-                    : isEnabled ? 'AI is trading on your behalf' : 'Hand over trades to Sentinel AI'}
+                  {isEnabled ? 'Managed trades stay active, bot can open new ones' : 'Hand over new trade execution to Sentinel AI'}
                 </Text>
               </View>
             </View>
@@ -606,9 +490,9 @@ export default function AutoTraderScreen() {
           {isEnabled && !sleepStatus.active && (
             <View style={styles.activeStats}>
               {[
-                { label: 'Open', value: autoTrader.activeTrades.length },
-                { label: 'Symbols', value: cfg.symbols.length },
-                { label: 'Max Trades', value: Number.isFinite(allowedMaxOpenTrades) ? displayedMaxOpenTrades : '∞' },
+                { label: 'Managed trades', value: portfolio.positions.length || autoTrader.activeTrades.length },
+                { label: 'Opened by bot', value: autoTrader.activeTrades.length },
+                { label: 'Max Trades', value: displayedMaxOpenTrades },
               ].map(({ label, value }) => (
                 <View key={label} style={styles.activeStat}>
                   <Text style={styles.activeStatValue}>{value}</Text>
@@ -919,7 +803,7 @@ export default function AutoTraderScreen() {
               { label: 'Stop Loss %', key: 'stopLossPct' },
               { label: 'Take Profit %', key: 'takeProfitPct' },
               { label: 'Max Position %', key: 'maxPositionPct' },
-              { label: 'Max Open Trades', key: 'maxOpenTrades' },
+              { label: `Max Open Trades (tier cap: ${displayedMaxOpenTrades})`, key: 'maxOpenTrades' },
               { label: 'Max Leverage', key: 'maxLeverage' },
               { label: 'Risk / Trade %', key: 'riskPerTradePct' },
               { label: 'Max Total Exposure %', key: 'maxTotalExposurePct' },
@@ -933,10 +817,7 @@ export default function AutoTraderScreen() {
                     const n = key === 'maxOpenTrades' ? parseInt(v, 10) : parseFloat(v);
                     if (isNaN(n)) return;
                     if (key === 'maxOpenTrades') {
-                      const clamped = Number.isFinite(allowedMaxOpenTrades)
-                        ? Math.min(n, allowedMaxOpenTrades)
-                        : n;
-                      updateCfg({ [key]: Math.max(1, clamped) } as Partial<typeof cfg>);
+                      updateCfg({ maxOpenTrades: clampMaxOpenTrades(n) });
                       return;
                     }
                     updateCfg({ [key]: n } as Partial<typeof cfg>);

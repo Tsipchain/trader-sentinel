@@ -116,7 +116,6 @@ export default function HistoryScreen() {
 
   const [syncLoading, setSyncLoading] = useState(false);
   const [analysisLoading, setAnalysisLoading] = useState(false);
-  const [positionsLoading, setPositionsLoading] = useState(false);
   const hasShownBrainMisconfigAlert = useRef(false);
 
   const [showSetup, setShowSetup] = useState(false);
@@ -201,6 +200,13 @@ export default function HistoryScreen() {
       }
     };
   }, [fetchPositions, apiKey, apiSecret, exchange]);
+
+  useEffect(() => {
+    // Keep History screen credentials in sync with shared AutoTrader config.
+    setExchange(autoTrader.config.exchange);
+    setApiKey(autoTrader.config.apiKey);
+    setApiSecret(autoTrader.config.apiSecret);
+  }, [autoTrader.config.exchange, autoTrader.config.apiKey, autoTrader.config.apiSecret]);
 
   const { trades, stats, lastSynced, aiAnalysis } = tradeHistory;
 
@@ -405,7 +411,8 @@ export default function HistoryScreen() {
                     key={ex}
                     style={[styles.chip, exchange === ex && styles.chipActive]}
                     onPress={() => {
-                      updateSharedCfg({ exchange: ex });
+                      setExchange(ex);
+                      setAutoTrader({ config: { ...autoTrader.config, exchange: ex } });
                     }}
                   >
                     <Text style={[styles.chipText, exchange === ex && styles.chipTextActive]}>
@@ -419,7 +426,8 @@ export default function HistoryScreen() {
                 style={styles.input}
                 value={apiKey}
                 onChangeText={(value) => {
-                  updateSharedCfg({ apiKey: value });
+                  setApiKey(value);
+                  setAutoTrader({ config: { ...autoTrader.config, apiKey: value } });
                 }}
                 placeholder="Read-only key"
                 placeholderTextColor={COLORS.textMuted}
@@ -430,7 +438,8 @@ export default function HistoryScreen() {
                 style={styles.input}
                 value={apiSecret}
                 onChangeText={(value) => {
-                  updateSharedCfg({ apiSecret: value });
+                  setApiSecret(value);
+                  setAutoTrader({ config: { ...autoTrader.config, apiSecret: value } });
                 }}
                 placeholder="API secret"
                 placeholderTextColor={COLORS.textMuted}

@@ -16,16 +16,7 @@ import { useStore, Signal } from '../store/useStore';
 import { marketAPI, brainAPI } from '../services/api';
 import * as Haptics from 'expo-haptics';
 import * as Notifications from 'expo-notifications';
-import { getAllowedPairs } from '../hooks/useSignalPolling';
-
-/** Smart price format for micro-cap coins */
-function fmtPrice(n: number | null | undefined): string {
-  if (!n || n <= 0) return '';
-  if (n >= 100) return `$${n.toFixed(2)}`;
-  if (n >= 1) return `$${n.toFixed(4)}`;
-  if (n >= 0.01) return `$${n.toFixed(5)}`;
-  return `$${n.toPrecision(4)}`;
-}
+import { CONFIG } from '../config';
 
 type SignalType = 'all' | 'arbitrage' | 'alert' | 'opportunity';
 
@@ -35,22 +26,15 @@ type TierSignalPolicy = {
   refreshMs: number;
 };
 
-const SIGNAL_POLICY: Record<string, TierSignalPolicy> = {
-  free: { directionalLimit: 1, allowNewCoinSignals: false, refreshMs: 20000 },
-  starter: { directionalLimit: 2, allowNewCoinSignals: false, refreshMs: 15000 },
-  pro: { directionalLimit: 5, allowNewCoinSignals: true, refreshMs: 12000 },
-  elite: { directionalLimit: 10, allowNewCoinSignals: true, refreshMs: 9000 },
-  whale: { directionalLimit: 99, allowNewCoinSignals: true, refreshMs: 7000 },
+const SIGNAL_REFRESH_MS: Record<string, number> = {
+  free: 20000,
+  starter: 15000,
+  pro: 12000,
+  elite: 9000,
+  whale: 7000,
 };
 
-const SIGNAL_ITEM_HEIGHT = 120;
-const signalKeyExtractor = (item: Signal) => item.id;
-const getSignalItemLayout = (_data: any, index: number) => ({
-  length: SIGNAL_ITEM_HEIGHT,
-  offset: SIGNAL_ITEM_HEIGHT * index,
-  index,
-});
-
+const RISK_MIN_INTERVAL_MS = 30000;
 export default function SignalsScreen() {
   const { signals, addSignal, clearSignals, watchlist, settings, subscription, marketData, user } = useStore();
   const [refreshing, setRefreshing] = useState(false);
@@ -60,9 +44,15 @@ export default function SignalsScreen() {
   const [modalRefPrice, setModalRefPrice] = useState<number | null>(null);
   const notificationReadyRef = useRef(false);
   const nextFetchAllowedAtRef = useRef(0);
+  const riskReportCacheRef = useRef<Record<string, { at: number; value: any }>>({});
 
-  const tierPolicy = SIGNAL_POLICY[subscription] ?? SIGNAL_POLICY.free;
+  const tierDirectionalLimit = CONFIG.TIER_LIMITS[subscription] ?? CONFIG.TIER_LIMITS.free;
   const canUseAdvancedSignals = subscription !== 'free';
+  const tierPolicy: TierSignalPolicy = {
+    directionalLimit: Number.isFinite(tierDirectionalLimit) ? Math.max(1, tierDirectionalLimit) : watchlist.length || 1,
+    allowNewCoinSignals: subscription !== 'free' && subscription !== 'starter',
+    refreshMs: SIGNAL_REFRESH_MS[subscription] ?? SIGNAL_REFRESH_MS.free,
+  };
 
   const hasRecentDuplicate = useCallback((idPrefix: string) => {
     const now = Date.now();
@@ -119,6 +109,19 @@ export default function SignalsScreen() {
       });
     }
   }, [addSignal, maybeNotify, settings.hapticFeedback, subscription, user?.id]);
+
+
+  const getRiskReportWithMinInterval = useCallback(async (symbol: string) => {
+    const cache = riskReportCacheRef.current[symbol];
+    const now = Date.now();
+    if (cache && now - cache.at < RISK_MIN_INTERVAL_MS) {
+      return cache.value;
+    }
+
+    const risk = await marketAPI.getRiskReport(symbol);
+    riskReportCacheRef.current[symbol] = { at: now, value: risk };
+    return risk;
+  }, []);
 
   const fetchSignals = useCallback(async () => {
     if (Date.now() < nextFetchAllowedAtRef.current) {
@@ -188,7 +191,7 @@ export default function SignalsScreen() {
         const baseSymbol = allowedPairs[0];
         const prefix = `free-risk-${baseSymbol}`;
         if (!hasAnySignalPrefix(prefix)) {
-          const risk = await marketAPI.getRiskReport(baseSymbol);
+          const risk = await getRiskReportWithMinInterval(baseSymbol);
           const lowRisk = risk.composite_score <= 5.5;
           addSignalWithFeedback({
             id: `${prefix}-${Date.now()}`,
@@ -206,18 +209,14 @@ export default function SignalsScreen() {
       // non-blocking
     }
 
-    // ── Pro+ directional signals — separate try/catch ──
-    if (canUseAdvancedSignals) {
-      try {
-        const directionalSymbols = allowedPairs.slice(0, tierPolicy.directionalLimit);
-        const riskSignals = await Promise.allSettled(
-          directionalSymbols.map(async (symbol) => {
-            const risk = await marketAPI.getRiskReport(symbol);
-            return { symbol, risk };
-          })
+      // Pro+ directional signals from composite risk framework
+      if (canUseAdvancedSignals) {
+        const directionalSymbols = watchlist.slice(0, tierPolicy.directionalLimit);
+        const riskSettled = await Promise.allSettled(
+          directionalSymbols.map(async (symbol) => ({ symbol, risk: await getRiskReportWithMinInterval(symbol) }))
         );
 
-        riskSignals.forEach((result) => {
+        riskSettled.forEach((result) => {
           if (result.status !== 'fulfilled') return;
           const { symbol, risk } = result.value;
           const level = risk.recommendation?.level || 'UNKNOWN';
@@ -263,7 +262,7 @@ export default function SignalsScreen() {
         nextFetchAllowedAtRef.current = Date.now() + 15000;
       }
     }
-  }, [watchlist, addSignalWithFeedback, canUseAdvancedSignals, hasRecentDuplicate, hasAnySignalPrefix, tierPolicy.allowNewCoinSignals, tierPolicy.directionalLimit]);
+  }, [watchlist, addSignalWithFeedback, canUseAdvancedSignals, hasRecentDuplicate, hasAnySignalPrefix, tierPolicy.allowNewCoinSignals, tierPolicy.directionalLimit, getRiskReportWithMinInterval]);
 
 
   useEffect(() => {
@@ -337,29 +336,17 @@ export default function SignalsScreen() {
       leverage = '20x-100x (adjust based on conviction & structure)';
     }
 
-    // Tighter SL for high-leverage setups
-    const slMultiplier = detectedLeverage >= 100 ? 0.3 : (detectedLeverage >= 50 ? 0.5 : 1.0);
-    const sl = (isShort ? base * 0.8 : base) * slMultiplier;
-    const tp1 = base * 1.1;
-    const tp2 = base * 1.8;
+    const entry = highVolatility
+      ? 'Scale-in around key S/R zones (avoid full-size market entry)'
+      : 'Market / nearest support-resistance retest';
+    const sl = (isShort ? base * 0.8 : base);
+    const tp1 = (base * 1.1);
+    const tp2 = (base * 1.8);
+    const leverage = liquidityTight ? '1x-2x' : (highVolatility ? '2x-3x' : '3x-5x');
+    const validationWindow = highVolatility ? '15-45 min' : '30-120 min';
 
-    const entry = isPositionAlert
-      ? 'Position already open — manage existing trade'
-      : (highVolatility
-        ? 'Scale-in around key S/R zones (avoid full-size market entry)'
-        : 'Market / nearest support-resistance retest');
-
-    const validationWindow = isPositionAlert ? 'Immediate action' : (highVolatility ? '15-45 min' : '30-120 min');
-
-    const rawSym = signal.symbol;
-    const fullSym = rawSym.includes('/') ? rawSym : `${rawSym}/USDT`;
-    const shortSym = rawSym.replace('/USDT', '');
-    const symbolMarket = marketData[fullSym] || marketData[shortSym] || marketData[rawSym];
-
-    // Try modalRefPrice, market data, then extract from signal message
-    const msgPriceMatch = signal.message.match(/\$([0-9]+\.?[0-9]*)/);
-    const msgPrice = msgPriceMatch ? parseFloat(msgPriceMatch[1]) : null;
-    const refPrice = modalRefPrice || symbolMarket?.bestAsk || symbolMarket?.bestBid || symbolMarket?.prices?.[0]?.price || msgPrice;
+    const symbolMarket = marketData[signal.symbol];
+    const refPrice = modalRefPrice || symbolMarket?.bestAsk || symbolMarket?.bestBid || symbolMarket?.prices?.[0]?.price;
     const toAbsPrice = (pct: number, target: 'sl' | 'tp') => {
       if (!refPrice) return null;
       const factor = pct / 100;

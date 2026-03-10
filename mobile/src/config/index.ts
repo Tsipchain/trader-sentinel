@@ -1,6 +1,21 @@
 // Trader Sentinel Configuration
 // Thronos Integration & API Settings
 
+
+const _toFiniteNumber = (value: string | undefined, fallback: number): number => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const _toTierLimit = (value: string | undefined, fallback: number): number => {
+  if (!value) return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'infinity' || normalized === 'inf' || normalized === '∞') {
+    return Number.POSITIVE_INFINITY;
+  }
+  return _toFiniteNumber(value, fallback);
+};
+
 export const CONFIG = {
   // Backend API (Railway → custom domain sentinel.thronoschain.org)
   API_URL: process.env.EXPO_PUBLIC_API_URL ?? 'https://sentinel.thronoschain.org',
@@ -250,6 +265,26 @@ export const CONFIG = {
   APP_NAME: 'Pytheia — Trader Sentinel',
   APP_VERSION: '1.1.0',
   SUPPORT_EMAIL: 'support@thronoschain.org',
+
+
+  // Subscription tier limits (single source of truth)
+  TIER_LIMITS: {
+    free: _toTierLimit(process.env.EXPO_PUBLIC_TIER_LIMIT_FREE, 1),
+    starter: _toTierLimit(process.env.EXPO_PUBLIC_TIER_LIMIT_STARTER, 5),
+    pro: _toTierLimit(process.env.EXPO_PUBLIC_TIER_LIMIT_PRO, 10),
+    elite: _toTierLimit(process.env.EXPO_PUBLIC_TIER_LIMIT_ELITE, 15),
+    whale: _toTierLimit(process.env.EXPO_PUBLIC_TIER_LIMIT_WHALE, Number.POSITIVE_INFINITY),
+  },
+
+  // Public treasury addresses only (safe for Expo public env)
+  TREASURY_ADDRESSES: {
+    ETH: process.env.EXPO_PUBLIC_TREASURY_ETH ?? '',
+    BSC: process.env.EXPO_PUBLIC_TREASURY_BSC ?? '',
+    POLYGON: process.env.EXPO_PUBLIC_TREASURY_POLYGON ?? '',
+    ARBITRUM: process.env.EXPO_PUBLIC_TREASURY_ARBITRUM ?? '',
+    BASE: process.env.EXPO_PUBLIC_TREASURY_BASE ?? '',
+    SOLANA: process.env.EXPO_PUBLIC_TREASURY_SOLANA ?? '',
+  },
 
   // API security — set this to the same value as API_KEY env var on each service
   API_KEY: process.env.EXPO_PUBLIC_API_KEY ?? '',
