@@ -174,6 +174,33 @@ export interface BrainPrediction {
 
 // ── Market API ───────────────────────────────────────────────────────────────
 
+
+
+type TimedCacheEntry<T> = { at: number; data: T };
+const _marketInFlight = new Map<string, Promise<any>>();
+const _marketCache = new Map<string, TimedCacheEntry<any>>();
+
+async function _cachedMarketGet<T>(key: string, ttlMs: number, req: () => Promise<T>): Promise<T> {
+  const now = Date.now();
+  const cached = _marketCache.get(key) as TimedCacheEntry<T> | undefined;
+  if (cached && now - cached.at < ttlMs) return cached.data;
+
+  const existing = _marketInFlight.get(key) as Promise<T> | undefined;
+  if (existing) return existing;
+
+  const pending = req()
+    .then((data) => {
+      _marketCache.set(key, { at: Date.now(), data });
+      return data;
+    })
+    .finally(() => {
+      _marketInFlight.delete(key);
+    });
+
+  _marketInFlight.set(key, pending);
+  return pending;
+}
+
 export const marketAPI = {
   async checkHealth(): Promise<{ ok: boolean; ts: number }> {
     const response = await api.get('/health');
@@ -181,18 +208,27 @@ export const marketAPI = {
   },
 
   async getSnapshot(symbol: string): Promise<MarketSnapshot> {
-    const response = await api.get('/api/market/snapshot', { params: { symbol } });
-    return response.data;
+    const key = `snapshot:${symbol}`;
+    return _cachedMarketGet(key, 8000, async () => {
+      const response = await api.get('/api/market/snapshot', { params: { symbol } });
+      return response.data as MarketSnapshot;
+    });
   },
 
   async getArbitrage(symbol: string): Promise<ArbitrageData> {
-    const response = await api.get('/api/market/arb', { params: { symbol } });
-    return response.data;
+    const key = `arb:${symbol}`;
+    return _cachedMarketGet(key, 12000, async () => {
+      const response = await api.get('/api/market/arb', { params: { symbol } });
+      return response.data as ArbitrageData;
+    });
   },
 
   async getRiskReport(symbol: string = 'BTC/USDT'): Promise<RiskReport> {
-    const response = await api.get('/api/sentinel/risk', { params: { symbol } });
-    return response.data;
+    const key = `risk:${symbol}`;
+    return _cachedMarketGet(key, 15000, async () => {
+      const response = await api.get('/api/sentinel/risk', { params: { symbol } });
+      return response.data as RiskReport;
+    });
   },
 
   async getMarketSessions(): Promise<{

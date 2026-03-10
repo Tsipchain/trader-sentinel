@@ -298,7 +298,7 @@ async def run_sleep_session(
     tp_pct = float(config.get("take_profit_pct", 4.0))
     risk_pct = float(config.get("risk_per_trade_pct", 1.0))
     max_position_pct = float(config.get("max_position_pct", 10.0))
-    max_open = int(config.get("max_open_trades", 3))
+    max_open = max(1, int(config.get("max_open_trades", 3)))
     max_exposure_pct = float(config.get("max_total_exposure_pct", 25.0))
 
     start_time = time.time()
@@ -306,6 +306,7 @@ async def run_sleep_session(
     trade_count = 0
     total_realized_pnl = 0.0
     last_entry_by_symbol: dict[str, float] = {}
+    forced_aggressive_logged = False
 
     # Initialize sleep session tracking
     session["sleep_mode"] = {
@@ -401,6 +402,11 @@ async def run_sleep_session(
 
             # 3. Scan for new entries if we have capacity
             blocked_symbols = {_canonical_symbol(sym) for sym in session.get("blocked_symbols", [])}
+            effective_symbols = symbols
+            if all(_canonical_symbol(sym) in blocked_symbols for sym in symbols):
+                effective_symbols = ["BTC/USDT", "ETH/USDT"]
+                _log_sleep(user_id, "All configured symbols are blocked/unavailable — trying fallback majors BTC/USDT, ETH/USDT.")
+
             if len(open_trades) < max_open:
                 # Get portfolio equity
                 try:
@@ -422,7 +428,7 @@ async def run_sleep_session(
                 exposure_ok = current_notional < max_notional
 
                 if exposure_ok:
-                    for symbol in symbols:
+                    for symbol in effective_symbols:
                         if _canonical_symbol(symbol) in blocked_symbols:
                             continue
 
@@ -464,7 +470,18 @@ async def run_sleep_session(
                         if is_opening_range:
                             confidence += 0.08
 
-                        if not side or confidence < MIN_CONFIDENCE:
+                        elapsed_s = time.time() - start_time
+                        dynamic_min_conf = MIN_CONFIDENCE
+                        if trade_count == 0 and elapsed_s > 2 * 3600:
+                            dynamic_min_conf = 0.35
+                        elif trade_count == 0 and elapsed_s > 3600:
+                            dynamic_min_conf = 0.42
+
+                        if dynamic_min_conf < MIN_CONFIDENCE and not forced_aggressive_logged:
+                            _log_sleep(user_id, f"No fills yet after {elapsed_s/3600:.1f}h — entering aggressive mode (min confidence {dynamic_min_conf:.2f}).")
+                            forced_aggressive_logged = True
+
+                        if not side or confidence < dynamic_min_conf:
                             continue
 
                         # Determine leverage (scale with confidence)
