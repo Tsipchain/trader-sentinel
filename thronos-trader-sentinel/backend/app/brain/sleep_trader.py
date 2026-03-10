@@ -10,6 +10,7 @@ Target: 25–30% portfolio profit across multiple small, high-conviction trades.
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from app.brain import connector, store as brain_store
@@ -23,10 +24,27 @@ log = logging.getLogger(__name__)
 _active_sessions: dict[str, asyncio.Task] = {}
 
 SLEEP_DURATION_S = 8 * 3600  # 8 hours
-SCAN_INTERVAL_S = 90         # re-scan every 90s
+SCAN_INTERVAL_S = 60         # re-scan every 60s
 MAX_TRADES_PER_SESSION = 40  # cap total trades in one sleep
 ENTRY_COOLDOWN_S = 180       # min 3 min between entries on same symbol
-MIN_CONFIDENCE = 0.60        # brain confidence threshold
+MIN_CONFIDENCE = 0.52        # lower threshold to increase trade frequency in 8h mode
+
+
+def _is_contract_activation_error(error_text: str) -> bool:
+    msg = (error_text or '').lower()
+    return (
+        'contract not activated' in msg
+        or 'code\":1002' in msg
+        or "'code':1002" in msg
+        or '"code":1002' in msg
+    )
+
+
+def _canonical_symbol(symbol: str) -> str:
+    s = (symbol or '').strip()
+    return s.replace(':USDT', '')
+
+
 
 
 def _sl_tp_for_leverage(leverage: float, side: str, price: float, sl_pct: float, tp_pct: float):
@@ -195,7 +213,7 @@ async def _manage_open_positions(
     sleep_trade_symbols = {t["symbol"] for t in sleep_trades if t.get("status") == "open"}
 
     for pos in positions:
-        sym = pos.get("symbol", "")
+        sym = _canonical_symbol(pos.get("symbol", ""))
         if sym not in sleep_trade_symbols:
             continue  # not our trade
 
@@ -280,7 +298,7 @@ async def run_sleep_session(
     tp_pct = float(config.get("take_profit_pct", 4.0))
     risk_pct = float(config.get("risk_per_trade_pct", 1.0))
     max_position_pct = float(config.get("max_position_pct", 10.0))
-    max_open = int(config.get("max_open_trades", 3))
+    max_open = max(1, int(config.get("max_open_trades", 3)))
     max_exposure_pct = float(config.get("max_total_exposure_pct", 25.0))
 
     start_time = time.time()
@@ -288,6 +306,7 @@ async def run_sleep_session(
     trade_count = 0
     total_realized_pnl = 0.0
     last_entry_by_symbol: dict[str, float] = {}
+    forced_aggressive_logged = False
 
     # Initialize sleep session tracking
     session["sleep_mode"] = {
@@ -299,6 +318,7 @@ async def run_sleep_session(
         "status": "running",
     }
     session["sleep_trades"] = []
+    session["blocked_symbols"] = []
     brain_store.save_autotrader(user_id, session)
     _log_sleep(user_id, f"Sleep Mode started — {len(symbols)} symbols, {max_leverage}x max leverage, {margin_mode} margin, futures")
 
@@ -323,13 +343,41 @@ async def run_sleep_session(
                 trade_count += 1
                 _log_sleep(user_id, f"Closed {c['symbol']}: {c['reason']} | PnL: {c['pnl_pct']:.1f}%")
 
+                closed_trade: dict[str, Any] | None = None
                 # Mark trade closed
                 for t in session.get("sleep_trades", []):
                     if t.get("symbol") == c["symbol"] and t.get("status") == "open":
                         t["status"] = "closed"
                         t["pnl_pct"] = c["pnl_pct"]
                         t["closed_at"] = c["closed_at"]
+                        closed_trade = t
                         break
+
+                if closed_trade:
+                    try:
+                        outcome = 1 if (c.get("pnl_pct", 0) or 0) > 0 else 0
+                        features = [
+                            min(float(closed_trade.get("leverage", 1)) / 300.0, 1.0),
+                            min(abs(float(c.get("pnl_pct", 0) or 0)) / 100.0, 1.0),
+                            1.0 if str(closed_trade.get("side", "")).lower() == "buy" else 0.0,
+                            min(float(closed_trade.get("confidence", 0.5)), 1.0),
+                        ]
+                        brain_engine.adapt(user_id, features, outcome)
+                    except Exception:
+                        pass
+
+                    _save_sleep_snapshot(user_id, "sleep_trade_closed", c["symbol"], {
+                        "side": closed_trade.get("side"),
+                        "entry_price": closed_trade.get("entry_price"),
+                        "amount": closed_trade.get("amount"),
+                        "leverage": closed_trade.get("leverage"),
+                        "confidence": closed_trade.get("confidence"),
+                        "pnl_pct": c.get("pnl_pct"),
+                        "realized_pnl_usd": c.get("unrealized_pnl"),
+                        "reason": c.get("reason"),
+                        "closed_at": c.get("closed_at"),
+                        "exchange": creds.get("exchange"),
+                    })
 
             # Count current open sleep trades
             open_trades = [t for t in session.get("sleep_trades", []) if t.get("status") == "open"]
@@ -337,10 +385,14 @@ async def run_sleep_session(
             # 2. Check market session timing
             session_bias = sessions_module.get_session_bias()
             if session_bias.get("wait_minutes", 0) > 0:
-                wait_note = session_bias.get("bias_note", "")
-                _log_sleep(user_id, f"Session timing: waiting {session_bias['wait_minutes']}min — {wait_note[:80]}")
-                await asyncio.sleep(min(session_bias["wait_minutes"] * 60, SCAN_INTERVAL_S))
-                continue
+                # Don't stay idle early in the sleep cycle: allow first entries even in low-session windows.
+                if trade_count == 0 and not open_trades:
+                    _log_sleep(user_id, "Session timing suggests waiting, but forcing initial scan to avoid zero-trade sleep.")
+                else:
+                    wait_note = session_bias.get("bias_note", "")
+                    _log_sleep(user_id, f"Session timing: waiting {session_bias['wait_minutes']}min — {wait_note[:80]}")
+                    await asyncio.sleep(min(session_bias["wait_minutes"] * 60, SCAN_INTERVAL_S))
+                    continue
 
             # Boost confidence during high-volume sessions
             volume_bonus = {"peak": 0.1, "high": 0.05, "medium": 0.0, "low": -0.1}.get(
@@ -349,6 +401,12 @@ async def run_sleep_session(
             is_opening_range = session_bias.get("opening_range", False)
 
             # 3. Scan for new entries if we have capacity
+            blocked_symbols = {_canonical_symbol(sym) for sym in session.get("blocked_symbols", [])}
+            effective_symbols = symbols
+            if all(_canonical_symbol(sym) in blocked_symbols for sym in symbols):
+                effective_symbols = ["BTC/USDT", "ETH/USDT"]
+                _log_sleep(user_id, "All configured symbols are blocked/unavailable — trying fallback majors BTC/USDT, ETH/USDT.")
+
             if len(open_trades) < max_open:
                 # Get portfolio equity
                 try:
@@ -370,7 +428,10 @@ async def run_sleep_session(
                 exposure_ok = current_notional < max_notional
 
                 if exposure_ok:
-                    for symbol in symbols:
+                    for symbol in effective_symbols:
+                        if _canonical_symbol(symbol) in blocked_symbols:
+                            continue
+
                         # Cooldown check
                         last_entry = last_entry_by_symbol.get(symbol, 0)
                         if time.time() - last_entry < ENTRY_COOLDOWN_S:
@@ -409,7 +470,18 @@ async def run_sleep_session(
                         if is_opening_range:
                             confidence += 0.08
 
-                        if not side or confidence < MIN_CONFIDENCE:
+                        elapsed_s = time.time() - start_time
+                        dynamic_min_conf = MIN_CONFIDENCE
+                        if trade_count == 0 and elapsed_s > 2 * 3600:
+                            dynamic_min_conf = 0.35
+                        elif trade_count == 0 and elapsed_s > 3600:
+                            dynamic_min_conf = 0.42
+
+                        if dynamic_min_conf < MIN_CONFIDENCE and not forced_aggressive_logged:
+                            _log_sleep(user_id, f"No fills yet after {elapsed_s/3600:.1f}h — entering aggressive mode (min confidence {dynamic_min_conf:.2f}).")
+                            forced_aggressive_logged = True
+
+                        if not side or confidence < dynamic_min_conf:
                             continue
 
                         # Determine leverage (scale with confidence)
@@ -435,11 +507,17 @@ async def run_sleep_session(
                                 symbol, use_leverage, creds.get("passphrase"),
                             )
 
-                            # Place market order
-                            order = await connector.create_market_order(
+                            # Limit-first entry (maker-friendly), then fallback to market
+                            limit_price = price * (1.0008 if side == "buy" else 0.9992)
+                            order = await connector.create_limit_order(
                                 creds["exchange"], creds["api_key"], creds["api_secret"],
-                                symbol, side, amount, creds.get("passphrase"),
+                                symbol, side, amount, limit_price, creds.get("passphrase"),
                             )
+                            if not order.get("ok"):
+                                order = await connector.create_market_order(
+                                    creds["exchange"], creds["api_key"], creds["api_secret"],
+                                    symbol, side, amount, creds.get("passphrase"),
+                                )
 
                             if order.get("ok"):
                                 fill_price = order.get("price", price)
@@ -488,8 +566,27 @@ async def run_sleep_session(
                                     f"{use_leverage}x {margin_mode} | SL ${sl_price:.2f} TP ${tp_price:.2f} | "
                                     f"Conf {confidence:.0%} | Vol: {vol_label}"
                                 )
+                                _save_sleep_snapshot(user_id, "sleep_trade_open", symbol, {
+                                    "side": side,
+                                    "entry_price": fill_price,
+                                    "amount": amount,
+                                    "leverage": use_leverage,
+                                    "confidence": round(confidence, 4),
+                                    "sl_price": sl_price,
+                                    "tp_price": tp_price,
+                                    "exchange": creds.get("exchange"),
+                                })
                             else:
-                                _log_sleep(user_id, f"Order failed for {symbol}: {order.get('error', 'unknown')}")
+                                err_msg = str(order.get("error", "unknown"))
+                                _log_sleep(user_id, f"Order failed for {symbol}: {err_msg}")
+                                if _is_contract_activation_error(err_msg):
+                                    blocked_symbols.add(_canonical_symbol(symbol))
+                                    session["blocked_symbols"] = sorted(blocked_symbols)
+                                    _log_sleep(
+                                        user_id,
+                                        f"Disabled {symbol} for this session: contract not activated on exchange. Activate it manually, then restart Sleep Mode.",
+                                    )
+                                    brain_store.save_autotrader(user_id, session)
 
                         except Exception as e:
                             _log_sleep(user_id, f"Execution error on {symbol}: {str(e)[:100]}")
@@ -546,6 +643,18 @@ def _log_sleep(user_id: str, message: str):
         if len(session["log"]) > 200:
             session["log"] = session["log"][-200:]
         brain_store.save_autotrader(user_id, session)
+
+def _save_sleep_snapshot(user_id: str, kind: str, symbol: str, content: dict[str, Any]) -> None:
+    try:
+        brain_store.save_analysis_snapshot(user_id, {
+            "kind": kind,
+            "symbol": symbol,
+            "content": content,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception:
+        pass
+
 
 
 def start_sleep_mode(user_id: str, brain_engine: PredictionEngine) -> dict:
@@ -621,6 +730,9 @@ async def check_trade_protection(
     """Analyze open positions and return protection actions."""
     actions: list[dict] = []
     risk_level = "LOW"
+    session = brain_store.load_autotrader(user_id) or {}
+    blocked_symbols = {_canonical_symbol(sym) for sym in session.get("blocked_symbols", [])}
+    blocked_updated = False
 
     try:
         positions = await connector.fetch_open_positions(
@@ -645,7 +757,9 @@ async def check_trade_protection(
     total_unrealized = 0.0
 
     for pos in positions:
-        sym = pos.get("symbol", "")
+        sym = _canonical_symbol(pos.get("symbol", ""))
+        if sym in blocked_symbols:
+            continue
         pnl_pct = pos.get("pnlPct", 0)
         leverage = pos.get("leverage", 1)
         notional = pos.get("notional", 0)
@@ -686,6 +800,9 @@ async def check_trade_protection(
                         passphrase,
                     )
                     actions[-1]["status"] = "executed" if result.get("ok") else "failed"
+                    if not result.get("ok") and _is_contract_activation_error(str(result.get("error", ""))):
+                        blocked_symbols.add(sym)
+                        blocked_updated = True
                 except Exception as e:
                     actions[-1]["status"] = "failed"
                     log.warning("[protection] hedge failed: %s", e)
@@ -721,6 +838,9 @@ async def check_trade_protection(
                     passphrase, reduce_only=True,
                 )
                 actions[-1]["status"] = "executed" if result.get("ok") else "failed"
+                if not result.get("ok") and _is_contract_activation_error(str(result.get("error", ""))):
+                    blocked_symbols.add(sym)
+                    blocked_updated = True
             except Exception as e:
                 actions[-1]["status"] = "failed"
                 log.warning("[protection] reduce failed: %s", e)
@@ -754,9 +874,19 @@ async def check_trade_protection(
                     safe_amount, passphrase,
                 )
                 actions[-1]["status"] = "executed" if result.get("ok") else "failed"
+                if not result.get("ok") and _is_contract_activation_error(str(result.get("error", ""))):
+                    blocked_symbols.add(sym)
+                    blocked_updated = True
             except Exception as e:
                 actions[-1]["status"] = "failed"
                 log.warning("[protection] safe order failed: %s", e)
+
+    if blocked_updated:
+        session["blocked_symbols"] = sorted(blocked_symbols)
+        session.setdefault("log", []).append(
+            f"Protection blocked symbols this session (contract activation required): {', '.join(sorted(blocked_symbols))}"
+        )
+        brain_store.save_autotrader(user_id, session)
 
     return {
         "ok": True,

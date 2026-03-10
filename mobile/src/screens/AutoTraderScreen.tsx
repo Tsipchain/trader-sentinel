@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, Switch, TouchableOpacity,
   Alert, TextInput, ActivityIndicator, Modal,
@@ -17,6 +17,14 @@ const EXCHANGE_OPTIONS = ['binance', 'bybit', 'okx', 'mexc'];
 const SNAPSHOT_MAX_AGE_MS = 5 * 60 * 1000;
 const SLEEP_POLL_MS = 15000; // poll sleep status every 15s
 const PROTECTION_POLL_MS = 30000; // check protection status every 30s
+const TIER_LIMITS: Record<'free' | 'starter' | 'pro' | 'elite' | 'whale', number> = {
+  free: 1,
+  starter: 5,
+  pro: 10,
+  elite: 15,
+  whale: Number.POSITIVE_INFINITY,
+};
+
 
 type SleepTrade = {
   id?: string;
@@ -41,6 +49,31 @@ function fmtPrice(price: number): string {
   if (price >= 1) return `$${price.toFixed(4)}`;
   if (price >= 0.01) return `$${price.toFixed(5)}`;
   return `$${price.toPrecision(4)}`;
+}
+
+
+function deriveSlTpPrices(entryPrice: number, side: 'BUY' | 'SELL', slPct: number, tpPct: number): { slPrice: number; tpPrice: number } {
+  if (entryPrice <= 0) return { slPrice: 0, tpPrice: 0 };
+  const slFactor = slPct / 100;
+  const tpFactor = tpPct / 100;
+  if (side === 'BUY') {
+    return {
+      slPrice: entryPrice * (1 - slFactor),
+      tpPrice: entryPrice * (1 + tpFactor),
+    };
+  }
+  return {
+    slPrice: entryPrice * (1 + slFactor),
+    tpPrice: entryPrice * (1 - tpFactor),
+  };
+}
+
+function dynamicSlSuggestion(pnlPct: number, configuredSlPct: number): number {
+  if (pnlPct >= 80) return Math.max(0.6, configuredSlPct * 0.35);
+  if (pnlPct >= 40) return Math.max(0.8, configuredSlPct * 0.5);
+  if (pnlPct >= 20) return Math.max(1.0, configuredSlPct * 0.65);
+  if (pnlPct >= 10) return Math.max(1.2, configuredSlPct * 0.8);
+  return configuredSlPct;
 }
 
 type ProtectionAction = {
@@ -73,7 +106,7 @@ function formatDuration(seconds: number): string {
 }
 
 export default function AutoTraderScreen() {
-  const { user, autoTrader, setAutoTrader } = useStore();
+  const { user, subscription, autoTrader, setAutoTrader } = useStore();
   const [toggling, setToggling] = useState(false);
   const [loadingStatus, setLoadingStatus] = useState(false);
   const [closingId, setClosingId] = useState<string | null>(null);
@@ -98,6 +131,11 @@ export default function AutoTraderScreen() {
 
   const isEnabled = autoTrader.enabled;
   const cfg = autoTrader.config;
+  const effectiveTier = (subscription || user?.subscription || 'free') as keyof typeof TIER_LIMITS;
+  const allowedMaxOpenTrades = TIER_LIMITS[effectiveTier] ?? TIER_LIMITS.free;
+  const displayedMaxOpenTrades = Number.isFinite(allowedMaxOpenTrades)
+    ? Math.min(cfg.maxOpenTrades, allowedMaxOpenTrades)
+    : cfg.maxOpenTrades;
   const portfolio = autoTrader.portfolio ?? {
     equity: 0,
     balances: [],
@@ -253,8 +291,10 @@ export default function AutoTraderScreen() {
   const isExchangeEnabled = (exchange: string) => exchangeAvailability[exchange]?.enabled !== false;
 
   const syncPortfolio = useCallback(async (): Promise<boolean> => {
-    if (!cfg.apiKey || !cfg.apiSecret) {
-      Alert.alert('Setup Required', 'Enter your exchange API key and secret first.');
+    const apiKeyTrimmed = cfg.apiKey.trim();
+    const apiSecretTrimmed = cfg.apiSecret.trim();
+    if (!apiKeyTrimmed || !apiSecretTrimmed) {
+      Alert.alert('Setup Required', 'Please enter valid exchange API key and secret before syncing.');
       return false;
     }
 
@@ -279,8 +319,8 @@ export default function AutoTraderScreen() {
 
       const res = await brainAPI.getExchangeSnapshot({
         exchange: cfg.exchange,
-        apiKey: cfg.apiKey,
-        apiSecret: cfg.apiSecret,
+        apiKey: apiKeyTrimmed,
+        apiSecret: apiSecretTrimmed,
         passphrase: cfg.passphrase || undefined,
       });
 
@@ -305,8 +345,9 @@ export default function AutoTraderScreen() {
         },
       });
       return true;
-    } catch {
-      Alert.alert('Sync Failed', 'Unable to connect to the brain service right now.');
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : 'Unknown network error';
+      Alert.alert('Sync Failed', `Unable to connect to brain service. ${errMsg}`);
       return false;
     } finally {
       setSyncingPortfolio(false);
@@ -324,8 +365,11 @@ export default function AutoTraderScreen() {
       Alert.alert('Not Connected', 'Connect your wallet first.');
       return;
     }
-    if (!isEnabled && (!cfg.apiKey || !cfg.apiSecret)) {
-      Alert.alert('Setup Required', 'Enter your exchange API key and secret before enabling AutoTrader.');
+    const apiKeyTrimmed = cfg.apiKey.trim();
+    const apiSecretTrimmed = cfg.apiSecret.trim();
+
+    if (!isEnabled && (!apiKeyTrimmed || !apiSecretTrimmed)) {
+      Alert.alert('Setup Required', 'Enter valid API key and secret before enabling AutoTrader.');
       return;
     }
     if (!isEnabled && !isExchangeEnabled(cfg.exchange)) {
@@ -353,10 +397,12 @@ export default function AutoTraderScreen() {
               const ok = await ensureFreshSnapshot();
               if (!ok) return;
 
-              if ((portfolio.equity || 0) < 50) {
+              const equityNow = portfolio.equity || 0;
+              if (equityNow < 50) {
+                const needed = Math.max(0, 50 - equityNow);
                 Alert.alert(
                   'Minimum Balance Required',
-                  'AutoTrader requires at least 50 USDT equity in your trading account before activation.',
+                  `AutoTrader requires at least 50 USDT equity before activation. Current equity: $${equityNow.toFixed(2)}. Add about $${needed.toFixed(2)} more and sync portfolio again.`,
                 );
                 return;
               }
@@ -364,14 +410,16 @@ export default function AutoTraderScreen() {
               await brainAPI.enableAutoTrader({
                 user_id: user.id,
                 exchange: cfg.exchange,
-                api_key: cfg.apiKey,
-                api_secret: cfg.apiSecret,
+                api_key: apiKeyTrimmed,
+                api_secret: apiSecretTrimmed,
                 passphrase: cfg.passphrase,
                 symbols: cfg.symbols,
                 stop_loss_pct: cfg.stopLossPct,
                 take_profit_pct: cfg.takeProfitPct,
                 max_position_pct: cfg.maxPositionPct,
-                max_open_trades: cfg.maxOpenTrades,
+                max_open_trades: Number.isFinite(allowedMaxOpenTrades)
+                  ? Math.min(cfg.maxOpenTrades, allowedMaxOpenTrades)
+                  : cfg.maxOpenTrades,
                 margin_mode: cfg.marginMode,
                 max_leverage: cfg.maxLeverage,
                 risk_per_trade_pct: cfg.riskPerTradePct,
@@ -467,6 +515,33 @@ export default function AutoTraderScreen() {
   const selectedExchangeBlocked = !isExchangeEnabled(cfg.exchange);
 
   // Sleep session derived data
+  const activeTradeCards = useMemo(() => autoTrader.activeTrades.map((trade, tradeIdx) => {
+    const pnl = trade.pnl ?? 0;
+    const entryPrice = trade.entryPrice ?? 0;
+    const currentPrice = trade.currentPrice ?? 0;
+    const pnlColor = pnl >= 0 ? COLORS.success : COLORS.error;
+    const sl = trade.stopLoss ?? cfg.stopLossPct;
+    const tp = trade.takeProfit ?? cfg.takeProfitPct;
+    const suggestedSl = dynamicSlSuggestion(pnl, sl);
+    const { slPrice, tpPrice } = deriveSlTpPrices(entryPrice, trade.side, sl, tp);
+    const { slPrice: suggestedSlPrice } = deriveSlTpPrices(entryPrice, trade.side, suggestedSl, tp);
+
+    return {
+      key: `${trade.id ?? `${trade.symbol}-${trade.openedAt || tradeIdx}`}-${tradeIdx}`,
+      trade,
+      pnl,
+      entryPrice,
+      currentPrice,
+      pnlColor,
+      sl,
+      tp,
+      slPrice,
+      tpPrice,
+      suggestedSl,
+      suggestedSlPrice,
+    };
+  }), [autoTrader.activeTrades, cfg.stopLossPct, cfg.takeProfitPct]);
+
   const sleepTrades = sleepStatus.trades ?? [];
   const openSleepTrades = sleepTrades.filter((t) => t.status === 'open');
   const closedSleepTrades = sleepTrades.filter((t) => t.status === 'closed');
@@ -522,7 +597,7 @@ export default function AutoTraderScreen() {
               {[
                 { label: 'Open', value: autoTrader.activeTrades.length },
                 { label: 'Symbols', value: cfg.symbols.length },
-                { label: 'Max Trades', value: cfg.maxOpenTrades },
+                { label: 'Max Trades', value: Number.isFinite(allowedMaxOpenTrades) ? displayedMaxOpenTrades : '∞' },
               ].map(({ label, value }) => (
                 <View key={label} style={styles.activeStat}>
                   <Text style={styles.activeStatValue}>{value}</Text>
@@ -615,9 +690,9 @@ export default function AutoTraderScreen() {
         {sleepStatus.active && openSleepTrades.length > 0 && (
           <>
             <Text style={styles.sectionTitle}>Sleep Mode Open Trades</Text>
-            {openSleepTrades.map((trade) => {
+            {openSleepTrades.map((trade, idx) => {
               const isLong = trade.side === 'buy';
-              const tradeKey = trade.id || `sleep-${trade.symbol}-${trade.opened_at}`;
+              const tradeKey = `${trade.id ?? `sleep-${trade.symbol}-${trade.opened_at}`}-${idx}`;
               return (
                 <View key={tradeKey} style={[styles.tradeCard, { borderLeftWidth: 3, borderLeftColor: isLong ? COLORS.success : COLORS.error }]}>
                   <View style={styles.tradeRow}>
@@ -661,10 +736,10 @@ export default function AutoTraderScreen() {
         {closedSleepTrades.length > 0 && (
           <>
             <Text style={styles.sectionTitle}>Sleep Mode Closed Trades</Text>
-            {closedSleepTrades.slice(-5).map((trade) => {
+            {closedSleepTrades.slice(-5).map((trade, idx) => {
               const pnl = trade.pnl_pct ?? 0;
               const pnlColor = pnl >= 0 ? COLORS.success : COLORS.error;
-              const tradeKey = trade.id || `closed-${trade.symbol}-${trade.closed_at ?? trade.opened_at}`;
+              const tradeKey = `${trade.id ?? `closed-${trade.symbol}-${trade.closed_at ?? trade.opened_at}`}-${idx}`;
               return (
                 <View key={tradeKey} style={[styles.tradeCard, { opacity: 0.8 }]}>
                   <View style={styles.tradeRow}>
@@ -706,7 +781,7 @@ export default function AutoTraderScreen() {
             <Text style={styles.sectionTitle}>Sleep Mode Log</Text>
             <View style={styles.logCard}>
               {sleepLog.slice(-8).map((entry, idx) => (
-                <Text key={`log-${sleepLog.length - 8 + idx}-${entry.slice(0, 20)}`} style={styles.logEntry}>{entry}</Text>
+                <Text key={`log-${idx}-${entry.slice(0, 20)}`} style={styles.logEntry}>{entry}</Text>
               ))}
             </View>
           </>
@@ -845,7 +920,15 @@ export default function AutoTraderScreen() {
                   value={String(cfg[key])}
                   onChangeText={(v) => {
                     const n = key === 'maxOpenTrades' ? parseInt(v, 10) : parseFloat(v);
-                    if (!isNaN(n)) updateCfg({ [key]: n } as Partial<typeof cfg>);
+                    if (isNaN(n)) return;
+                    if (key === 'maxOpenTrades') {
+                      const clamped = Number.isFinite(allowedMaxOpenTrades)
+                        ? Math.min(n, allowedMaxOpenTrades)
+                        : n;
+                      updateCfg({ [key]: Math.max(1, clamped) } as Partial<typeof cfg>);
+                      return;
+                    }
+                    updateCfg({ [key]: n } as Partial<typeof cfg>);
                   }}
                   keyboardType="numeric"
                   editable={!isEnabled}
@@ -886,8 +969,8 @@ export default function AutoTraderScreen() {
             {protectionActions.length > 0 && (
               <View style={{ marginTop: SPACING.sm }}>
                 <Text style={{ color: COLORS.textSecondary, fontSize: FONT_SIZES.xs, fontWeight: '600', marginBottom: 4 }}>Recent Actions:</Text>
-                {protectionActions.slice(0, 5).map((action) => (
-                  <View key={action.id} style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 3, gap: 6 }}>
+                {protectionActions.slice(0, 5).map((action, idx) => (
+                  <View key={`${action.id}-${action.symbol}-${idx}`} style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 3, gap: 6 }}>
                     <Ionicons
                       name={action.type === 'hedge' ? 'swap-horizontal' : action.type === 'safe_order' ? 'layers' : 'trending-down'}
                       size={12}
@@ -903,18 +986,13 @@ export default function AutoTraderScreen() {
           </View>
         )}
 
-        {autoTrader.activeTrades.length > 0 && (
+        {activeTradeCards.length > 0 && (
           <>
             <Text style={styles.sectionTitle}>Active Trades</Text>
-            {autoTrader.activeTrades.map((trade, tradeIdx) => {
-              const pnl = trade.pnl ?? 0;
-              const entryPrice = trade.entryPrice ?? 0;
-              const currentPrice = trade.currentPrice ?? 0;
-              const pnlColor = pnl >= 0 ? COLORS.success : COLORS.error;
-              const sl = trade.stopLoss ?? cfg.stopLossPct;
-              const tp = trade.takeProfit ?? cfg.takeProfitPct;
+            {activeTradeCards.map((item) => {
+              const { trade, pnl, entryPrice, currentPrice, pnlColor, sl, tp, slPrice, tpPrice, suggestedSl, suggestedSlPrice, key } = item;
               return (
-                <View key={trade.id || `${trade.symbol}-${trade.openedAt || tradeIdx}`} style={styles.tradeCard}>
+                <View key={key} style={styles.tradeCard}>
                   <View style={styles.tradeRow}>
                     <View style={[styles.sideBadge, {
                       backgroundColor: trade.side === 'BUY' ? COLORS.success + '22' : COLORS.error + '22',
@@ -952,6 +1030,10 @@ export default function AutoTraderScreen() {
                       <Text style={styles.editSlTpText}>Edit SL/TP</Text>
                     </TouchableOpacity>
                   </View>
+                  <Text style={[styles.tradeDetail, { marginTop: 4 }]}>
+                    SL {fmtPrice(slPrice)} · TP {fmtPrice(tpPrice)}
+                    {suggestedSl < sl ? ` · Dynamic SL ${suggestedSl.toFixed(2)}% (${fmtPrice(suggestedSlPrice)})` : ''}
+                  </Text>
                   <TouchableOpacity
                     style={styles.closeBtn}
                     onPress={() => handleCloseTrade(trade)}
@@ -968,7 +1050,7 @@ export default function AutoTraderScreen() {
         )}
 
         {/* Sentinel Observations for active trades */}
-        {isEnabled && autoTrader.activeTrades.length > 0 && (
+        {isEnabled && activeTradeCards.length > 0 && (
           <View style={styles.card}>
             <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: SPACING.sm }}>
               <Ionicons name="eye" size={18} color={COLORS.info} />
@@ -976,11 +1058,12 @@ export default function AutoTraderScreen() {
                 Sentinel Observations
               </Text>
             </View>
-            {autoTrader.activeTrades.map((trade, idx) => {
+            {activeTradeCards.map((item, idx) => {
+              const trade = item.trade;
               const pnl = trade.pnl ?? 0;
               const leverageRisk = (trade as any).leverage >= 50 ? 'EXTREME' : (trade as any).leverage >= 20 ? 'HIGH' : 'MODERATE';
               return (
-                <View key={`obs-${trade.id || trade.symbol || idx}`} style={{ marginBottom: 4 }}>
+                <View key={`obs-${trade.id ?? trade.symbol ?? 'trade'}-${idx}`} style={{ marginBottom: 4 }}>
                   <Text style={{ color: COLORS.textSecondary, fontSize: FONT_SIZES.xs }}>
                     <Text style={{ fontWeight: '700', color: pnl >= 5 ? COLORS.success : pnl <= -3 ? COLORS.error : COLORS.textSecondary }}>
                       {trade.symbol}
