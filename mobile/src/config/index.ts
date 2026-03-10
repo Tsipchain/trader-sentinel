@@ -286,6 +286,26 @@ export const CONFIG = {
     SOLANA: process.env.EXPO_PUBLIC_TREASURY_SOLANA ?? '',
   },
 
+
+  // Subscription tier limits (single source of truth)
+  TIER_LIMITS: {
+    free: _toTierLimit(process.env.EXPO_PUBLIC_TIER_LIMIT_FREE, 1),
+    starter: _toTierLimit(process.env.EXPO_PUBLIC_TIER_LIMIT_STARTER, 5),
+    pro: _toTierLimit(process.env.EXPO_PUBLIC_TIER_LIMIT_PRO, 10),
+    elite: _toTierLimit(process.env.EXPO_PUBLIC_TIER_LIMIT_ELITE, 15),
+    whale: _toTierLimit(process.env.EXPO_PUBLIC_TIER_LIMIT_WHALE, Number.POSITIVE_INFINITY),
+  },
+
+  // Public treasury addresses only (safe for Expo public env)
+  TREASURY_ADDRESSES: {
+    ETH: process.env.EXPO_PUBLIC_TREASURY_ETH ?? '',
+    BSC: process.env.EXPO_PUBLIC_TREASURY_BSC ?? '',
+    POLYGON: process.env.EXPO_PUBLIC_TREASURY_POLYGON ?? '',
+    ARBITRUM: process.env.EXPO_PUBLIC_TREASURY_ARBITRUM ?? '',
+    BASE: process.env.EXPO_PUBLIC_TREASURY_BASE ?? '',
+    SOLANA: process.env.EXPO_PUBLIC_TREASURY_SOLANA ?? '',
+  },
+
   // API security — set this to the same value as API_KEY env var on each service
   API_KEY: process.env.EXPO_PUBLIC_API_KEY ?? '',
 };

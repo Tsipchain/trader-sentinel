@@ -123,6 +123,25 @@ export default function SignalsScreen() {
     return risk;
   }, []);
 
+
+  const handleFetchError = useCallback((error: unknown) => {
+    const status = (error as any)?.response?.status;
+    const isNetworkError = (error as any)?.message === 'Network Error';
+    if (status === 429) {
+      // Client-side backoff to avoid hammering upstream when rate-limited
+      nextFetchAllowedAtRef.current = Date.now() + 60_000;
+    } else if (isNetworkError) {
+      // transient network issue: short cooldown to avoid retry storms
+      nextFetchAllowedAtRef.current = Date.now() + 15_000;
+    }
+
+    if (status === 429 || isNetworkError) {
+      console.warn('Signals fetch backoff:', status ?? 'network');
+    } else {
+      console.warn('Signals fetch failed:', (error as any)?.message ?? 'unknown error');
+    }
+  }, []);
+
   const fetchSignals = useCallback(async () => {
     if (Date.now() < nextFetchAllowedAtRef.current) {
       return;
@@ -251,18 +270,10 @@ export default function SignalsScreen() {
       } catch (error) {
         _handleFetchError(error);
       }
+    } catch (error) {
+      handleFetchError(error);
     }
-
-    function _handleFetchError(error: unknown) {
-      const status = (error as any)?.response?.status;
-      const isNetworkError = (error as any)?.message === 'Network Error';
-      if (status === 429) {
-        nextFetchAllowedAtRef.current = Date.now() + 60000;
-      } else if (isNetworkError) {
-        nextFetchAllowedAtRef.current = Date.now() + 15000;
-      }
-    }
-  }, [watchlist, addSignalWithFeedback, canUseAdvancedSignals, hasRecentDuplicate, hasAnySignalPrefix, tierPolicy.allowNewCoinSignals, tierPolicy.directionalLimit, getRiskReportWithMinInterval]);
+  }, [watchlist, addSignalWithFeedback, canUseAdvancedSignals, hasRecentDuplicate, hasAnySignalPrefix, tierPolicy.allowNewCoinSignals, tierPolicy.directionalLimit, getRiskReportWithMinInterval, handleFetchError]);
 
 
   useEffect(() => {
