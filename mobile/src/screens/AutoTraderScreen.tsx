@@ -160,7 +160,7 @@ export default function AutoTraderScreen() {
     return Array.from(new Set(normalized));
   }, [watchlist]);
 
-  const [sleepStatus, setSleepStatus] = useState<SleepStatus>({ active: false, trades: [], log: [] });
+  const [sleepModeStatus, setSleepModeStatus] = useState<SleepStatus>({ active: false, trades: [], log: [] });
   const [startingSleep, setStartingSleep] = useState(false);
   const [stoppingSleep, setStoppingSleep] = useState(false);
   const [protectionEnabled, setProtectionEnabled] = useState(true);
@@ -176,7 +176,7 @@ export default function AutoTraderScreen() {
     try {
       const status = await brainAPI.getSleepStatus(user.id);
       if (status.ok) {
-        setSleepStatus((prev) => ({
+        setSleepModeStatus((prev) => ({
           ...prev,
           ...status,
           active: !!status.active,
@@ -199,7 +199,7 @@ export default function AutoTraderScreen() {
         api_key: cfg.apiKey.trim(),
         api_secret: cfg.apiSecret.trim(),
         passphrase: cfg.passphrase || undefined,
-        mode: sleepStatus.active ? 'sleep' : 'active',
+        mode: sleepModeStatus.active ? 'sleep' : 'active',
         config: {
           stop_loss_pct: cfg.stopLossPct,
           take_profit_pct: cfg.takeProfitPct,
@@ -218,7 +218,7 @@ export default function AutoTraderScreen() {
         }));
         setProtectionActions((prev) => [...normalized, ...prev].slice(0, 20));
 
-        if (sleepStatus.active) {
+        if (sleepModeStatus.active) {
           const derivedLogs = normalized.map((action) => {
             const actionName = action.type === 'hedge'
               ? 'HEDGE'
@@ -228,7 +228,7 @@ export default function AutoTraderScreen() {
             return `[${new Date(action.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}] ${actionName} ${action.symbol}: ${action.description}`;
           });
 
-          setSleepStatus((prev) => ({
+          setSleepModeStatus((prev) => ({
             ...prev,
             log: [...(prev.log ?? []), ...derivedLogs].slice(-30),
           }));
@@ -239,88 +239,7 @@ export default function AutoTraderScreen() {
     } finally {
       setProtectionChecking(false);
     }
-  }, [user?.id, isEnabled, protectionEnabled, sleepStatus.active, cfg.exchange, cfg.apiKey, cfg.apiSecret, cfg.passphrase, cfg.stopLossPct, cfg.takeProfitPct, cfg.maxLeverage, cfg.maxTotalExposurePct]);
-
-  const [sleepStatus, setSleepStatus] = useState<SleepStatus>({ active: false, trades: [], log: [] });
-  const [startingSleep, setStartingSleep] = useState(false);
-  const [stoppingSleep, setStoppingSleep] = useState(false);
-  const [protectionEnabled, setProtectionEnabled] = useState(true);
-  const [protectionChecking, setProtectionChecking] = useState(false);
-  const [protectionActions, setProtectionActions] = useState<ProtectionAction[]>([]);
-  const [editingTrade, setEditingTrade] = useState<ActiveTrade | null>(null);
-  const [editSL, setEditSL] = useState('');
-  const [editTP, setEditTP] = useState('');
-  const [savingSlTp, setSavingSlTp] = useState(false);
-
-  const pollSleepStatus = useCallback(async () => {
-    if (!user?.id) return;
-    try {
-      const status = await brainAPI.getSleepStatus(user.id);
-      if (status.ok) {
-        setSleepStatus((prev) => ({
-          ...prev,
-          ...status,
-          active: !!status.active,
-          trades: status.trades ?? prev.trades ?? [],
-          log: status.log ?? prev.log ?? [],
-        }));
-      }
-    } catch {
-      // silent background polling
-    }
-  }, [user?.id]);
-
-  const refreshProtection = useCallback(async () => {
-    if (!user?.id || !isEnabled || !protectionEnabled) return;
-    setProtectionChecking(true);
-    try {
-      const response = await brainAPI.checkTradeProtection({
-        user_id: user.id,
-        exchange: cfg.exchange,
-        api_key: cfg.apiKey.trim(),
-        api_secret: cfg.apiSecret.trim(),
-        passphrase: cfg.passphrase || undefined,
-        mode: sleepStatus.active ? 'sleep' : 'active',
-        config: {
-          stop_loss_pct: cfg.stopLossPct,
-          take_profit_pct: cfg.takeProfitPct,
-          max_leverage: cfg.maxLeverage,
-          max_total_exposure_pct: cfg.maxTotalExposurePct,
-        },
-      });
-      if (response?.ok && Array.isArray(response.actions) && response.actions.length > 0) {
-        const normalized: ProtectionAction[] = response.actions.map((a: any, idx: number) => ({
-          id: String(a.id ?? `${Date.now()}-${idx}`),
-          type: a.type ?? 'sl_adjust',
-          symbol: a.symbol ?? 'UNKNOWN',
-          description: a.description ?? a.message ?? 'Protection action',
-          timestamp: Number(a.timestamp ?? Date.now()),
-          status: a.status ?? 'executed',
-        }));
-        setProtectionActions((prev) => [...normalized, ...prev].slice(0, 20));
-
-        if (sleepStatus.active) {
-          const derivedLogs = normalized.map((action) => {
-            const actionName = action.type === 'hedge'
-              ? 'HEDGE'
-              : action.type === 'dca'
-                ? 'DCA'
-                : action.type.toUpperCase();
-            return `[${new Date(action.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}] ${actionName} ${action.symbol}: ${action.description}`;
-          });
-
-          setSleepStatus((prev) => ({
-            ...prev,
-            log: [...(prev.log ?? []), ...derivedLogs].slice(-30),
-          }));
-        }
-      }
-    } catch {
-      // silent background polling
-    } finally {
-      setProtectionChecking(false);
-    }
-  }, [user?.id, isEnabled, protectionEnabled, sleepStatus.active, cfg.exchange, cfg.apiKey, cfg.apiSecret, cfg.passphrase, cfg.stopLossPct, cfg.takeProfitPct, cfg.maxLeverage, cfg.maxTotalExposurePct]);
+  }, [user?.id, isEnabled, protectionEnabled, sleepModeStatus.active, cfg.exchange, cfg.apiKey, cfg.apiSecret, cfg.passphrase, cfg.stopLossPct, cfg.takeProfitPct, cfg.maxLeverage, cfg.maxTotalExposurePct]);
 
   const refreshStatus = useCallback(async () => {
     setLoadingStatus(true);
@@ -538,7 +457,7 @@ export default function AutoTraderScreen() {
               if (res.ok) {
                 const startedAt = Date.now() / 1000;
                 const endsAt = startedAt + (8 * 3600);
-                setSleepStatus({
+                setSleepModeStatus({
                   active: true,
                   status: 'running',
                   trade_count: 0,
@@ -573,7 +492,7 @@ export default function AutoTraderScreen() {
           setStoppingSleep(true);
           try {
             await brainAPI.stopSleepMode(user.id);
-            setSleepStatus((prev) => ({ ...prev, active: false, status: 'stopped_by_user' }));
+            setSleepModeStatus((prev) => ({ ...prev, active: false, status: 'stopped_by_user' }));
           } catch {
             // silent
           } finally {
@@ -668,18 +587,18 @@ export default function AutoTraderScreen() {
     };
   }), [autoTrader.activeTrades, cfg.stopLossPct, cfg.takeProfitPct]);
 
-  const sleepTrades = sleepStatus.trades ?? [];
+  const sleepTrades = sleepModeStatus.trades ?? [];
   const openSleepTrades = sleepTrades.filter((t) => t.status === 'open');
   const closedSleepTrades = sleepTrades.filter((t) => t.status === 'closed');
-  const sleepLog = sleepStatus.log ?? [];
+  const sleepLog = sleepModeStatus.log ?? [];
 
   return (
     <SafeAreaView style={styles.safe} edges={['bottom']}>
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
         <View style={styles.statusRow}>
-          <View style={[styles.statusDot, { backgroundColor: sleepStatus.active ? '#8B5CF6' : isEnabled ? COLORS.success : COLORS.textMuted }]} />
-          <Text style={[styles.statusLabel, { color: sleepStatus.active ? '#8B5CF6' : isEnabled ? COLORS.success : COLORS.textMuted }]}>
-            {loadingStatus ? 'CHECKING\u2026' : sleepStatus.active ? 'SLEEP MODE ACTIVE' : isEnabled ? 'AUTOTRADER ACTIVE' : 'AUTOTRADER IDLE'}
+          <View style={[styles.statusDot, { backgroundColor: sleepModeStatus.active ? '#8B5CF6' : isEnabled ? COLORS.success : COLORS.textMuted }]} />
+          <Text style={[styles.statusLabel, { color: sleepModeStatus.active ? '#8B5CF6' : isEnabled ? COLORS.success : COLORS.textMuted }]}>
+            {loadingStatus ? 'CHECKING\u2026' : sleepModeStatus.active ? 'SLEEP MODE ACTIVE' : isEnabled ? 'AUTOTRADER ACTIVE' : 'AUTOTRADER IDLE'}
           </Text>
           <TouchableOpacity onPress={refreshStatus} style={styles.refreshBtn}>
             <Ionicons name="refresh" size={16} color={COLORS.textMuted} />
@@ -688,19 +607,19 @@ export default function AutoTraderScreen() {
 
         {/* Main toggle card */}
         <LinearGradient
-          colors={sleepStatus.active ? ['#4C1D95', '#6D28D9'] as [string, string] : isEnabled ? ['#065F46', '#047857'] as [string, string] : COLORS.gradientCard as [string, string]}
+          colors={sleepModeStatus.active ? ['#4C1D95', '#6D28D9'] as [string, string] : isEnabled ? ['#065F46', '#047857'] as [string, string] : COLORS.gradientCard as [string, string]}
           style={styles.mainCard}
         >
           <View style={styles.toggleRow}>
             <View style={styles.toggleLeft}>
               <Ionicons
-                name={sleepStatus.active ? 'moon' : 'hardware-chip'}
+                name={sleepModeStatus.active ? 'moon' : 'hardware-chip'}
                 size={30}
-                color={sleepStatus.active ? '#C4B5FD' : isEnabled ? COLORS.chartGreen : COLORS.primary}
+                color={sleepModeStatus.active ? '#C4B5FD' : isEnabled ? COLORS.chartGreen : COLORS.primary}
               />
               <View style={styles.toggleText}>
                 <Text style={styles.toggleTitle}>
-                  {sleepStatus.active ? 'Sleep Mode' : 'AutoTrader'}
+                  {sleepModeStatus.active ? 'Sleep Mode' : 'AutoTrader'}
                 </Text>
                 <Text style={styles.toggleSub}>
                   {isEnabled ? 'Managed trades stay active, bot can open new ones' : 'Hand over new trade execution to Sentinel AI'}
@@ -712,11 +631,11 @@ export default function AutoTraderScreen() {
               onValueChange={handleToggle}
               trackColor={{ false: COLORS.surface, true: COLORS.successDark }}
               thumbColor={isEnabled ? '#fff' : COLORS.textMuted}
-              disabled={sleepStatus.active}
+              disabled={sleepModeStatus.active}
             />}
           </View>
 
-          {isEnabled && !sleepStatus.active && (
+          {isEnabled && !sleepModeStatus.active && (
             <View style={styles.activeStats}>
               {[
                 { label: 'Managed trades', value: portfolio.positions.length || autoTrader.activeTrades.length },
@@ -731,12 +650,12 @@ export default function AutoTraderScreen() {
             </View>
           )}
 
-          {sleepStatus.active && (
+          {sleepModeStatus.active && (
             <View style={styles.activeStats}>
               {[
-                { label: 'Trades', value: sleepStatus.trade_count ?? 0 },
-                { label: 'PnL', value: `$${(sleepStatus.realized_pnl ?? 0).toFixed(2)}` },
-                { label: 'Remaining', value: formatDuration(sleepStatus.remaining_s ?? 0) },
+                { label: 'Trades', value: sleepModeStatus.trade_count ?? 0 },
+                { label: 'PnL', value: `$${(sleepModeStatus.realized_pnl ?? 0).toFixed(2)}` },
+                { label: 'Remaining', value: formatDuration(sleepModeStatus.remaining_s ?? 0) },
               ].map(({ label, value }) => (
                 <View key={label} style={styles.activeStat}>
                   <Text style={styles.activeStatValue}>{String(value)}</Text>
@@ -760,7 +679,7 @@ export default function AutoTraderScreen() {
               {`Activate when you go to sleep. Sentinel will autonomously trade for 8 hours targeting ${sleepTargetRange} portfolio profit using TA-driven entries with SL/TP protection.`}
             </Text>
 
-            {!sleepStatus.active ? (
+            {!sleepModeStatus.active ? (
               <TouchableOpacity
                 style={[styles.sleepBtn, startingSleep && { opacity: 0.6 }]}
                 onPress={handleStartSleep}
@@ -793,17 +712,17 @@ export default function AutoTraderScreen() {
             )}
 
             {/* Progress bar */}
-            {sleepStatus.active && sleepStatus.elapsed_s != null && sleepStatus.ends_at != null && sleepStatus.started_at != null && (
+            {sleepModeStatus.active && sleepModeStatus.elapsed_s != null && sleepModeStatus.ends_at != null && sleepModeStatus.started_at != null && (
               <View style={styles.progressContainer}>
                 <View style={styles.progressBar}>
                   <View
                     style={[styles.progressFill, {
-                      width: `${Math.min(100, (sleepStatus.elapsed_s / (sleepStatus.ends_at - sleepStatus.started_at)) * 100)}%`,
+                      width: `${Math.min(100, (sleepModeStatus.elapsed_s / (sleepModeStatus.ends_at - sleepModeStatus.started_at)) * 100)}%`,
                     }]}
                   />
                 </View>
                 <Text style={styles.progressText}>
-                  {formatDuration(sleepStatus.elapsed_s)} elapsed
+                  {formatDuration(sleepModeStatus.elapsed_s)} elapsed
                 </Text>
               </View>
             )}
@@ -811,7 +730,7 @@ export default function AutoTraderScreen() {
         )}
 
         {/* Sleep Trades */}
-        {sleepStatus.active && openSleepTrades.length > 0 && (
+        {sleepModeStatus.active && openSleepTrades.length > 0 && (
           <>
             <Text style={styles.sectionTitle}>Sleep Mode Open Trades</Text>
             {openSleepTrades.map((trade, idx) => {
@@ -1077,7 +996,7 @@ export default function AutoTraderScreen() {
               />
             </View>
             <Text style={{ color: COLORS.textSecondary, fontSize: FONT_SIZES.xs, marginBottom: SPACING.sm, lineHeight: 16 }}>
-              {sleepStatus.active
+              {sleepModeStatus.active
                 ? 'Sleep Guard: Sentinel monitors your positions and applies hedge/safe orders/DCA if markets move against you.'
                 : 'Active Guard: Sentinel watches for anomalies and protects existing positions with SL adjustments and hedging.'}
             </Text>
