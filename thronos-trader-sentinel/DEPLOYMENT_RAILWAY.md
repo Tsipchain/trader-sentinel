@@ -161,3 +161,29 @@ curl -s https://<brain-host>/api/brain/health
 ```
 
 All should return HTTP 200 JSON. If they do, initialization is complete and the queue issue was platform-side.
+
+
+## 9) If status says **"Queued due to upstream GitHub issues"**
+
+This is a GitHub integration outage/delay between Railway and GitHub webhooks, not an app bug.
+
+### Immediate workaround (recommended)
+
+1. In Railway service settings, temporarily disable **Auto Deploy on Git push**.
+2. Trigger a manual deploy from latest source (or redeploy latest successful build/image).
+3. Once deployment succeeds, re-enable auto deploy.
+
+### Queue cleanup
+
+- Cancel older queued deployments (#93, #94 etc.) and keep only one latest deploy request.
+- If GitHub-triggered deploys keep queueing, wait for GitHub status recovery and deploy manually in the meantime.
+
+### Validate after manual deploy
+
+```bash
+curl -s https://<brain-host>/
+curl -s https://<brain-host>/health
+curl -s https://<brain-host>/api/brain/health
+```
+
+If these return `ok: true`, AutoTrader backend is healthy; queueing is external to runtime code.
