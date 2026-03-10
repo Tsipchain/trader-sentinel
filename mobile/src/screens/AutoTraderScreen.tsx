@@ -25,6 +25,14 @@ const TIER_LIMITS: Record<'free' | 'starter' | 'pro' | 'elite' | 'whale', number
   whale: Number.POSITIVE_INFINITY,
 };
 
+const SLEEP_TARGET_BY_TIER: Record<'free' | 'starter' | 'pro' | 'elite' | 'whale', string> = {
+  free: '2-4%',
+  starter: '4-8%',
+  pro: '8-15%',
+  elite: '15-22%',
+  whale: '25-30%',
+};
+
 
 type SleepTrade = {
   id?: string;
@@ -78,7 +86,7 @@ function dynamicSlSuggestion(pnlPct: number, configuredSlPct: number): number {
 
 type ProtectionAction = {
   id: string;
-  type: 'hedge' | 'safe_order' | 'sl_adjust' | 'tp_adjust' | 'reduce';
+  type: 'hedge' | 'safe_order' | 'sl_adjust' | 'tp_adjust' | 'reduce' | 'dca';
   symbol: string;
   description: string;
   timestamp: number;
@@ -116,6 +124,7 @@ export default function AutoTraderScreen() {
   const isEnabled = autoTrader.enabled;
   const cfg = autoTrader.config;
   const effectiveTier = (subscription || user?.subscription || 'free') as keyof typeof TIER_LIMITS;
+  const sleepTargetRange = SLEEP_TARGET_BY_TIER[effectiveTier] ?? SLEEP_TARGET_BY_TIER.free;
   const allowedMaxOpenTrades = TIER_LIMITS[effectiveTier] ?? TIER_LIMITS.free;
   const displayedMaxOpenTrades = Number.isFinite(allowedMaxOpenTrades)
     ? Math.min(cfg.maxOpenTrades, allowedMaxOpenTrades)
@@ -192,6 +201,22 @@ export default function AutoTraderScreen() {
           status: a.status ?? 'executed',
         }));
         setProtectionActions((prev) => [...normalized, ...prev].slice(0, 20));
+
+        if (sleepStatus.active) {
+          const derivedLogs = normalized.map((action) => {
+            const actionName = action.type === 'hedge'
+              ? 'HEDGE'
+              : action.type === 'dca'
+                ? 'DCA'
+                : action.type.toUpperCase();
+            return `[${new Date(action.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}] ${actionName} ${action.symbol}: ${action.description}`;
+          });
+
+          setSleepStatus((prev) => ({
+            ...prev,
+            log: [...(prev.log ?? []), ...derivedLogs].slice(-30),
+          }));
+        }
       }
     } catch {
       // silent background polling
@@ -404,7 +429,7 @@ export default function AutoTraderScreen() {
     if (!user?.id || !isEnabled) return;
     Alert.alert(
       'Activate Sleep Mode?',
-      `Sentinel will autonomously trade ${cfg.symbols.join(', ')} on ${(cfg.exchange || '').toUpperCase()} for up to 8 hours while you rest.\n\nTarget: 25-30% portfolio profit.\nMax leverage: ${cfg.maxLeverage}x\nPortfolio: $${(portfolio.equity ?? 0).toFixed(2)}`,
+      `Sentinel will autonomously trade ${cfg.symbols.join(', ')} on ${(cfg.exchange || '').toUpperCase()} for up to 8 hours while you rest.\n\nTarget: ${sleepTargetRange} portfolio profit.\nMax leverage: ${cfg.maxLeverage}x\nPortfolio: $${(portfolio.equity ?? 0).toFixed(2)}`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -635,7 +660,7 @@ export default function AutoTraderScreen() {
               </Text>
             </View>
             <Text style={{ color: COLORS.textSecondary, fontSize: FONT_SIZES.xs, marginBottom: SPACING.md, lineHeight: 16 }}>
-              Activate when you go to sleep. Sentinel will autonomously trade for 8 hours targeting 25-30% portfolio profit using TA-driven entries with SL/TP protection.
+              {`Activate when you go to sleep. Sentinel will autonomously trade for 8 hours targeting ${sleepTargetRange} portfolio profit using TA-driven entries with SL/TP protection.`}
             </Text>
 
             {!sleepStatus.active ? (
@@ -956,7 +981,7 @@ export default function AutoTraderScreen() {
             </View>
             <Text style={{ color: COLORS.textSecondary, fontSize: FONT_SIZES.xs, marginBottom: SPACING.sm, lineHeight: 16 }}>
               {sleepStatus.active
-                ? 'Sleep Guard: Sentinel monitors your positions and applies hedge/safe orders if markets move against you.'
+                ? 'Sleep Guard: Sentinel monitors your positions and applies hedge/safe orders/DCA if markets move against you.'
                 : 'Active Guard: Sentinel watches for anomalies and protects existing positions with SL adjustments and hedging.'}
             </Text>
             {protectionChecking && (
@@ -971,7 +996,7 @@ export default function AutoTraderScreen() {
                 {protectionActions.slice(0, 5).map((action, idx) => (
                   <View key={`${action.id}-${action.symbol}-${idx}`} style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 3, gap: 6 }}>
                     <Ionicons
-                      name={action.type === 'hedge' ? 'swap-horizontal' : action.type === 'safe_order' ? 'layers' : 'trending-down'}
+                      name={action.type === 'hedge' ? 'swap-horizontal' : action.type === 'safe_order' ? 'layers' : action.type === 'dca' ? 'add-circle' : 'trending-down'}
                       size={12}
                       color={action.status === 'executed' ? COLORS.success : action.status === 'failed' ? COLORS.error : COLORS.warning}
                     />

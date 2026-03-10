@@ -39,7 +39,7 @@ const packages: Package[] = [
 ];
 
 export default function SubscriptionScreen() {
-  const { subscription, wallet, user, setUser, setSubscription } = useStore();
+  const { subscription, wallet, user, setUser, setSubscription, addReward } = useStore();
   const [selectedPackage, setSelectedPackage] = useState<Package | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('crypto');
   const [selectedChain, setSelectedChain] = useState<CryptoChain>('ETHEREUM');
@@ -170,6 +170,9 @@ export default function SubscriptionScreen() {
         const nextExpiryIso = new Date(baseMs + (30 * 24 * 60 * 60 * 1000)).toISOString();
 
         if (user) {
+          const sameTierRepay = user.subscription === (selectedPackage.id as any);
+          const activePeriod = !!user.subscriptionExpiresAt && Date.parse(user.subscriptionExpiresAt) > now.getTime();
+
           setUser({
             ...user,
             subscription: selectedPackage.id as any,
@@ -178,6 +181,15 @@ export default function SubscriptionScreen() {
             lastSubscriptionPaymentAt: nowIso,
             subscriptionPaymentsCount: (user.subscriptionPaymentsCount || 0) + 1,
           });
+
+          // Compensation path: if user repays the same active tier, credit THR rewards back.
+          if (sameTierRepay && activePeriod) {
+            addReward(selectedPackage.priceTHR, 'duplicate_subscription_refund');
+            Alert.alert(
+              'Duplicate Payment Detected',
+              `Credited ${selectedPackage.priceTHR} THR to your rewards as compensation.`,
+            );
+          }
         }
 
         setShowPaymentModal(false);
