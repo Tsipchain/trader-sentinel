@@ -17,6 +17,7 @@ import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { RootStackParamList } from '../../App';
 import { COLORS, SPACING, FONT_SIZES, BORDER_RADIUS } from '../constants/theme';
 import { useStore } from '../store/useStore';
@@ -50,6 +51,21 @@ const AVAILABLE_PAIRS = [
   'WIF/USDT', 'SHIB/USDT', 'ATOM/USDT', 'TRX/USDT',
 ];
 
+
+
+type PaymentReceipt = {
+  packageId?: string;
+  tier?: string;
+  amount?: string;
+  token?: string;
+  chain?: string;
+  txHash?: string;
+  blockchainRef?: string;
+  walletAddress?: string;
+  savedAt?: string;
+  verificationStatus?: 'pending' | 'confirmed';
+};
+
 type WatchlistAlert = {
   symbol: string;
   riskScore: number;
@@ -74,6 +90,7 @@ export default function WalletScreen() {
   const [watchlistAlerts, setWatchlistAlerts] = useState<WatchlistAlert[]>([]);
   const [alertsLoading, setAlertsLoading] = useState(false);
   const [walletError, setWalletError] = useState<string | null>(null);
+  const [paymentReceipts, setPaymentReceipts] = useState<PaymentReceipt[]>([]);
 
   // Fetch Sentinel observations for watchlist pairs
   const fetchWatchlistAlerts = useCallback(async () => {
@@ -118,6 +135,28 @@ export default function WalletScreen() {
   useEffect(() => {
     fetchWatchlistAlerts();
   }, [fetchWatchlistAlerts]);
+
+
+  const loadPaymentReceipts = useCallback(async () => {
+    try {
+      const raw = await AsyncStorage.getItem('sentinel_payment_receipts');
+      const receipts: PaymentReceipt[] = raw ? JSON.parse(raw) : [];
+      const filtered = receipts
+        .filter((r) => !wallet.address || r.walletAddress === wallet.address)
+        .map((r) => ({
+          ...r,
+          verificationStatus: r.verificationStatus ?? (r.blockchainRef && r.blockchainRef !== 'pending_verification' ? 'confirmed' : 'pending'),
+        }))
+        .sort((a, b) => Date.parse(b.savedAt || '') - Date.parse(a.savedAt || ''));
+      setPaymentReceipts(filtered);
+    } catch {
+      setPaymentReceipts([]);
+    }
+  }, [wallet.address]);
+
+  useEffect(() => {
+    loadPaymentReceipts();
+  }, [loadPaymentReceipts]);
 
   const handleAddPair = (pair: string) => {
     const formatted = pair.toUpperCase().trim();
@@ -295,12 +334,13 @@ export default function WalletScreen() {
     try {
       await loadBalances();
       await fetchWatchlistAlerts();
+      await loadPaymentReceipts();
     } catch {
       // errors handled inside loadBalances
     } finally {
       setRefreshing(false);
     }
-  }, [loadBalances, fetchWatchlistAlerts]);
+  }, [loadBalances, fetchWatchlistAlerts, loadPaymentReceipts]);
 
   const copyAddress = async () => {
     if (wallet.address) {
@@ -380,15 +420,23 @@ export default function WalletScreen() {
                 <Ionicons name={chainPickerOpen ? 'chevron-up' : 'chevron-down'} size={14} color={COLORS.text} style={{ marginLeft: 4 }} />
               )}
             </TouchableOpacity>
-            <View
-              style={[
-                styles.subscriptionBadge,
-                { backgroundColor: getSubscriptionColor() + '30', borderColor: getSubscriptionColor() },
-              ]}
-            >
-              <Text style={[styles.subscriptionText, { color: getSubscriptionColor() }]}>
-                {subscription.toUpperCase()}
-              </Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <View
+                style={[
+                  styles.subscriptionBadge,
+                  { backgroundColor: getSubscriptionColor() + '30', borderColor: getSubscriptionColor() },
+                ]}
+              >
+                <Text style={[styles.subscriptionText, { color: getSubscriptionColor() }]}>
+                  {subscription.toUpperCase()}
+                </Text>
+              </View>
+              {(user?.subscriptionPaymentsCount ?? 0) > 0 && (
+                <View style={styles.paymentCountBadge}>
+                  <Ionicons name="layers-outline" size={12} color={COLORS.text} />
+                  <Text style={styles.paymentCountText}>x{user?.subscriptionPaymentsCount}</Text>
+                </View>
+              )}
             </View>
           </View>
 
@@ -687,10 +735,30 @@ export default function WalletScreen() {
             </TouchableOpacity>
           </View>
 
-          <View style={styles.emptyActivity}>
-            <Ionicons name="time-outline" size={48} color={COLORS.textMuted} />
-            <Text style={styles.emptyActivityText}>No recent transactions</Text>
-          </View>
+          {paymentReceipts.length > 0 ? (
+            paymentReceipts.slice(0, 6).map((receipt, idx) => (
+              <View key={`${receipt.txHash ?? receipt.savedAt ?? 'receipt'}-${idx}`} style={styles.activityItem}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.activityTitle}>
+                    {`${(receipt.tier || 'subscription').toUpperCase()} · ${receipt.amount || '-'} ${receipt.token || ''}`}
+                  </Text>
+                  <Text style={styles.activityMeta}>
+                    {`${(receipt.chain || 'chain').toUpperCase()} · ${receipt.verificationStatus === 'confirmed' ? 'Confirmed' : 'Pending watcher verification'}`}
+                  </Text>
+                </View>
+                <Ionicons
+                  name={receipt.verificationStatus === 'confirmed' ? 'checkmark-circle' : 'time-outline'}
+                  size={18}
+                  color={receipt.verificationStatus === 'confirmed' ? COLORS.success : COLORS.warning}
+                />
+              </View>
+            ))
+          ) : (
+            <View style={styles.emptyActivity}>
+              <Ionicons name="time-outline" size={48} color={COLORS.textMuted} />
+              <Text style={styles.emptyActivityText}>No recent transactions</Text>
+            </View>
+          )}
         </View>
 
         <View style={styles.bottomSpacing} />
@@ -1030,6 +1098,41 @@ const styles = StyleSheet.create({
     fontSize: FONT_SIZES.xs,
     color: COLORS.success,
     fontWeight: '600',
+  },
+
+  paymentCountBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(0,0,0,0.18)',
+    borderRadius: BORDER_RADIUS.full,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.35)',
+  },
+  paymentCountText: {
+    color: COLORS.text,
+    fontSize: FONT_SIZES.xs,
+    fontWeight: '700',
+  },
+  activityItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: SPACING.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  activityTitle: {
+    color: COLORS.text,
+    fontSize: FONT_SIZES.sm,
+    fontWeight: '600',
+  },
+  activityMeta: {
+    color: COLORS.textMuted,
+    fontSize: FONT_SIZES.xs,
+    marginTop: 2,
   },
   emptyActivity: {
     alignItems: 'center',
