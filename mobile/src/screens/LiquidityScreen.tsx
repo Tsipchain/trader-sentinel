@@ -31,7 +31,7 @@ interface Pool {
 const pools: Pool[] = [
   {
     id: 'thronos-usdt',
-    tokenA: 'THRONOS',
+    tokenA: 'THR',
     tokenB: 'USDT',
     tvl: 2500000,
     apr: 12.5,
@@ -41,7 +41,7 @@ const pools: Pool[] = [
   },
   {
     id: 'thronos-eth',
-    tokenA: 'THRONOS',
+    tokenA: 'THR',
     tokenB: 'ETH',
     tvl: 1800000,
     apr: 15.2,
@@ -51,7 +51,7 @@ const pools: Pool[] = [
   },
   {
     id: 'thronos-bnb',
-    tokenA: 'THRONOS',
+    tokenA: 'THR',
     tokenB: 'BNB',
     tvl: 980000,
     apr: 18.7,
@@ -82,10 +82,11 @@ export default function LiquidityScreen() {
     setProcessing(true);
     try {
       const result = await thronosService.addLiquidity(
-        '0x...', // tokenA address
-        '0x...', // tokenB address
+        selectedPool.tokenA,
+        selectedPool.tokenB,
         amountA,
-        amountB
+        amountB,
+        wallet.address || '',
       );
 
       if (result.success) {
@@ -155,7 +156,7 @@ export default function LiquidityScreen() {
             </View>
             <View style={styles.rewardsInfo}>
               <Text style={styles.rewardsLabel}>Pending LP Rewards</Text>
-              <Text style={styles.rewardsValue}>{yourTotalRewards.toFixed(4)} THRONOS</Text>
+              <Text style={styles.rewardsValue}>{yourTotalRewards.toFixed(4)} THR</Text>
             </View>
             <TouchableOpacity
               style={styles.claimButton}
@@ -192,7 +193,7 @@ export default function LiquidityScreen() {
               </View>
               <View style={styles.stepContent}>
                 <Text style={styles.stepTitle}>Earn Rewards</Text>
-                <Text style={styles.stepDesc}>Get THRONOS tokens as LP rewards</Text>
+                <Text style={styles.stepDesc}>Get THR tokens as LP rewards</Text>
               </View>
             </View>
             <View style={styles.step}>
@@ -282,7 +283,7 @@ export default function LiquidityScreen() {
           <Text style={styles.benefitsTitle}>LP Benefits</Text>
           <View style={styles.benefitItem}>
             <Ionicons name="checkmark-circle" size={20} color={COLORS.success} />
-            <Text style={styles.benefitText}>No impermanent loss protection on THRONOS pairs</Text>
+            <Text style={styles.benefitText}>No impermanent loss protection on THR pairs</Text>
           </View>
           <View style={styles.benefitItem}>
             <Ionicons name="checkmark-circle" size={20} color={COLORS.success} />
@@ -363,7 +364,7 @@ export default function LiquidityScreen() {
             <View style={styles.estimatedRewards}>
               <Text style={styles.estimatedLabel}>Estimated Annual Rewards</Text>
               <Text style={styles.estimatedValue}>
-                {selectedPool ? (parseFloat(amountA || '0') * (selectedPool.apr / 100)).toFixed(2) : '0'} THRONOS
+                {selectedPool ? (parseFloat(amountA || '0') * (selectedPool.apr / 100)).toFixed(2) : '0'} THR
               </Text>
             </View>
 

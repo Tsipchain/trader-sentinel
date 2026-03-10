@@ -13,6 +13,103 @@ import CONFIG from '../config';
 import type { TradeRecord } from '../services/api';
 
 const EXCHANGE_OPTIONS = ['binance', 'bybit', 'okx', 'mexc'];
+const MARKET_TYPE_OPTIONS = [
+  { key: 'auto' as const, label: 'AUTO' },
+  { key: 'futures' as const, label: 'FUTURES' },
+  { key: 'spot' as const, label: 'SPOT' },
+];
+
+type OpenPosition = {
+  symbol: string;
+  side: string;
+  contracts: number;
+  entryPrice: number;
+  markPrice: number;
+  unrealizedPnl: number;
+  pnlPct: number;
+  leverage: number;
+  marginMode: string;
+  liquidationPrice: number;
+  notional: number;
+};
+
+type TraderProfile = {
+  dominant_traits: Array<{ trait: string; frequency: number }>;
+  avg_leverage: number;
+  max_leverage_seen: number;
+  learning_snapshots: number;
+  model_trained: boolean;
+  model_accuracy: number | null;
+  trades_trained_on: number;
+} | null;
+
+/** Leverage risk classification */
+function leverageRisk(lev: number): { level: string; color: string; icon: string } {
+  if (lev >= 200) return { level: 'EXTREME', color: '#FF4444', icon: 'flame' };
+  if (lev >= 100) return { level: 'HIGH', color: '#FF8800', icon: 'warning' };
+  if (lev >= 50) return { level: 'ELEVATED', color: '#FFD700', icon: 'alert-circle' };
+  if (lev >= 20) return { level: 'MODERATE', color: '#44AAFF', icon: 'shield-checkmark' };
+  return { level: 'LOW', color: COLORS.success, icon: 'shield' };
+}
+
+/** Smart price formatting — handles micro-cap coins like PEPE ($0.000012) */
+function formatPrice(price: number): string {
+  if (price <= 0) return '$0';
+  if (price >= 100) return `$${price.toFixed(2)}`;
+  if (price >= 1) return `$${price.toFixed(4)}`;
+  if (price >= 0.01) return `$${price.toFixed(5)}`;
+  // Very small prices (PEPE, SHIB, etc.) — show significant digits
+  return `$${price.toPrecision(4)}`;
+}
+
+/** Smart PnL USD formatting — handles tiny and large values */
+function formatPnlUsd(pnl: number, entryPrice: number, markPrice: number, contracts: number, leverage: number): string {
+  // If the API returns a meaningful unrealizedPnl, use it
+  if (Math.abs(pnl) >= 0.005) {
+    if (Math.abs(pnl) >= 1000) return `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`;
+    if (Math.abs(pnl) >= 1) return `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(4)}`;
+    return `${pnl >= 0 ? '+' : ''}$${pnl.toPrecision(3)}`;
+  }
+  // Fallback: calculate from price diff * contracts * leverage
+  // This handles micro-cap coins where unrealizedPnl might round to 0
+  if (entryPrice > 0 && markPrice > 0 && contracts > 0) {
+    const priceDiff = markPrice - entryPrice;
+    const calculated = priceDiff * contracts * leverage;
+    if (Math.abs(calculated) >= 0.005) {
+      if (Math.abs(calculated) >= 1) return `${calculated >= 0 ? '+' : ''}$${calculated.toFixed(4)}`;
+      return `${calculated >= 0 ? '+' : ''}$${calculated.toPrecision(3)}`;
+    }
+    // Still too small — compute from PnL % if available
+  }
+  // Last resort: show the raw value with enough precision
+  if (pnl === 0) return '$0.00';
+  return `${pnl >= 0 ? '+' : ''}$${pnl.toPrecision(2)}`;
+}
+
+/** Calculate distance to liquidation as percentage */
+function liqDistancePct(pos: OpenPosition): number {
+  if (!pos.liquidationPrice || pos.liquidationPrice <= 0 || !pos.markPrice) return 100;
+  const isLong = pos.side === 'long';
+  return isLong
+    ? ((pos.markPrice - pos.liquidationPrice) / pos.markPrice) * 100
+    : ((pos.liquidationPrice - pos.markPrice) / pos.markPrice) * 100;
+}
+
+/** Generate Sentinel observation for a position */
+function sentinelNote(pos: OpenPosition): string | null {
+  const lev = pos.leverage || 1;
+  const pnl = pos.pnlPct || 0;
+  const liqDist = liqDistancePct(pos);
+
+  if (liqDist < 2) return `CRITICAL: ${liqDist.toFixed(1)}% from liquidation! Add margin or close immediately.`;
+  if (liqDist < 5) return `WARNING: Liquidation ${liqDist.toFixed(1)}% away. Tighten risk management.`;
+  if (lev >= 200 && pnl > 50) return `Extreme leverage with strong profit. Lock in gains — partial close recommended.`;
+  if (lev >= 200 && pnl < -10) return `Extreme leverage underwater. Consider reducing to protect capital.`;
+  if (lev >= 100 && pnl > 100) return `+${pnl.toFixed(0)}% at ${lev}x — trail stop aggressively. Don't give it back.`;
+  if (lev >= 100 && pnl > 30) return `Solid move at ${lev}x. Consider moving stop to breakeven.`;
+  if (pnl > 200) return `Massive gain — take partial profit to secure the win.`;
+  return null;
+}
 
 export default function HistoryScreen() {
   const { user, tradeHistory, setTradeHistory, autoTrader, setAutoTrader, subscription } = useStore();
@@ -21,11 +118,137 @@ export default function HistoryScreen() {
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const hasShownBrainMisconfigAlert = useRef(false);
 
-  // Exchange credentials for sync (re-use autoTrader config if available)
-  const [exchange, setExchange] = useState(autoTrader.config.exchange);
-  const [apiKey, setApiKey] = useState(autoTrader.config.apiKey);
-  const [apiSecret, setApiSecret] = useState(autoTrader.config.apiSecret);
   const [showSetup, setShowSetup] = useState(false);
+  const [marketType, setMarketType] = useState<'auto' | 'futures' | 'spot'>('auto');
+  const [openPositions, setOpenPositions] = useState<OpenPosition[]>([]);
+  const [totalUnrealizedPnl, setTotalUnrealizedPnl] = useState(0);
+  const [positionsLastChecked, setPositionsLastChecked] = useState<string | null>(null);
+  const positionPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [traderProfile, setTraderProfile] = useState<TraderProfile>(null);
+  const [sentinelLearning, setSentinelLearning] = useState(false);
+  const cfg = autoTrader.config;
+  const exchange = cfg.exchange;
+  const apiKey = cfg.apiKey;
+  const apiSecret = cfg.apiSecret;
+  const updateSharedCfg = (patch: Partial<typeof cfg>) => setAutoTrader({ config: { ...cfg, ...patch } });
+
+  // Position monitoring — poll every 15 minutes
+  const fetchPositions = useCallback(async () => {
+    const apiKeyTrimmed = apiKey.trim();
+    const apiSecretTrimmed = apiSecret.trim();
+    if (!user?.id || !apiKeyTrimmed || !apiSecretTrimmed || !exchange) return;
+    setPositionsLoading(true);
+    try {
+      const result = await brainAPI.getOpenPositions({
+        user_id: user.id,
+        exchange,
+        api_key: apiKeyTrimmed,
+        api_secret: apiSecretTrimmed,
+      });
+      if (result.ok) {
+        setOpenPositions(result.positions ?? []);
+        setTotalUnrealizedPnl(result.total_unrealized_pnl ?? 0);
+        setPositionsLastChecked(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+
+        // Trigger Sentinel learning from positions (best-effort)
+        if (result.positions?.length) {
+          setSentinelLearning(true);
+          brainAPI.learnFromPositions({
+            user_id: user.id,
+            positions: result.positions.map((p) => ({
+              symbol: p.symbol,
+              side: p.side,
+              leverage: p.leverage,
+              pnlPct: p.pnlPct,
+              entryPrice: p.entryPrice,
+              markPrice: p.markPrice,
+            })),
+            total_unrealized_pnl: result.total_unrealized_pnl ?? 0,
+          }).then(() => setSentinelLearning(false)).catch(() => setSentinelLearning(false));
+
+          // Fetch trader profile
+          brainAPI.getTraderProfile(user.id).then((profileResult) => {
+            if (profileResult.ok && profileResult.profile) {
+              setTraderProfile(profileResult.profile);
+            }
+          }).catch(() => {});
+        }
+      }
+    } catch {
+      // Silent fail for background polling
+    } finally {
+      setPositionsLoading(false);
+    }
+  }, [user?.id, exchange, apiKey, apiSecret]);
+
+  useEffect(() => {
+    // Auto-fetch positions on mount if credentials exist
+    if (apiKey && apiSecret && exchange) {
+      fetchPositions();
+    }
+
+    // Set up 15-minute polling interval
+    positionPollRef.current = setInterval(() => {
+      if (apiKey && apiSecret && exchange) {
+        fetchPositions();
+      }
+    }, 15 * 60 * 1000); // 15 minutes
+
+    return () => {
+      if (positionPollRef.current) {
+        clearInterval(positionPollRef.current);
+      }
+    };
+  }, [fetchPositions, apiKey, apiSecret, exchange]);
+
+  useEffect(() => {
+    // Keep History screen credentials in sync with shared AutoTrader config.
+    setExchange(autoTrader.config.exchange);
+    setApiKey(autoTrader.config.apiKey);
+    setApiSecret(autoTrader.config.apiSecret);
+  }, [autoTrader.config.exchange, autoTrader.config.apiKey, autoTrader.config.apiSecret]);
+
+  useEffect(() => {
+    // Keep History screen credentials in sync with shared AutoTrader config.
+    setExchange(autoTrader.config.exchange);
+    setApiKey(autoTrader.config.apiKey);
+    setApiSecret(autoTrader.config.apiSecret);
+  }, [autoTrader.config.exchange, autoTrader.config.apiKey, autoTrader.config.apiSecret]);
+
+  useEffect(() => {
+    // Keep History screen credentials in sync with shared AutoTrader config.
+    setExchange(autoTrader.config.exchange);
+    setApiKey(autoTrader.config.apiKey);
+    setApiSecret(autoTrader.config.apiSecret);
+  }, [autoTrader.config.exchange, autoTrader.config.apiKey, autoTrader.config.apiSecret]);
+
+  useEffect(() => {
+    // Keep History screen credentials in sync with shared AutoTrader config.
+    setExchange(autoTrader.config.exchange);
+    setApiKey(autoTrader.config.apiKey);
+    setApiSecret(autoTrader.config.apiSecret);
+  }, [autoTrader.config.exchange, autoTrader.config.apiKey, autoTrader.config.apiSecret]);
+
+  useEffect(() => {
+    // Keep History screen credentials in sync with shared AutoTrader config.
+    setExchange(autoTrader.config.exchange);
+    setApiKey(autoTrader.config.apiKey);
+    setApiSecret(autoTrader.config.apiSecret);
+  }, [autoTrader.config.exchange, autoTrader.config.apiKey, autoTrader.config.apiSecret]);
+
+  useEffect(() => {
+    // Keep History screen credentials in sync with shared AutoTrader config.
+    setExchange(autoTrader.config.exchange);
+    setApiKey(autoTrader.config.apiKey);
+    setApiSecret(autoTrader.config.apiSecret);
+  }, [autoTrader.config.exchange, autoTrader.config.apiKey, autoTrader.config.apiSecret]);
+
+  useEffect(() => {
+    // Keep History screen credentials in sync with shared AutoTrader config.
+    setExchange(autoTrader.config.exchange);
+    setApiKey(autoTrader.config.apiKey);
+    setApiSecret(autoTrader.config.apiSecret);
+  }, [autoTrader.config.exchange, autoTrader.config.apiKey, autoTrader.config.apiSecret]);
 
   useEffect(() => {
     // Keep History screen credentials in sync with shared AutoTrader config.
@@ -41,7 +264,10 @@ export default function HistoryScreen() {
       Alert.alert('Not Connected', 'Connect your wallet first.');
       return;
     }
-    if (!apiKey || !apiSecret) {
+    const apiKeyTrimmed = apiKey.trim();
+    const apiSecretTrimmed = apiSecret.trim();
+
+    if (!apiKeyTrimmed || !apiSecretTrimmed) {
       setShowSetup(true);
       return;
     }
@@ -65,14 +291,16 @@ export default function HistoryScreen() {
       } else {
         hasShownBrainMisconfigAlert.current = false;
       }
+      hasShownBrainMisconfigAlert.current = false;
 
-      // Sync & train model
+      // Sync & train model (auto = try futures first, then spot)
       const syncResult = await brainAPI.syncTrades({
         user_id: user.id,
         exchange,
-        api_key: apiKey,
-        api_secret: apiSecret,
+        api_key: apiKeyTrimmed,
+        api_secret: apiSecretTrimmed,
         days: 90,
+        market_type: marketType,
       });
 
       // Fetch history
@@ -103,11 +331,14 @@ export default function HistoryScreen() {
         wallet_address: user.walletAddress ?? '',
       }).catch(() => {});
 
+      // Also refresh open positions after sync
+      await fetchPositions();
+
       Alert.alert(
         'Sync Complete',
         syncResult.trade_count
-          ? `${syncResult.trade_count} trades synced. Model accuracy: ${((syncResult.model_accuracy ?? 0) * 100).toFixed(1)}%`
-          : 'Trade history updated.',
+          ? `${syncResult.trade_count} trades synced (${syncResult.market_type ?? marketType}). Model accuracy: ${((syncResult.model_accuracy ?? 0) * 100).toFixed(1)}%`
+          : (syncResult.message || 'Trade history updated.'),
       );
     } catch (err: any) {
       const status = err?.response?.status;
@@ -266,6 +497,22 @@ export default function HistoryScreen() {
             </View>
           )}
 
+          {/* Market type selector */}
+          <Text style={[styles.fieldLabel, { marginTop: SPACING.sm }]}>Market Type</Text>
+          <View style={styles.chips}>
+            {MARKET_TYPE_OPTIONS.map((mt) => (
+              <TouchableOpacity
+                key={mt.key}
+                style={[styles.chip, marketType === mt.key && styles.chipActive]}
+                onPress={() => setMarketType(mt.key)}
+              >
+                <Text style={[styles.chipText, marketType === mt.key && styles.chipTextActive]}>
+                  {mt.label}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
           <TouchableOpacity style={styles.syncBtn} onPress={handleSync} disabled={syncLoading}>
             {syncLoading
               ? <ActivityIndicator size="small" color={COLORS.text} />
@@ -275,6 +522,123 @@ export default function HistoryScreen() {
                 </>}
           </TouchableOpacity>
         </View>
+
+        {/* ── Open Positions (live) ───────────────────────────────── */}
+        {(openPositions.length > 0 || positionsLoading) && (
+          <>
+            <View style={styles.sectionRow}>
+              <Text style={styles.sectionTitle}>Open Positions</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                {sentinelLearning && (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                    <ActivityIndicator size="small" color={COLORS.thronosGold} />
+                    <Text style={{ color: COLORS.thronosGold, fontSize: FONT_SIZES.xs }}>Learning</Text>
+                  </View>
+                )}
+                <TouchableOpacity onPress={fetchPositions} disabled={positionsLoading}>
+                  {positionsLoading
+                    ? <ActivityIndicator size="small" color={COLORS.primary} />
+                    : <Ionicons name="refresh-outline" size={18} color={COLORS.primary} />}
+                </TouchableOpacity>
+              </View>
+            </View>
+            {positionsLastChecked && (
+              <Text style={styles.lastSynced}>
+                Last checked {positionsLastChecked} · Auto-refresh every 15min
+              </Text>
+            )}
+            {totalUnrealizedPnl !== 0 && (
+              <View style={[styles.card, { marginBottom: SPACING.sm }]}>
+                <Text style={styles.fieldLabel}>Total Unrealized P&L</Text>
+                <Text style={[styles.statValue, {
+                  color: totalUnrealizedPnl >= 0 ? COLORS.success : COLORS.error,
+                  fontSize: FONT_SIZES.lg,
+                }]}>
+                  {totalUnrealizedPnl >= 0 ? '+' : ''}${totalUnrealizedPnl.toFixed(4)}
+                </Text>
+              </View>
+            )}
+            {openPositions.map((pos, i) => (
+              <PositionRow key={`${pos.symbol}-${pos.side}-${i}`} position={pos} />
+            ))}
+
+            {/* ── Sentinel Observations ──────────────────────────── */}
+            {openPositions.some((p) => sentinelNote(p) !== null) && (
+              <View style={[styles.card, { marginTop: SPACING.sm, borderLeftWidth: 3, borderLeftColor: COLORS.thronosGold }]}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: SPACING.sm }}>
+                  <Ionicons name="eye" size={16} color={COLORS.thronosGold} />
+                  <Text style={[styles.analysisTitle, { color: COLORS.thronosGold }]}>Sentinel Observations</Text>
+                </View>
+                {openPositions.map((pos, i) => {
+                  const note = sentinelNote(pos);
+                  if (!note) return null;
+                  const sym = pos.symbol.replace(':USDT', '').replace('/USDT', '');
+                  const risk = leverageRisk(pos.leverage);
+                  return (
+                    <View key={`obs-${pos.symbol}-${pos.side}-${i}`} style={{ flexDirection: 'row', alignItems: 'flex-start', marginBottom: 8, gap: 6 }}>
+                      <Ionicons name={risk.icon as any} size={14} color={risk.color} style={{ marginTop: 2 }} />
+                      <Text style={{ color: COLORS.textSecondary, fontSize: FONT_SIZES.xs, flex: 1, lineHeight: 18 }}>
+                        <Text style={{ fontWeight: '700', color: risk.color }}>{sym} </Text>
+                        {note}
+                      </Text>
+                    </View>
+                  );
+                })}
+              </View>
+            )}
+          </>
+        )}
+
+        {/* ── Trader Profile (learned by Sentinel) ────────────────── */}
+        {traderProfile && (
+          <>
+            <Text style={styles.sectionTitle}>Trader Profile</Text>
+            <View style={[styles.card, { borderLeftWidth: 3, borderLeftColor: COLORS.primary }]}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: SPACING.sm }}>
+                <Ionicons name="person-circle" size={18} color={COLORS.primary} />
+                <Text style={styles.analysisTitle}>Sentinel AI Profile</Text>
+              </View>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: SPACING.sm }}>
+                {traderProfile.dominant_traits.map((t) => (
+                  <View key={t.trait} style={{
+                    backgroundColor: COLORS.primary + '22', paddingHorizontal: 8, paddingVertical: 3,
+                    borderRadius: BORDER_RADIUS.full,
+                  }}>
+                    <Text style={{ color: COLORS.primary, fontSize: FONT_SIZES.xs, fontWeight: '600' }}>
+                      {t.trait.replace(/_/g, ' ')}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                <View style={{ alignItems: 'center' }}>
+                  <Text style={{ color: COLORS.text, fontWeight: '700', fontSize: FONT_SIZES.md }}>
+                    {traderProfile.avg_leverage.toFixed(0)}x
+                  </Text>
+                  <Text style={{ color: COLORS.textMuted, fontSize: FONT_SIZES.xs }}>Avg Leverage</Text>
+                </View>
+                <View style={{ alignItems: 'center' }}>
+                  <Text style={{ color: COLORS.text, fontWeight: '700', fontSize: FONT_SIZES.md }}>
+                    {traderProfile.max_leverage_seen}x
+                  </Text>
+                  <Text style={{ color: COLORS.textMuted, fontSize: FONT_SIZES.xs }}>Max Seen</Text>
+                </View>
+                <View style={{ alignItems: 'center' }}>
+                  <Text style={{ color: COLORS.text, fontWeight: '700', fontSize: FONT_SIZES.md }}>
+                    {traderProfile.learning_snapshots}
+                  </Text>
+                  <Text style={{ color: COLORS.textMuted, fontSize: FONT_SIZES.xs }}>Snapshots</Text>
+                </View>
+                <View style={{ alignItems: 'center' }}>
+                  <Text style={{ color: traderProfile.model_trained ? COLORS.success : COLORS.textMuted, fontWeight: '700', fontSize: FONT_SIZES.md }}>
+                    {traderProfile.model_trained ? (traderProfile.model_accuracy ? `${(traderProfile.model_accuracy * 100).toFixed(0)}%` : 'Active') : 'Training'}
+                  </Text>
+                  <Text style={{ color: COLORS.textMuted, fontSize: FONT_SIZES.xs }}>Brain</Text>
+                </View>
+              </View>
+            </View>
+          </>
+        )}
 
         {/* ── AI Strategy Advisor ────────────────────────────────── */}
         <Text style={styles.sectionTitle}>AI Strategy Advisor</Text>
@@ -389,6 +753,47 @@ function TradeRow({ trade }: { trade: TradeRecord }) {
   );
 }
 
+function PositionRow({ position }: { position: OpenPosition }) {
+  const pnlColor = position.unrealizedPnl >= 0 ? COLORS.success : COLORS.error;
+  const isLong = position.side === 'long';
+  const displaySymbol = position.symbol.replace(':USDT', '').replace('/USDT', '');
+  const risk = leverageRisk(position.leverage);
+  const liqDist = liqDistancePct(position);
+
+  return (
+    <View style={rowStyles.row}>
+      <View style={[rowStyles.side, { backgroundColor: isLong ? COLORS.success + '22' : COLORS.error + '22' }]}>
+        <Text style={[rowStyles.sideText, { color: isLong ? COLORS.success : COLORS.error }]}>
+          {isLong ? 'L' : 'S'}
+        </Text>
+      </View>
+      <View style={rowStyles.body}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <Text style={rowStyles.symbol}>{displaySymbol}</Text>
+          <View style={[rowStyles.leverageBadge, { backgroundColor: risk.color + '22', borderColor: risk.color + '44' }]}>
+            <Ionicons name={risk.icon as any} size={9} color={risk.color} />
+            <Text style={[rowStyles.leverageBadgeText, { color: risk.color }]}>{risk.level}</Text>
+          </View>
+        </View>
+        <Text style={rowStyles.date}>
+          {position.leverage}x {position.marginMode} · Entry {formatPrice(position.entryPrice)}
+        </Text>
+        <Text style={[rowStyles.date, { color: COLORS.textMuted }]}>
+          Mark {formatPrice(position.markPrice)} · Liq {position.liquidationPrice > 0 ? `${formatPrice(position.liquidationPrice)} (${liqDist.toFixed(1)}%)` : '–'}
+        </Text>
+      </View>
+      <View style={{ alignItems: 'flex-end' }}>
+        <Text style={[rowStyles.pnl, { color: pnlColor }]}>
+          {position.pnlPct >= 0 ? '+' : ''}{position.pnlPct.toFixed(2)}%
+        </Text>
+        <Text style={[rowStyles.pnlUsd, { color: pnlColor }]}>
+          {formatPnlUsd(position.unrealizedPnl, position.entryPrice, position.markPrice, position.contracts, position.leverage)}
+        </Text>
+      </View>
+    </View>
+  );
+}
+
 const rowStyles = StyleSheet.create({
   row: {
     flexDirection: 'row', alignItems: 'center',
@@ -405,6 +810,12 @@ const rowStyles = StyleSheet.create({
   date: { color: COLORS.textMuted, fontSize: FONT_SIZES.xs, marginTop: 2 },
   pnl: { fontSize: FONT_SIZES.sm, fontWeight: '700' },
   pnlUsd: { color: COLORS.textMuted, fontSize: FONT_SIZES.xs, marginTop: 1 },
+  leverageBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 3,
+    paddingHorizontal: 5, paddingVertical: 1,
+    borderRadius: BORDER_RADIUS.sm, borderWidth: 1,
+  },
+  leverageBadgeText: { fontSize: 8, fontWeight: '800', letterSpacing: 0.5 },
 });
 
 const styles = StyleSheet.create({
@@ -422,6 +833,10 @@ const styles = StyleSheet.create({
   sectionTitle: {
     color: COLORS.text, fontSize: FONT_SIZES.md, fontWeight: '700',
     marginBottom: SPACING.sm, marginTop: SPACING.sm,
+  },
+  sectionRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    marginTop: SPACING.sm, marginBottom: SPACING.sm,
   },
   card: {
     backgroundColor: COLORS.backgroundCard, borderRadius: BORDER_RADIUS.lg,
