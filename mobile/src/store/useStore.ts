@@ -17,11 +17,16 @@ export interface User {
 
 export type SubscriptionTier = 'free' | 'starter' | 'pro' | 'elite' | 'whale';
 
+export type WalletType = 'thronos' | 'evm' | 'phantom' | null;
+
 export interface WalletState {
   isConnected: boolean;
   address: string | null;
-  chainId: number | null;
+  chainId: number | string | null;
   balance: string;
+  walletType: WalletType;
+  selectedChainKey: string | null;  // key into CONFIG.SUPPORTED_CHAINS (e.g. 'ETHEREUM', 'BSC')
+  provider: string | null;          // wallet provider id (e.g. 'metamask', 'trust', 'thronos')
 }
 
 export interface Signal {
@@ -93,7 +98,7 @@ const DEFAULT_AUTOTRADER_CONFIG: AutoTraderConfig = {
   maxPositionPct: 10,
   maxOpenTrades: 3,
   marginMode: 'isolated',
-  maxLeverage: 3,
+  maxLeverage: 125,
   riskPerTradePct: 1,
   maxTotalExposurePct: 25,
 };
@@ -188,7 +193,7 @@ export const useStore = create<AppStore>()(
       logout: () => set({
         user: null,
         isAuthenticated: false,
-        wallet: { isConnected: false, address: null, chainId: null, balance: '0' },
+        wallet: { isConnected: false, address: null, chainId: null, balance: '0', walletType: null, selectedChainKey: null, provider: null },
       }),
 
       // Wallet
@@ -197,12 +202,15 @@ export const useStore = create<AppStore>()(
         address: null,
         chainId: null,
         balance: '0',
+        walletType: null,
+        selectedChainKey: null,
+        provider: null,
       },
       setWallet: (wallet) => set((state) => ({
         wallet: { ...state.wallet, ...wallet },
       })),
       disconnectWallet: () => set({
-        wallet: { isConnected: false, address: null, chainId: null, balance: '0' },
+        wallet: { isConnected: false, address: null, chainId: null, balance: '0', walletType: null, selectedChainKey: null, provider: null },
       }),
 
       // Subscription
@@ -324,9 +332,19 @@ export const useStore = create<AppStore>()(
       }),
       merge: (persisted, current) => {
         const persistedState = (persisted as Partial<AppStore>) ?? {};
+
+        // Protect subscription: never downgrade a persisted paid tier to 'free'
+        // This prevents reset/rehydration bugs from losing paid subscriptions
+        const persistedTier = persistedState.subscription || 'free';
+        const persistedUserTier = persistedState.user?.subscription || 'free';
+        const currentTier = (current as AppStore).subscription || 'free';
+        const currentUserTier = (current as AppStore).user?.subscription || 'free';
+        const safeTier = [persistedTier, persistedUserTier, currentTier, currentUserTier].find((tier) => tier && tier !== 'free') || 'free';
+
         return {
           ...current,
           ...persistedState,
+          subscription: safeTier,
           autoTrader: {
             ...current.autoTrader,
             ...(persistedState.autoTrader ?? {}),
