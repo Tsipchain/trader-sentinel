@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, Switch, TouchableOpacity,
   Alert, TextInput, ActivityIndicator, Modal,
@@ -23,6 +23,14 @@ const TIER_LIMITS: Record<'free' | 'starter' | 'pro' | 'elite' | 'whale', number
   pro: 10,
   elite: 15,
   whale: Number.POSITIVE_INFINITY,
+};
+
+const SLEEP_TARGET_BY_TIER: Record<'free' | 'starter' | 'pro' | 'elite' | 'whale', string> = {
+  free: '2-4%',
+  starter: '4-8%',
+  pro: '8-15%',
+  elite: '15-22%',
+  whale: '25-30%',
 };
 
 
@@ -78,7 +86,7 @@ function dynamicSlSuggestion(pnlPct: number, configuredSlPct: number): number {
 
 type ProtectionAction = {
   id: string;
-  type: 'hedge' | 'safe_order' | 'sl_adjust' | 'tp_adjust' | 'reduce';
+  type: 'hedge' | 'safe_order' | 'sl_adjust' | 'tp_adjust' | 'reduce' | 'dca';
   symbol: string;
   description: string;
   timestamp: number;
@@ -105,8 +113,20 @@ function formatDuration(seconds: number): string {
   return `${m}m`;
 }
 
+function normalizeSymbol(symbol: string): string {
+  if (!symbol) return '';
+  const raw = String(symbol).trim().toUpperCase();
+  if (raw.includes('/')) return raw;
+  if (raw.includes('_')) {
+    const [base, quote] = raw.split('_');
+    return `${base}/${quote || 'USDT'}`;
+  }
+  if (raw.endsWith('USDT')) return `${raw.slice(0, -4)}/USDT`;
+  return raw;
+}
+
 export default function AutoTraderScreen() {
-  const { user, subscription, autoTrader, setAutoTrader } = useStore();
+  const { user, subscription, watchlist, autoTrader, setAutoTrader } = useStore();
   const [toggling, setToggling] = useState(false);
   const [loadingStatus, setLoadingStatus] = useState(false);
   const [closingId, setClosingId] = useState<string | null>(null);
@@ -116,6 +136,7 @@ export default function AutoTraderScreen() {
   const isEnabled = autoTrader.enabled;
   const cfg = autoTrader.config;
   const effectiveTier = (subscription || user?.subscription || 'free') as keyof typeof TIER_LIMITS;
+  const sleepTargetRange = SLEEP_TARGET_BY_TIER[effectiveTier] ?? SLEEP_TARGET_BY_TIER.free;
   const allowedMaxOpenTrades = TIER_LIMITS[effectiveTier] ?? TIER_LIMITS.free;
   const displayedMaxOpenTrades = Number.isFinite(allowedMaxOpenTrades)
     ? Math.min(cfg.maxOpenTrades, allowedMaxOpenTrades)
@@ -134,6 +155,91 @@ export default function AutoTraderScreen() {
   const clampMaxOpenTrades = (value: number) => Math.max(1, Math.min(value, tierMaxOpenTrades));
   const effectiveMaxOpenTrades = clampMaxOpenTrades(cfg.maxOpenTrades);
   const formatOpenTradesCap = (value: number) => (Number.isFinite(value) ? String(value) : '∞');
+  const mergedSymbolOptions = useMemo(() => {
+    const normalized = [...SYMBOL_OPTIONS, ...watchlist].map(normalizeSymbol).filter(Boolean);
+    return Array.from(new Set(normalized));
+  }, [watchlist]);
+
+  const [sleepStatus, setSleepStatus] = useState<SleepStatus>({ active: false, trades: [], log: [] });
+  const [startingSleep, setStartingSleep] = useState(false);
+  const [stoppingSleep, setStoppingSleep] = useState(false);
+  const [protectionEnabled, setProtectionEnabled] = useState(true);
+  const [protectionChecking, setProtectionChecking] = useState(false);
+  const [protectionActions, setProtectionActions] = useState<ProtectionAction[]>([]);
+  const [editingTrade, setEditingTrade] = useState<ActiveTrade | null>(null);
+  const [editSL, setEditSL] = useState('');
+  const [editTP, setEditTP] = useState('');
+  const [savingSlTp, setSavingSlTp] = useState(false);
+
+  const pollSleepStatus = useCallback(async () => {
+    if (!user?.id) return;
+    try {
+      const status = await brainAPI.getSleepStatus(user.id);
+      if (status.ok) {
+        setSleepStatus((prev) => ({
+          ...prev,
+          ...status,
+          active: !!status.active,
+          trades: status.trades ?? prev.trades ?? [],
+          log: status.log ?? prev.log ?? [],
+        }));
+      }
+    } catch {
+      // silent background polling
+    }
+  }, [user?.id]);
+
+  const refreshProtection = useCallback(async () => {
+    if (!user?.id || !isEnabled || !protectionEnabled) return;
+    setProtectionChecking(true);
+    try {
+      const response = await brainAPI.checkTradeProtection({
+        user_id: user.id,
+        exchange: cfg.exchange,
+        api_key: cfg.apiKey.trim(),
+        api_secret: cfg.apiSecret.trim(),
+        passphrase: cfg.passphrase || undefined,
+        mode: sleepStatus.active ? 'sleep' : 'active',
+        config: {
+          stop_loss_pct: cfg.stopLossPct,
+          take_profit_pct: cfg.takeProfitPct,
+          max_leverage: cfg.maxLeverage,
+          max_total_exposure_pct: cfg.maxTotalExposurePct,
+        },
+      });
+      if (response?.ok && Array.isArray(response.actions) && response.actions.length > 0) {
+        const normalized: ProtectionAction[] = response.actions.map((a: any, idx: number) => ({
+          id: String(a.id ?? `${Date.now()}-${idx}`),
+          type: a.type ?? 'sl_adjust',
+          symbol: a.symbol ?? 'UNKNOWN',
+          description: a.description ?? a.message ?? 'Protection action',
+          timestamp: Number(a.timestamp ?? Date.now()),
+          status: a.status ?? 'executed',
+        }));
+        setProtectionActions((prev) => [...normalized, ...prev].slice(0, 20));
+
+        if (sleepStatus.active) {
+          const derivedLogs = normalized.map((action) => {
+            const actionName = action.type === 'hedge'
+              ? 'HEDGE'
+              : action.type === 'dca'
+                ? 'DCA'
+                : action.type.toUpperCase();
+            return `[${new Date(action.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}] ${actionName} ${action.symbol}: ${action.description}`;
+          });
+
+          setSleepStatus((prev) => ({
+            ...prev,
+            log: [...(prev.log ?? []), ...derivedLogs].slice(-30),
+          }));
+        }
+      }
+    } catch {
+      // silent background polling
+    } finally {
+      setProtectionChecking(false);
+    }
+  }, [user?.id, isEnabled, protectionEnabled, sleepStatus.active, cfg.exchange, cfg.apiKey, cfg.apiSecret, cfg.passphrase, cfg.stopLossPct, cfg.takeProfitPct, cfg.maxLeverage, cfg.maxTotalExposurePct]);
 
   const refreshStatus = useCallback(async () => {
     setLoadingStatus(true);
@@ -157,6 +263,20 @@ export default function AutoTraderScreen() {
   }, [user?.id, setAutoTrader, pollSleepStatus]);
 
   useEffect(() => { refreshStatus(); }, [refreshStatus]);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      pollSleepStatus();
+    }, SLEEP_POLL_MS);
+    return () => clearInterval(id);
+  }, [pollSleepStatus]);
+
+  useEffect(() => {
+    if (!isEnabled || !protectionEnabled) return;
+    refreshProtection();
+    const id = setInterval(refreshProtection, PROTECTION_POLL_MS);
+    return () => clearInterval(id);
+  }, [isEnabled, protectionEnabled, refreshProtection]);
 
   const updateCfg = (patch: Partial<typeof cfg>) =>
     setAutoTrader({ config: { ...cfg, ...patch } });
@@ -325,7 +445,7 @@ export default function AutoTraderScreen() {
     if (!user?.id || !isEnabled) return;
     Alert.alert(
       'Activate Sleep Mode?',
-      `Sentinel will autonomously trade ${cfg.symbols.join(', ')} on ${(cfg.exchange || '').toUpperCase()} for up to 8 hours while you rest.\n\nTarget: 25-30% portfolio profit.\nMax leverage: ${cfg.maxLeverage}x\nPortfolio: $${(portfolio.equity ?? 0).toFixed(2)}`,
+      `Sentinel will autonomously trade ${cfg.symbols.join(', ')} on ${(cfg.exchange || '').toUpperCase()} for up to 8 hours while you rest.\n\nTarget: ${sleepTargetRange} portfolio profit.\nMax leverage: ${cfg.maxLeverage}x\nPortfolio: $${(portfolio.equity ?? 0).toFixed(2)}`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -381,6 +501,34 @@ export default function AutoTraderScreen() {
         },
       },
     ]);
+  };
+
+  const openEditSlTp = (trade: ActiveTrade) => {
+    setEditingTrade(trade);
+    setEditSL(String(trade.stopLoss ?? cfg.stopLossPct));
+    setEditTP(String(trade.takeProfit ?? cfg.takeProfitPct));
+  };
+
+  const handleSaveSlTp = async () => {
+    if (!user?.id || !editingTrade) return;
+    const sl = parseFloat(editSL);
+    const tp = parseFloat(editTP);
+    if (!Number.isFinite(sl) || !Number.isFinite(tp) || sl <= 0 || tp <= 0) {
+      Alert.alert('Invalid Values', 'Please enter valid positive SL/TP percentages.');
+      return;
+    }
+    setSavingSlTp(true);
+    try {
+      await brainAPI.updateTradeSlTp(user.id, editingTrade.id, sl, tp);
+      setAutoTrader({
+        activeTrades: autoTrader.activeTrades.map((t) => (t.id === editingTrade.id ? { ...t, stopLoss: sl, takeProfit: tp } : t)),
+      });
+      setEditingTrade(null);
+    } catch {
+      Alert.alert('Update Failed', 'Could not update SL/TP right now.');
+    } finally {
+      setSavingSlTp(false);
+    }
   };
 
   const handleCloseTrade = (trade: ActiveTrade) => {
@@ -528,7 +676,7 @@ export default function AutoTraderScreen() {
               </Text>
             </View>
             <Text style={{ color: COLORS.textSecondary, fontSize: FONT_SIZES.xs, marginBottom: SPACING.md, lineHeight: 16 }}>
-              Activate when you go to sleep. Sentinel will autonomously trade for 8 hours targeting 25-30% portfolio profit using TA-driven entries with SL/TP protection.
+              {`Activate when you go to sleep. Sentinel will autonomously trade for 8 hours targeting ${sleepTargetRange} portfolio profit using TA-driven entries with SL/TP protection.`}
             </Text>
 
             {!sleepStatus.active ? (
@@ -671,9 +819,9 @@ export default function AutoTraderScreen() {
         )}
 
         {/* Sleep Log */}
-        {sleepStatus.active && sleepLog.length > 0 && (
+        {sleepLog.length > 0 && (
           <>
-            <Text style={styles.sectionTitle}>Sleep Mode Log</Text>
+            <Text style={styles.sectionTitle}>Sleep Mode Log (latest)</Text>
             <View style={styles.logCard}>
               {sleepLog.slice(-8).map((entry, idx) => (
                 <Text key={`log-${idx}-${entry.slice(0, 20)}`} style={styles.logEntry}>{entry}</Text>
@@ -770,7 +918,7 @@ export default function AutoTraderScreen() {
         <View style={styles.card}>
           <Text style={styles.fieldLabel}>Symbols to Trade</Text>
           <View style={styles.chips}>
-            {SYMBOL_OPTIONS.map((sym) => (
+            {mergedSymbolOptions.map((sym) => (
               <TouchableOpacity
                 key={sym}
                 style={[styles.chip, cfg.symbols.includes(sym) && styles.chipActive]}
@@ -849,7 +997,7 @@ export default function AutoTraderScreen() {
             </View>
             <Text style={{ color: COLORS.textSecondary, fontSize: FONT_SIZES.xs, marginBottom: SPACING.sm, lineHeight: 16 }}>
               {sleepStatus.active
-                ? 'Sleep Guard: Sentinel monitors your positions and applies hedge/safe orders if markets move against you.'
+                ? 'Sleep Guard: Sentinel monitors your positions and applies hedge/safe orders/DCA if markets move against you.'
                 : 'Active Guard: Sentinel watches for anomalies and protects existing positions with SL adjustments and hedging.'}
             </Text>
             {protectionChecking && (
@@ -864,7 +1012,7 @@ export default function AutoTraderScreen() {
                 {protectionActions.slice(0, 5).map((action, idx) => (
                   <View key={`${action.id}-${action.symbol}-${idx}`} style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 3, gap: 6 }}>
                     <Ionicons
-                      name={action.type === 'hedge' ? 'swap-horizontal' : action.type === 'safe_order' ? 'layers' : 'trending-down'}
+                      name={action.type === 'hedge' ? 'swap-horizontal' : action.type === 'safe_order' ? 'layers' : action.type === 'dca' ? 'add-circle' : 'trending-down'}
                       size={12}
                       color={action.status === 'executed' ? COLORS.success : action.status === 'failed' ? COLORS.error : COLORS.warning}
                     />
