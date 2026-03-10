@@ -158,6 +158,7 @@ export default function SubscriptionScreen() {
           txHash: result.txHash,
           blockchainRef: result.blockchainRef,
           walletAddress: wallet.address,
+          verificationStatus: result.blockchainRef && result.blockchainRef !== 'pending_verification' ? 'confirmed' : 'pending',
         });
 
         // 2. Update local subscription state immediately
