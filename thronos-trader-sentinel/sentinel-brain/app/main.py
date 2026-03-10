@@ -183,8 +183,18 @@ def _build_trade_records(trades: list[dict], exchange: str) -> tuple[list[dict],
 
 # ── Core endpoints ────────────────────────────────────────────────────────────
 
+@app.get("/")
+def root_health():
+    return {"ok": True, "service": "sentinel-brain", "ts": time.time(), "users_with_models": _engine.user_count()}
+
+
 @app.get("/health")
 def health():
+    return {"ok": True, "ts": time.time(), "users_with_models": _engine.user_count()}
+
+
+@app.get("/api/brain/health")
+def brain_health():
     return {"ok": True, "ts": time.time(), "users_with_models": _engine.user_count()}
 
 
