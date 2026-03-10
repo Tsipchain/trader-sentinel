@@ -24,7 +24,7 @@ export default function WelcomeScreen() {
 
   const features = [
     { icon: 'flash', title: 'Real-time Signals', desc: 'Arbitrage opportunities across CEX & DEX' },
-    { icon: 'wallet', title: 'Thronos Rewards', desc: 'Earn THRONOS tokens for activity' },
+    { icon: 'wallet', title: 'Thronos Rewards', desc: 'Earn THR tokens for activity' },
     { icon: 'trending-up', title: 'Liquidity Pools', desc: 'Provide liquidity and earn APY' },
     { icon: 'globe', title: 'Cross-chain', desc: 'Pay with any supported crypto' },
   ];

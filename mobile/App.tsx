@@ -27,6 +27,7 @@ import ChartScreen from './src/screens/ChartScreen';
 // Store
 import { useStore } from './src/store/useStore';
 import { COLORS } from './src/constants/theme';
+import { useSignalPolling } from './src/hooks/useSignalPolling';
 
 // Types
 export type RootStackParamList = {
@@ -55,6 +56,9 @@ const Tab = createBottomTabNavigator<TabParamList>();
 SplashScreen.preventAutoHideAsync();
 
 function MainTabs() {
+  // Global signal polling — runs regardless of active tab
+  useSignalPolling();
+
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
