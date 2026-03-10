@@ -328,6 +328,19 @@ export default function DashboardScreen() {
                 <Text style={styles.arbVenueLabel}>{opp.message}</Text>
               </View>
             ))
+          ) : arbitrageSignalOpps.length > 0 ? (
+            arbitrageSignalOpps.map((opp, index) => (
+              <View key={`signal-${index}`} style={styles.arbCard}>
+                <View style={styles.arbHeader}>
+                  <Text style={styles.arbSymbol}>{opp.symbol}</Text>
+                  <View style={styles.arbProfit}>
+                    <Ionicons name="flash" size={16} color={COLORS.primary} />
+                    <Text style={styles.arbProfitText}>Signal</Text>
+                  </View>
+                </View>
+                <Text style={styles.arbVenueLabel}>{opp.message}</Text>
+              </View>
+            ))
           ) : (
             <View style={styles.noData}>
               <Ionicons name="search" size={32} color={COLORS.textMuted} />

@@ -133,7 +133,7 @@ export default function AutoTraderScreen() {
   const tierMaxOpenTrades = CONFIG.TIER_LIMITS[subscription] ?? CONFIG.TIER_LIMITS.free;
   const clampMaxOpenTrades = (value: number) => Math.max(1, Math.min(value, tierMaxOpenTrades));
   const effectiveMaxOpenTrades = clampMaxOpenTrades(cfg.maxOpenTrades);
-  const displayedMaxOpenTrades = Number.isFinite(tierMaxOpenTrades) ? String(effectiveMaxOpenTrades) : '∞';
+  const formatOpenTradesCap = (value: number) => (Number.isFinite(value) ? String(value) : '∞');
 
   const refreshStatus = useCallback(async () => {
     setLoadingStatus(true);
@@ -492,7 +492,7 @@ export default function AutoTraderScreen() {
               {[
                 { label: 'Managed trades', value: portfolio.positions.length || autoTrader.activeTrades.length },
                 { label: 'Opened by bot', value: autoTrader.activeTrades.length },
-                { label: 'Max Trades', value: displayedMaxOpenTrades },
+                { label: 'Max Trades', value: formatOpenTradesCap(tierMaxOpenTrades) },
               ].map(({ label, value }) => (
                 <View key={label} style={styles.activeStat}>
                   <Text style={styles.activeStatValue}>{value}</Text>
@@ -803,7 +803,7 @@ export default function AutoTraderScreen() {
               { label: 'Stop Loss %', key: 'stopLossPct' },
               { label: 'Take Profit %', key: 'takeProfitPct' },
               { label: 'Max Position %', key: 'maxPositionPct' },
-              { label: `Max Open Trades (tier cap: ${displayedMaxOpenTrades})`, key: 'maxOpenTrades' },
+              { label: `Max Open Trades (tier cap: ${formatOpenTradesCap(tierMaxOpenTrades)})`, key: 'maxOpenTrades' },
               { label: 'Max Leverage', key: 'maxLeverage' },
               { label: 'Risk / Trade %', key: 'riskPerTradePct' },
               { label: 'Max Total Exposure %', key: 'maxTotalExposurePct' },

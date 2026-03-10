@@ -137,3 +137,22 @@ For Brain, `openapi.json` should include `/api/brain/*` paths (e.g. `/api/brain/
    sh -c 'uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8083}'
    ```
 4. Redeploy and re-run the curl checks from section 4.
+
+
+## 8) If logs show `403 Forbidden` on `/api/sentinel/*`
+
+This means requests reached the correct backend, but API key auth rejected them.
+
+Checklist:
+
+1. Ensure `API_KEY` is set on backend/brain/analyst services (same value across services).
+2. Ensure mobile has `EXPO_PUBLIC_API_KEY` set to the same value used by backend.
+3. Rebuild the mobile app after changing Expo env vars (old build keeps old values).
+4. Verify with curl:
+
+```bash
+curl -i https://<backend-host>/api/sentinel/risk?symbol=BTC/USDT
+curl -i -H "X-API-Key: <API_KEY>" https://<backend-host>/api/sentinel/risk?symbol=BTC/USDT
+```
+
+Expected: first call may return 403, second call should return 200.
