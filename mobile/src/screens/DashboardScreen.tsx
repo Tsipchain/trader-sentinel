@@ -184,6 +184,15 @@ export default function DashboardScreen() {
     return Math.ceil(msLeft / (24 * 60 * 60 * 1000));
   })();
 
+  const subscriptionCountdownTone =
+    subscriptionDaysRemaining === null
+      ? 'normal'
+      : subscriptionDaysRemaining <= 0
+        ? 'expired'
+        : subscriptionDaysRemaining <= 3
+          ? 'warning'
+          : 'normal';
+
   const shortenAddress = (address: string) => {
     return `${address.slice(0, 6)}...${address.slice(-4)}`;
   };
@@ -243,13 +252,62 @@ export default function DashboardScreen() {
 
 
         {subscription !== 'free' && subscriptionDaysRemaining !== null && (
-          <View style={styles.renewalBanner}>
-            <Ionicons name="calendar-outline" size={14} color={COLORS.textSecondary} />
-            <Text style={styles.renewalText}>
-              {subscriptionDaysRemaining > 0
-                ? `${subscription.toUpperCase()} renewal in ${subscriptionDaysRemaining} day${subscriptionDaysRemaining === 1 ? '' : 's'}`
-                : `${subscription.toUpperCase()} renewal due now`}
-            </Text>
+          <View>
+            <View style={styles.renewalBanner}>
+              <Ionicons name="calendar-outline" size={14} color={COLORS.textSecondary} />
+              <Text style={styles.renewalText}>
+                {subscriptionDaysRemaining > 0
+                  ? `${subscription.toUpperCase()} renewal in ${subscriptionDaysRemaining} day${subscriptionDaysRemaining === 1 ? '' : 's'}`
+                  : `${subscription.toUpperCase()} renewal due now`}
+              </Text>
+            </View>
+
+            <LinearGradient
+              colors={
+                subscriptionCountdownTone === 'expired'
+                  ? [COLORS.error + '35', COLORS.backgroundCard]
+                  : subscriptionCountdownTone === 'warning'
+                    ? [COLORS.warning + '35', COLORS.backgroundCard]
+                    : [COLORS.primary + '35', COLORS.backgroundCard]
+              }
+              style={styles.subscriptionCounterCard}
+            >
+              <View style={styles.subscriptionCounterHeader}>
+                <View style={styles.subscriptionCounterBadge}>
+                  <Ionicons
+                    name={subscriptionCountdownTone === 'expired' ? 'alert-circle' : 'time'}
+                    size={14}
+                    color={subscriptionCountdownTone === 'expired' ? COLORS.error : COLORS.primary}
+                  />
+                  <Text style={styles.subscriptionCounterTier}>{subscription.toUpperCase()}</Text>
+                </View>
+                <TouchableOpacity onPress={() => navigation.navigate('Subscription')}>
+                  <Text style={styles.subscriptionCounterCta}>Manage</Text>
+                </TouchableOpacity>
+              </View>
+
+              <View style={styles.subscriptionCounterBody}>
+                <Text
+                  style={[
+                    styles.subscriptionCounterValue,
+                    subscriptionCountdownTone === 'expired' && { color: COLORS.error },
+                    subscriptionCountdownTone === 'warning' && { color: COLORS.warning },
+                  ]}
+                >
+                  {subscriptionDaysRemaining <= 0 ? '0' : subscriptionDaysRemaining}
+                </Text>
+                <View>
+                  <Text style={styles.subscriptionCounterLabel}>Days left</Text>
+                  <Text style={styles.subscriptionCounterHint}>
+                    {subscriptionDaysRemaining <= 0
+                      ? 'Renew now to keep premium access active.'
+                      : subscriptionDaysRemaining <= 3
+                        ? 'Renew soon to avoid service interruption.'
+                        : 'Subscription is active and protected.'}
+                  </Text>
+                </View>
+              </View>
+            </LinearGradient>
           </View>
         )}
 
@@ -547,6 +605,68 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondary,
     fontSize: FONT_SIZES.xs,
     fontWeight: '600',
+  },
+  subscriptionCounterCard: {
+    marginTop: -SPACING.sm,
+    marginBottom: SPACING.lg,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.md,
+    borderRadius: BORDER_RADIUS.lg,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    ...SHADOWS.small,
+  },
+  subscriptionCounterHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: SPACING.sm,
+  },
+  subscriptionCounterBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: COLORS.surface,
+    borderRadius: BORDER_RADIUS.full,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: 4,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  subscriptionCounterTier: {
+    fontSize: FONT_SIZES.xs,
+    fontWeight: '700',
+    color: COLORS.text,
+  },
+  subscriptionCounterCta: {
+    fontSize: FONT_SIZES.xs,
+    fontWeight: '700',
+    color: COLORS.primary,
+  },
+  subscriptionCounterBody: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.sm,
+  },
+  subscriptionCounterValue: {
+    fontSize: 40,
+    lineHeight: 40,
+    fontWeight: '800',
+    color: COLORS.primary,
+    minWidth: 46,
+  },
+  subscriptionCounterLabel: {
+    fontSize: FONT_SIZES.sm,
+    color: COLORS.textSecondary,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  subscriptionCounterHint: {
+    fontSize: FONT_SIZES.sm,
+    color: COLORS.text,
+    marginTop: 2,
+    fontWeight: '500',
   },
   upgradeBanner: {
     flexDirection: 'row',
