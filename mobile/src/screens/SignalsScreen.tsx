@@ -124,7 +124,7 @@ export default function SignalsScreen() {
   }, []);
 
 
-  const handleFetchError = useCallback((error: unknown) => {
+  const _handleFetchError = useCallback((error: unknown) => {
     const status = (error as any)?.response?.status;
     const isNetworkError = (error as any)?.message === 'Network Error';
     if (status === 429) {
@@ -271,9 +271,9 @@ export default function SignalsScreen() {
         _handleFetchError(error);
       }
     } catch (error) {
-      handleFetchError(error);
+      _handleFetchError(error);
     }
-  }, [watchlist, addSignalWithFeedback, canUseAdvancedSignals, hasRecentDuplicate, hasAnySignalPrefix, tierPolicy.allowNewCoinSignals, tierPolicy.directionalLimit, getRiskReportWithMinInterval, handleFetchError]);
+  }, [watchlist, addSignalWithFeedback, canUseAdvancedSignals, hasRecentDuplicate, hasAnySignalPrefix, tierPolicy.allowNewCoinSignals, tierPolicy.directionalLimit, getRiskReportWithMinInterval, _handleFetchError]);
 
 
   useEffect(() => {
