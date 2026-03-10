@@ -182,5 +182,7 @@ def _is_geo_block(exc: Exception) -> bool:
         r"cloudfront distribution is configured to block",
         r"service unavailable from a restricted location",
         r"\b451\b",
+        r"\b403\b.*forbidden",
+        r"403 error",
     ]
     return any(re.search(p, msg) for p in patterns)
