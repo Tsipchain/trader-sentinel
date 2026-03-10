@@ -424,7 +424,7 @@ export default function SignalsScreen() {
     return new Date(timestamp).toLocaleDateString();
   };
 
-  const signalKeyExtractor = useCallback((item: Signal) => item.id, []);
+  const signalKeyExtractor = (item: Signal) => item.id;
 
   const renderSignal = ({ item }: { item: Signal }) => {
     const icon = getSignalIcon(item.type);
