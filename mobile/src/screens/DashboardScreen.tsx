@@ -46,7 +46,7 @@ const _safePct = (numerator: number, denominator: number): number => {
 
 export default function DashboardScreen() {
   const navigation = useNavigation<NavigationProp>();
-  const { wallet, subscription, watchlist, rewards, signals } = useStore();
+  const { wallet, user, subscription, watchlist, rewards, signals } = useStore();
   const [refreshing, setRefreshing] = useState(false);
   const [prices, setPrices] = useState<PriceData[]>([]);
   const [arbitrageOpps, setArbitrageOpps] = useState<ArbitrageData[]>([]);
@@ -174,6 +174,16 @@ export default function DashboardScreen() {
     setRefreshing(false);
   }, [fetchData]);
 
+
+  const subscriptionDaysRemaining = (() => {
+    if (!user?.subscriptionExpiresAt || subscription === 'free') return null;
+    const expiryMs = Date.parse(user.subscriptionExpiresAt);
+    if (!Number.isFinite(expiryMs)) return null;
+    const msLeft = expiryMs - Date.now();
+    if (msLeft <= 0) return 0;
+    return Math.ceil(msLeft / (24 * 60 * 60 * 1000));
+  })();
+
   const shortenAddress = (address: string) => {
     return `${address.slice(0, 6)}...${address.slice(-4)}`;
   };
@@ -229,6 +239,18 @@ export default function DashboardScreen() {
               <Ionicons name="chevron-forward" size={24} color={COLORS.text} />
             </LinearGradient>
           </TouchableOpacity>
+        )}
+
+
+        {subscription !== 'free' && subscriptionDaysRemaining !== null && (
+          <View style={styles.renewalBanner}>
+            <Ionicons name="calendar-outline" size={14} color={COLORS.textSecondary} />
+            <Text style={styles.renewalText}>
+              {subscriptionDaysRemaining > 0
+                ? `${subscription.toUpperCase()} renewal in ${subscriptionDaysRemaining} day${subscriptionDaysRemaining === 1 ? '' : 's'}`
+                : `${subscription.toUpperCase()} renewal due now`}
+            </Text>
+          </View>
         )}
 
         {/* Stats Cards */}
@@ -507,6 +529,24 @@ const styles = StyleSheet.create({
     height: 10,
     borderRadius: 5,
     backgroundColor: COLORS.error,
+  },
+
+  renewalBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: COLORS.surface,
+    borderColor: COLORS.border,
+    borderWidth: 1,
+    borderRadius: BORDER_RADIUS.md,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    marginBottom: SPACING.lg,
+  },
+  renewalText: {
+    color: COLORS.textSecondary,
+    fontSize: FONT_SIZES.xs,
+    fontWeight: '600',
   },
   upgradeBanner: {
     flexDirection: 'row',

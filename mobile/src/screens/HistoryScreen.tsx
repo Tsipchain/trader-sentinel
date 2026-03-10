@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
-  ActivityIndicator, Alert, TextInput,
+  ActivityIndicator, Alert, TextInput, Modal,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -10,7 +10,7 @@ import { COLORS, SPACING, FONT_SIZES, BORDER_RADIUS, SHADOWS } from '../constant
 import { useStore } from '../store/useStore';
 import { brainAPI, analystAPI } from '../services/api';
 import CONFIG from '../config';
-import type { TradeRecord } from '../services/api';
+import type { TradeRecord, ActiveTrade } from '../services/api';
 
 const EXCHANGE_OPTIONS = ['binance', 'bybit', 'okx', 'mexc'];
 const MARKET_TYPE_OPTIONS = [
@@ -31,6 +31,9 @@ type OpenPosition = {
   marginMode: string;
   liquidationPrice: number;
   notional: number;
+  tradeId?: string;
+  stopLossPct?: number;
+  takeProfitPct?: number;
 };
 
 type TraderProfile = {
@@ -96,6 +99,12 @@ function liqDistancePct(pos: OpenPosition): number {
 }
 
 /** Generate Sentinel observation for a position */
+
+
+function normalizeSymbol(symbol: string): string {
+  return symbol.replace(':USDT', '/USDT').replace('USDT', '/USDT').replace('//USDT', '/USDT').toUpperCase();
+}
+
 function sentinelNote(pos: OpenPosition): string | null {
   const lev = pos.leverage || 1;
   const pnl = pos.pnlPct || 0;
@@ -116,6 +125,7 @@ export default function HistoryScreen() {
 
   const [syncLoading, setSyncLoading] = useState(false);
   const [analysisLoading, setAnalysisLoading] = useState(false);
+  const [positionsLoading, setPositionsLoading] = useState(false);
   const hasShownBrainMisconfigAlert = useRef(false);
 
   const [showSetup, setShowSetup] = useState(false);
@@ -126,6 +136,12 @@ export default function HistoryScreen() {
   const positionPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [traderProfile, setTraderProfile] = useState<TraderProfile>(null);
   const [sentinelLearning, setSentinelLearning] = useState(false);
+  const [selectedPosition, setSelectedPosition] = useState<OpenPosition | null>(null);
+  const [positionModalVisible, setPositionModalVisible] = useState(false);
+  const [editSlPct, setEditSlPct] = useState('');
+  const [editTpPct, setEditTpPct] = useState('');
+  const [savingPositionRisk, setSavingPositionRisk] = useState(false);
+  const [closingPosition, setClosingPosition] = useState(false);
   const cfg = autoTrader.config;
   const exchange = cfg.exchange;
   const apiKey = cfg.apiKey;
@@ -146,7 +162,24 @@ export default function HistoryScreen() {
         api_secret: apiSecretTrimmed,
       });
       if (result.ok) {
-        setOpenPositions(result.positions ?? []);
+        const normalizedPositions: OpenPosition[] = (result.positions ?? []).map((p: any) => ({
+          symbol: p.symbol,
+          side: p.side,
+          contracts: p.contracts,
+          entryPrice: p.entryPrice,
+          markPrice: p.markPrice,
+          unrealizedPnl: p.unrealizedPnl,
+          pnlPct: p.pnlPct,
+          leverage: p.leverage,
+          marginMode: p.marginMode,
+          liquidationPrice: p.liquidationPrice,
+          notional: p.notional,
+          tradeId: p.tradeId ?? p.trade_id,
+          stopLossPct: p.stopLossPct ?? p.stop_loss_pct ?? p.sl_pct,
+          takeProfitPct: p.takeProfitPct ?? p.take_profit_pct ?? p.tp_pct,
+        }));
+
+        setOpenPositions(normalizedPositions);
         setTotalUnrealizedPnl(result.total_unrealized_pnl ?? 0);
         setPositionsLastChecked(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
 
@@ -201,68 +234,7 @@ export default function HistoryScreen() {
     };
   }, [fetchPositions, apiKey, apiSecret, exchange]);
 
-  useEffect(() => {
-    // Keep History screen credentials in sync with shared AutoTrader config.
-    setExchange(autoTrader.config.exchange);
-    setApiKey(autoTrader.config.apiKey);
-    setApiSecret(autoTrader.config.apiSecret);
-  }, [autoTrader.config.exchange, autoTrader.config.apiKey, autoTrader.config.apiSecret]);
 
-  useEffect(() => {
-    // Keep History screen credentials in sync with shared AutoTrader config.
-    setExchange(autoTrader.config.exchange);
-    setApiKey(autoTrader.config.apiKey);
-    setApiSecret(autoTrader.config.apiSecret);
-  }, [autoTrader.config.exchange, autoTrader.config.apiKey, autoTrader.config.apiSecret]);
-
-  useEffect(() => {
-    // Keep History screen credentials in sync with shared AutoTrader config.
-    setExchange(autoTrader.config.exchange);
-    setApiKey(autoTrader.config.apiKey);
-    setApiSecret(autoTrader.config.apiSecret);
-  }, [autoTrader.config.exchange, autoTrader.config.apiKey, autoTrader.config.apiSecret]);
-
-  useEffect(() => {
-    // Keep History screen credentials in sync with shared AutoTrader config.
-    setExchange(autoTrader.config.exchange);
-    setApiKey(autoTrader.config.apiKey);
-    setApiSecret(autoTrader.config.apiSecret);
-  }, [autoTrader.config.exchange, autoTrader.config.apiKey, autoTrader.config.apiSecret]);
-
-  useEffect(() => {
-    // Keep History screen credentials in sync with shared AutoTrader config.
-    setExchange(autoTrader.config.exchange);
-    setApiKey(autoTrader.config.apiKey);
-    setApiSecret(autoTrader.config.apiSecret);
-  }, [autoTrader.config.exchange, autoTrader.config.apiKey, autoTrader.config.apiSecret]);
-
-  useEffect(() => {
-    // Keep History screen credentials in sync with shared AutoTrader config.
-    setExchange(autoTrader.config.exchange);
-    setApiKey(autoTrader.config.apiKey);
-    setApiSecret(autoTrader.config.apiSecret);
-  }, [autoTrader.config.exchange, autoTrader.config.apiKey, autoTrader.config.apiSecret]);
-
-  useEffect(() => {
-    // Keep History screen credentials in sync with shared AutoTrader config.
-    setExchange(autoTrader.config.exchange);
-    setApiKey(autoTrader.config.apiKey);
-    setApiSecret(autoTrader.config.apiSecret);
-  }, [autoTrader.config.exchange, autoTrader.config.apiKey, autoTrader.config.apiSecret]);
-
-  useEffect(() => {
-    // Keep History screen credentials in sync with shared AutoTrader config.
-    setExchange(autoTrader.config.exchange);
-    setApiKey(autoTrader.config.apiKey);
-    setApiSecret(autoTrader.config.apiSecret);
-  }, [autoTrader.config.exchange, autoTrader.config.apiKey, autoTrader.config.apiSecret]);
-
-  useEffect(() => {
-    // Keep History screen credentials in sync with shared AutoTrader config.
-    setExchange(autoTrader.config.exchange);
-    setApiKey(autoTrader.config.apiKey);
-    setApiSecret(autoTrader.config.apiSecret);
-  }, [autoTrader.config.exchange, autoTrader.config.apiKey, autoTrader.config.apiSecret]);
 
   const { trades, stats, lastSynced, aiAnalysis } = tradeHistory;
 
@@ -400,6 +372,73 @@ export default function HistoryScreen() {
     }
   }, [stats, user?.id]);
 
+
+  const findMatchingActiveTrade = useCallback((position: OpenPosition): ActiveTrade | null => {
+    const normalizedPosition = normalizeSymbol(position.symbol);
+    return autoTrader.activeTrades.find((t) => normalizeSymbol(t.symbol) === normalizedPosition) ?? null;
+  }, [autoTrader.activeTrades]);
+
+  const openPositionManager = useCallback((position: OpenPosition) => {
+    const activeTrade = findMatchingActiveTrade(position);
+    setSelectedPosition(position);
+    setEditSlPct(String(position.stopLossPct ?? activeTrade?.stopLoss ?? cfg.stopLossPct));
+    setEditTpPct(String(position.takeProfitPct ?? activeTrade?.takeProfit ?? cfg.takeProfitPct));
+    setPositionModalVisible(true);
+  }, [cfg.stopLossPct, cfg.takeProfitPct, findMatchingActiveTrade]);
+
+  const handleSavePositionRisk = useCallback(async () => {
+    if (!user?.id || !selectedPosition) return;
+    const activeTrade = findMatchingActiveTrade(selectedPosition);
+    if (!activeTrade) {
+      Alert.alert('Managed Trade Not Found', 'This position is not currently managed by AutoTrader, so SL/TP cannot be updated from here yet.');
+      return;
+    }
+
+    const sl = parseFloat(editSlPct);
+    const tp = parseFloat(editTpPct);
+    if (!Number.isFinite(sl) || !Number.isFinite(tp) || sl <= 0 || tp <= 0) {
+      Alert.alert('Invalid Values', 'Please enter valid positive SL/TP percentages.');
+      return;
+    }
+
+    setSavingPositionRisk(true);
+    try {
+      await brainAPI.updateTradeSlTp(user.id, activeTrade.id, sl, tp);
+      setAutoTrader({
+        activeTrades: autoTrader.activeTrades.map((t) => (t.id === activeTrade.id ? { ...t, stopLoss: sl, takeProfit: tp } : t)),
+      });
+      setOpenPositions((prev) => prev.map((p) => normalizeSymbol(p.symbol) === normalizeSymbol(selectedPosition.symbol)
+        ? { ...p, stopLossPct: sl, takeProfitPct: tp }
+        : p));
+      setPositionModalVisible(false);
+    } catch {
+      Alert.alert('Update Failed', 'Could not update SL/TP for this position.');
+    } finally {
+      setSavingPositionRisk(false);
+    }
+  }, [autoTrader.activeTrades, editSlPct, editTpPct, findMatchingActiveTrade, selectedPosition, setAutoTrader, user?.id]);
+
+  const handleClosePositionFromHistory = useCallback(async () => {
+    if (!user?.id || !selectedPosition) return;
+    const activeTrade = findMatchingActiveTrade(selectedPosition);
+    if (!activeTrade) {
+      Alert.alert('Managed Trade Not Found', 'Only AutoTrader-managed positions can be closed directly from History.');
+      return;
+    }
+
+    setClosingPosition(true);
+    try {
+      await brainAPI.closeTrade(user.id, activeTrade.id);
+      setAutoTrader({ activeTrades: autoTrader.activeTrades.filter((t) => t.id !== activeTrade.id) });
+      setOpenPositions((prev) => prev.filter((p) => normalizeSymbol(p.symbol) !== normalizeSymbol(selectedPosition.symbol)));
+      setPositionModalVisible(false);
+    } catch {
+      Alert.alert('Close Failed', 'Could not close the selected position.');
+    } finally {
+      setClosingPosition(false);
+    }
+  }, [autoTrader.activeTrades, findMatchingActiveTrade, selectedPosition, setAutoTrader, user?.id]);
+
   const winRate = stats ? (stats.win_rate * 100).toFixed(1) : '–';
   const totalPnl = stats?.total_pnl_usd ?? null;
   const pnlColor = totalPnl === null ? COLORS.textMuted : totalPnl >= 0 ? COLORS.success : COLORS.error;
@@ -467,8 +506,7 @@ export default function HistoryScreen() {
                     key={ex}
                     style={[styles.chip, exchange === ex && styles.chipActive]}
                     onPress={() => {
-                      setExchange(ex);
-                      setAutoTrader({ config: { ...autoTrader.config, exchange: ex } });
+                      updateSharedCfg({ exchange: ex });
                     }}
                   >
                     <Text style={[styles.chipText, exchange === ex && styles.chipTextActive]}>
@@ -482,8 +520,7 @@ export default function HistoryScreen() {
                 style={styles.input}
                 value={apiKey}
                 onChangeText={(value) => {
-                  setApiKey(value);
-                  setAutoTrader({ config: { ...autoTrader.config, apiKey: value } });
+                  updateSharedCfg({ apiKey: value });
                 }}
                 placeholder="Read-only key"
                 placeholderTextColor={COLORS.textMuted}
@@ -494,8 +531,7 @@ export default function HistoryScreen() {
                 style={styles.input}
                 value={apiSecret}
                 onChangeText={(value) => {
-                  setApiSecret(value);
-                  setAutoTrader({ config: { ...autoTrader.config, apiSecret: value } });
+                  updateSharedCfg({ apiSecret: value });
                 }}
                 placeholder="API secret"
                 placeholderTextColor={COLORS.textMuted}
@@ -565,9 +601,19 @@ export default function HistoryScreen() {
                 </Text>
               </View>
             )}
-            {openPositions.map((pos, i) => (
-              <PositionRow key={`${pos.symbol}-${pos.side}-${i}`} position={pos} />
-            ))}
+            {openPositions.map((pos, i) => {
+              const matched = findMatchingActiveTrade(pos);
+              return (
+                <PositionRow
+                  key={`${pos.symbol}-${pos.side}-${i}`}
+                  position={pos}
+                  stopLossPct={pos.stopLossPct ?? matched?.stopLoss}
+                  takeProfitPct={pos.takeProfitPct ?? matched?.takeProfit}
+                  managed={!!matched}
+                  onPress={() => openPositionManager(pos)}
+                />
+              );
+            })}
 
             {/* ── Sentinel Observations ──────────────────────────── */}
             {openPositions.some((p) => sentinelNote(p) !== null) && (
@@ -726,6 +772,56 @@ export default function HistoryScreen() {
           </View>
         )}
 
+
+        <Modal
+          visible={positionModalVisible}
+          transparent
+          animationType="slide"
+          onRequestClose={() => setPositionModalVisible(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalCard}>
+              {selectedPosition && (
+                <>
+                  <View style={styles.modalHeader}>
+                    <Text style={styles.modalTitle}>Manage {selectedPosition.symbol}</Text>
+                    <TouchableOpacity onPress={() => setPositionModalVisible(false)}>
+                      <Ionicons name="close" size={22} color={COLORS.textMuted} />
+                    </TouchableOpacity>
+                  </View>
+                  <Text style={styles.modalSub}>Mark {formatPrice(selectedPosition.markPrice)} · Entry {formatPrice(selectedPosition.entryPrice)}</Text>
+                  <Text style={styles.fieldLabel}>Stop Loss %</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={editSlPct}
+                    onChangeText={setEditSlPct}
+                    keyboardType="numeric"
+                    placeholder="e.g. 2"
+                    placeholderTextColor={COLORS.textMuted}
+                  />
+                  <Text style={[styles.fieldLabel, { marginTop: SPACING.sm }]}>Take Profit %</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={editTpPct}
+                    onChangeText={setEditTpPct}
+                    keyboardType="numeric"
+                    placeholder="e.g. 4"
+                    placeholderTextColor={COLORS.textMuted}
+                  />
+                  <View style={styles.modalActions}>
+                    <TouchableOpacity style={[styles.syncBtn, { flex: 1 }]} onPress={handleSavePositionRisk} disabled={savingPositionRisk}>
+                      {savingPositionRisk ? <ActivityIndicator size="small" color={COLORS.text} /> : <Text style={styles.syncBtnText}>Save SL/TP</Text>}
+                    </TouchableOpacity>
+                    <TouchableOpacity style={[styles.analyzeBtn, { flex: 1, borderColor: COLORS.error + '55' }]} onPress={handleClosePositionFromHistory} disabled={closingPosition}>
+                      {closingPosition ? <ActivityIndicator size="small" color={COLORS.error} /> : <Text style={[styles.analyzeBtnText, { color: COLORS.error }]}>Close Position</Text>}
+                    </TouchableOpacity>
+                  </View>
+                </>
+              )}
+            </View>
+          </View>
+        </Modal>
+
         <View style={{ height: 32 }} />
       </ScrollView>
     </SafeAreaView>
@@ -760,7 +856,7 @@ function TradeRow({ trade }: { trade: TradeRecord }) {
   );
 }
 
-function PositionRow({ position }: { position: OpenPosition }) {
+function PositionRow({ position, stopLossPct, takeProfitPct, managed, onPress }: { position: OpenPosition; stopLossPct?: number; takeProfitPct?: number; managed: boolean; onPress: () => void }) {
   const pnlColor = position.unrealizedPnl >= 0 ? COLORS.success : COLORS.error;
   const isLong = position.side === 'long';
   const displaySymbol = position.symbol.replace(':USDT', '').replace('/USDT', '');
@@ -768,7 +864,7 @@ function PositionRow({ position }: { position: OpenPosition }) {
   const liqDist = liqDistancePct(position);
 
   return (
-    <View style={rowStyles.row}>
+    <TouchableOpacity style={rowStyles.row} onPress={onPress} activeOpacity={0.8}>
       <View style={[rowStyles.side, { backgroundColor: isLong ? COLORS.success + '22' : COLORS.error + '22' }]}>
         <Text style={[rowStyles.sideText, { color: isLong ? COLORS.success : COLORS.error }]}>
           {isLong ? 'L' : 'S'}
@@ -788,6 +884,9 @@ function PositionRow({ position }: { position: OpenPosition }) {
         <Text style={[rowStyles.date, { color: COLORS.textMuted }]}>
           Mark {formatPrice(position.markPrice)} · Liq {position.liquidationPrice > 0 ? `${formatPrice(position.liquidationPrice)} (${liqDist.toFixed(1)}%)` : '–'}
         </Text>
+        <Text style={[rowStyles.date, { color: COLORS.primary }]}>
+          SL {stopLossPct ? `${stopLossPct.toFixed(2)}%` : '—'} · TP {takeProfitPct ? `${takeProfitPct.toFixed(2)}%` : '—'}
+        </Text>
       </View>
       <View style={{ alignItems: 'flex-end' }}>
         <Text style={[rowStyles.pnl, { color: pnlColor }]}>
@@ -796,8 +895,9 @@ function PositionRow({ position }: { position: OpenPosition }) {
         <Text style={[rowStyles.pnlUsd, { color: pnlColor }]}>
           {formatPnlUsd(position.unrealizedPnl, position.entryPrice, position.markPrice, position.contracts, position.leverage)}
         </Text>
+        <Ionicons name={managed ? 'settings-outline' : 'information-circle-outline'} size={14} color={managed ? COLORS.primary : COLORS.textMuted} style={{ marginTop: 4 }} />
       </View>
-    </View>
+    </TouchableOpacity>
   );
 }
 
@@ -907,4 +1007,29 @@ const styles = StyleSheet.create({
 
   emptyList: { alignItems: 'center', paddingVertical: SPACING.xl },
   emptyText: { color: COLORS.textMuted, fontSize: FONT_SIZES.sm, marginTop: SPACING.sm },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    justifyContent: 'flex-end',
+  },
+  modalCard: {
+    backgroundColor: COLORS.backgroundCard,
+    borderTopLeftRadius: BORDER_RADIUS.lg,
+    borderTopRightRadius: BORDER_RADIUS.lg,
+    padding: SPACING.md,
+    gap: SPACING.xs,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  modalTitle: { color: COLORS.text, fontSize: FONT_SIZES.lg, fontWeight: '700' },
+  modalSub: { color: COLORS.textSecondary, fontSize: FONT_SIZES.xs, marginBottom: SPACING.xs },
+  modalActions: {
+    flexDirection: 'row',
+    gap: SPACING.sm,
+    marginTop: SPACING.sm,
+    marginBottom: SPACING.sm,
+  },
 });
