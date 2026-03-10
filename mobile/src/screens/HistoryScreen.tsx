@@ -162,7 +162,24 @@ export default function HistoryScreen() {
         api_secret: apiSecretTrimmed,
       });
       if (result.ok) {
-        setOpenPositions(result.positions ?? []);
+        const normalizedPositions: OpenPosition[] = (result.positions ?? []).map((p: any) => ({
+          symbol: p.symbol,
+          side: p.side,
+          contracts: p.contracts,
+          entryPrice: p.entryPrice,
+          markPrice: p.markPrice,
+          unrealizedPnl: p.unrealizedPnl,
+          pnlPct: p.pnlPct,
+          leverage: p.leverage,
+          marginMode: p.marginMode,
+          liquidationPrice: p.liquidationPrice,
+          notional: p.notional,
+          tradeId: p.tradeId ?? p.trade_id,
+          stopLossPct: p.stopLossPct ?? p.stop_loss_pct ?? p.sl_pct,
+          takeProfitPct: p.takeProfitPct ?? p.take_profit_pct ?? p.tp_pct,
+        }));
+
+        setOpenPositions(normalizedPositions);
         setTotalUnrealizedPnl(result.total_unrealized_pnl ?? 0);
         setPositionsLastChecked(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
 
