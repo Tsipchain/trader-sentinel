@@ -512,6 +512,55 @@ async def set_leverage(
         await ex.close()
 
 
+async def create_limit_order(
+    exchange: str,
+    api_key: str,
+    api_secret: str,
+    symbol: str,
+    side: str,
+    amount: float,
+    price: float,
+    passphrase: str | None = None,
+    reduce_only: bool = False,
+    post_only: bool = False,
+) -> dict[str, Any]:
+    """Place a limit order on futures. Returns order info."""
+    ex = _build_exchange(exchange, api_key, api_secret, passphrase, market_type="futures")
+    try:
+        futures_symbol = _adapt_symbol(symbol, "futures")
+        params: dict[str, Any] = {}
+        if reduce_only:
+            params["reduceOnly"] = True
+        if post_only:
+            params["postOnly"] = True
+
+        order = await ex.create_order(
+            symbol=futures_symbol,
+            type="limit",
+            side=side,
+            amount=amount,
+            price=price,
+            params=params,
+        )
+        log.info("[exec] limit %s %s %.6f @ %.8f on %s → %s", side, futures_symbol, amount, price, exchange, order.get("id"))
+        return {
+            "ok": True,
+            "id": order.get("id"),
+            "symbol": futures_symbol,
+            "side": side,
+            "amount": amount,
+            "price": float(order.get("average") or order.get("price") or price or 0),
+            "cost": float(order.get("cost") or 0),
+            "status": order.get("status"),
+            "timestamp": order.get("timestamp"),
+        }
+    except Exception as e:
+        log.error("[exec] limit order failed %s %s: %s", side, symbol, e)
+        return {"ok": False, "error": str(e)}
+    finally:
+        await ex.close()
+
+
 async def create_market_order(
     exchange: str,
     api_key: str,
