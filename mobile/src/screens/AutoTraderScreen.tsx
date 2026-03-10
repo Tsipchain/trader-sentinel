@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, Switch, TouchableOpacity,
   Alert, TextInput, ActivityIndicator, Modal,
@@ -49,6 +49,31 @@ function fmtPrice(price: number): string {
   if (price >= 1) return `$${price.toFixed(4)}`;
   if (price >= 0.01) return `$${price.toFixed(5)}`;
   return `$${price.toPrecision(4)}`;
+}
+
+
+function deriveSlTpPrices(entryPrice: number, side: 'BUY' | 'SELL', slPct: number, tpPct: number): { slPrice: number; tpPrice: number } {
+  if (entryPrice <= 0) return { slPrice: 0, tpPrice: 0 };
+  const slFactor = slPct / 100;
+  const tpFactor = tpPct / 100;
+  if (side === 'BUY') {
+    return {
+      slPrice: entryPrice * (1 - slFactor),
+      tpPrice: entryPrice * (1 + tpFactor),
+    };
+  }
+  return {
+    slPrice: entryPrice * (1 + slFactor),
+    tpPrice: entryPrice * (1 - tpFactor),
+  };
+}
+
+function dynamicSlSuggestion(pnlPct: number, configuredSlPct: number): number {
+  if (pnlPct >= 80) return Math.max(0.6, configuredSlPct * 0.35);
+  if (pnlPct >= 40) return Math.max(0.8, configuredSlPct * 0.5);
+  if (pnlPct >= 20) return Math.max(1.0, configuredSlPct * 0.65);
+  if (pnlPct >= 10) return Math.max(1.2, configuredSlPct * 0.8);
+  return configuredSlPct;
 }
 
 type ProtectionAction = {
@@ -490,6 +515,33 @@ export default function AutoTraderScreen() {
   const selectedExchangeBlocked = !isExchangeEnabled(cfg.exchange);
 
   // Sleep session derived data
+  const activeTradeCards = useMemo(() => autoTrader.activeTrades.map((trade, tradeIdx) => {
+    const pnl = trade.pnl ?? 0;
+    const entryPrice = trade.entryPrice ?? 0;
+    const currentPrice = trade.currentPrice ?? 0;
+    const pnlColor = pnl >= 0 ? COLORS.success : COLORS.error;
+    const sl = trade.stopLoss ?? cfg.stopLossPct;
+    const tp = trade.takeProfit ?? cfg.takeProfitPct;
+    const suggestedSl = dynamicSlSuggestion(pnl, sl);
+    const { slPrice, tpPrice } = deriveSlTpPrices(entryPrice, trade.side, sl, tp);
+    const { slPrice: suggestedSlPrice } = deriveSlTpPrices(entryPrice, trade.side, suggestedSl, tp);
+
+    return {
+      key: `${trade.id ?? `${trade.symbol}-${trade.openedAt || tradeIdx}`}-${tradeIdx}`,
+      trade,
+      pnl,
+      entryPrice,
+      currentPrice,
+      pnlColor,
+      sl,
+      tp,
+      slPrice,
+      tpPrice,
+      suggestedSl,
+      suggestedSlPrice,
+    };
+  }), [autoTrader.activeTrades, cfg.stopLossPct, cfg.takeProfitPct]);
+
   const sleepTrades = sleepStatus.trades ?? [];
   const openSleepTrades = sleepTrades.filter((t) => t.status === 'open');
   const closedSleepTrades = sleepTrades.filter((t) => t.status === 'closed');
@@ -934,18 +986,13 @@ export default function AutoTraderScreen() {
           </View>
         )}
 
-        {autoTrader.activeTrades.length > 0 && (
+        {activeTradeCards.length > 0 && (
           <>
             <Text style={styles.sectionTitle}>Active Trades</Text>
-            {autoTrader.activeTrades.map((trade, tradeIdx) => {
-              const pnl = trade.pnl ?? 0;
-              const entryPrice = trade.entryPrice ?? 0;
-              const currentPrice = trade.currentPrice ?? 0;
-              const pnlColor = pnl >= 0 ? COLORS.success : COLORS.error;
-              const sl = trade.stopLoss ?? cfg.stopLossPct;
-              const tp = trade.takeProfit ?? cfg.takeProfitPct;
+            {activeTradeCards.map((item) => {
+              const { trade, pnl, entryPrice, currentPrice, pnlColor, sl, tp, slPrice, tpPrice, suggestedSl, suggestedSlPrice, key } = item;
               return (
-                <View key={`${trade.id ?? `${trade.symbol}-${trade.openedAt || tradeIdx}`}-${tradeIdx}`} style={styles.tradeCard}>
+                <View key={key} style={styles.tradeCard}>
                   <View style={styles.tradeRow}>
                     <View style={[styles.sideBadge, {
                       backgroundColor: trade.side === 'BUY' ? COLORS.success + '22' : COLORS.error + '22',
@@ -983,6 +1030,10 @@ export default function AutoTraderScreen() {
                       <Text style={styles.editSlTpText}>Edit SL/TP</Text>
                     </TouchableOpacity>
                   </View>
+                  <Text style={[styles.tradeDetail, { marginTop: 4 }]}>
+                    SL {fmtPrice(slPrice)} · TP {fmtPrice(tpPrice)}
+                    {suggestedSl < sl ? ` · Dynamic SL ${suggestedSl.toFixed(2)}% (${fmtPrice(suggestedSlPrice)})` : ''}
+                  </Text>
                   <TouchableOpacity
                     style={styles.closeBtn}
                     onPress={() => handleCloseTrade(trade)}
@@ -999,7 +1050,7 @@ export default function AutoTraderScreen() {
         )}
 
         {/* Sentinel Observations for active trades */}
-        {isEnabled && autoTrader.activeTrades.length > 0 && (
+        {isEnabled && activeTradeCards.length > 0 && (
           <View style={styles.card}>
             <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: SPACING.sm }}>
               <Ionicons name="eye" size={18} color={COLORS.info} />
@@ -1007,7 +1058,8 @@ export default function AutoTraderScreen() {
                 Sentinel Observations
               </Text>
             </View>
-            {autoTrader.activeTrades.map((trade, idx) => {
+            {activeTradeCards.map((item, idx) => {
+              const trade = item.trade;
               const pnl = trade.pnl ?? 0;
               const leverageRisk = (trade as any).leverage >= 50 ? 'EXTREME' : (trade as any).leverage >= 20 ? 'HIGH' : 'MODERATE';
               return (
