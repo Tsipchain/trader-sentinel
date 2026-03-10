@@ -241,6 +241,87 @@ export default function AutoTraderScreen() {
     }
   }, [user?.id, isEnabled, protectionEnabled, sleepStatus.active, cfg.exchange, cfg.apiKey, cfg.apiSecret, cfg.passphrase, cfg.stopLossPct, cfg.takeProfitPct, cfg.maxLeverage, cfg.maxTotalExposurePct]);
 
+  const [sleepStatus, setSleepStatus] = useState<SleepStatus>({ active: false, trades: [], log: [] });
+  const [startingSleep, setStartingSleep] = useState(false);
+  const [stoppingSleep, setStoppingSleep] = useState(false);
+  const [protectionEnabled, setProtectionEnabled] = useState(true);
+  const [protectionChecking, setProtectionChecking] = useState(false);
+  const [protectionActions, setProtectionActions] = useState<ProtectionAction[]>([]);
+  const [editingTrade, setEditingTrade] = useState<ActiveTrade | null>(null);
+  const [editSL, setEditSL] = useState('');
+  const [editTP, setEditTP] = useState('');
+  const [savingSlTp, setSavingSlTp] = useState(false);
+
+  const pollSleepStatus = useCallback(async () => {
+    if (!user?.id) return;
+    try {
+      const status = await brainAPI.getSleepStatus(user.id);
+      if (status.ok) {
+        setSleepStatus((prev) => ({
+          ...prev,
+          ...status,
+          active: !!status.active,
+          trades: status.trades ?? prev.trades ?? [],
+          log: status.log ?? prev.log ?? [],
+        }));
+      }
+    } catch {
+      // silent background polling
+    }
+  }, [user?.id]);
+
+  const refreshProtection = useCallback(async () => {
+    if (!user?.id || !isEnabled || !protectionEnabled) return;
+    setProtectionChecking(true);
+    try {
+      const response = await brainAPI.checkTradeProtection({
+        user_id: user.id,
+        exchange: cfg.exchange,
+        api_key: cfg.apiKey.trim(),
+        api_secret: cfg.apiSecret.trim(),
+        passphrase: cfg.passphrase || undefined,
+        mode: sleepStatus.active ? 'sleep' : 'active',
+        config: {
+          stop_loss_pct: cfg.stopLossPct,
+          take_profit_pct: cfg.takeProfitPct,
+          max_leverage: cfg.maxLeverage,
+          max_total_exposure_pct: cfg.maxTotalExposurePct,
+        },
+      });
+      if (response?.ok && Array.isArray(response.actions) && response.actions.length > 0) {
+        const normalized: ProtectionAction[] = response.actions.map((a: any, idx: number) => ({
+          id: String(a.id ?? `${Date.now()}-${idx}`),
+          type: a.type ?? 'sl_adjust',
+          symbol: a.symbol ?? 'UNKNOWN',
+          description: a.description ?? a.message ?? 'Protection action',
+          timestamp: Number(a.timestamp ?? Date.now()),
+          status: a.status ?? 'executed',
+        }));
+        setProtectionActions((prev) => [...normalized, ...prev].slice(0, 20));
+
+        if (sleepStatus.active) {
+          const derivedLogs = normalized.map((action) => {
+            const actionName = action.type === 'hedge'
+              ? 'HEDGE'
+              : action.type === 'dca'
+                ? 'DCA'
+                : action.type.toUpperCase();
+            return `[${new Date(action.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}] ${actionName} ${action.symbol}: ${action.description}`;
+          });
+
+          setSleepStatus((prev) => ({
+            ...prev,
+            log: [...(prev.log ?? []), ...derivedLogs].slice(-30),
+          }));
+        }
+      }
+    } catch {
+      // silent background polling
+    } finally {
+      setProtectionChecking(false);
+    }
+  }, [user?.id, isEnabled, protectionEnabled, sleepStatus.active, cfg.exchange, cfg.apiKey, cfg.apiSecret, cfg.passphrase, cfg.stopLossPct, cfg.takeProfitPct, cfg.maxLeverage, cfg.maxTotalExposurePct]);
+
   const refreshStatus = useCallback(async () => {
     setLoadingStatus(true);
     try {
