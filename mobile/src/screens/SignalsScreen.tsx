@@ -426,7 +426,15 @@ export default function SignalsScreen() {
 
   const signalKeyExtractor = (item: Signal) => item.id;
 
-  const renderSignal = ({ item }: { item: Signal }) => {
+  const getSignalItemLayout = (_data: ArrayLike<Signal> | null | undefined, index: number) => ({
+    length: 96,
+    offset: 96 * index,
+    index,
+  });
+
+  const fmtPrice = (value: number) => (value >= 1 ? `$${value.toFixed(4)}` : `$${value.toPrecision(4)}`);
+
+  const renderSignal = useCallback(({ item }: { item: Signal }) => {
     const icon = getSignalIcon(item.type);
 
     return (
@@ -458,7 +466,7 @@ export default function SignalsScreen() {
         </View>
       </TouchableOpacity>
     );
-  };
+  }, [setSelectedSignal]);
 
   const FilterButton = ({ type, label }: { type: SignalType; label: string }) => (
     <TouchableOpacity
