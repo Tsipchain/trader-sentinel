@@ -31,14 +31,14 @@ const MAX_VISIBLE_CANDLES = 120;
 const ZOOM_STEP = 10;
 
 function fmtPrice(p: number): string {
-  if (p >= 10_000) return p.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  if (p >= 10000) return p.toLocaleString('en-US', { maximumFractionDigits: 0 });
   if (p >= 1) return p.toFixed(2);
   return p.toFixed(4);
 }
 
 function fmtVolume(v: number): string {
-  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
-  if (v >= 1_000) return `${(v / 1_000).toFixed(1)}K`;
+  if (v >= 1000000) return `${(v / 1000000).toFixed(1)}M`;
+  if (v >= 1000) return `${(v / 1000).toFixed(1)}K`;
   return v.toFixed(0);
 }
 

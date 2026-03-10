@@ -174,6 +174,33 @@ export interface BrainPrediction {
 
 // ── Market API ───────────────────────────────────────────────────────────────
 
+
+
+type TimedCacheEntry<T> = { at: number; data: T };
+const _marketInFlight = new Map<string, Promise<any>>();
+const _marketCache = new Map<string, TimedCacheEntry<any>>();
+
+async function _cachedMarketGet<T>(key: string, ttlMs: number, req: () => Promise<T>): Promise<T> {
+  const now = Date.now();
+  const cached = _marketCache.get(key) as TimedCacheEntry<T> | undefined;
+  if (cached && now - cached.at < ttlMs) return cached.data;
+
+  const existing = _marketInFlight.get(key) as Promise<T> | undefined;
+  if (existing) return existing;
+
+  const pending = req()
+    .then((data) => {
+      _marketCache.set(key, { at: Date.now(), data });
+      return data;
+    })
+    .finally(() => {
+      _marketInFlight.delete(key);
+    });
+
+  _marketInFlight.set(key, pending);
+  return pending;
+}
+
 export const marketAPI = {
   async checkHealth(): Promise<{ ok: boolean; ts: number }> {
     const response = await api.get('/health');
@@ -181,17 +208,77 @@ export const marketAPI = {
   },
 
   async getSnapshot(symbol: string): Promise<MarketSnapshot> {
-    const response = await api.get('/api/market/snapshot', { params: { symbol } });
-    return response.data;
+    const key = `snapshot:${symbol}`;
+    return _cachedMarketGet(key, 8000, async () => {
+      const response = await api.get('/api/market/snapshot', { params: { symbol } });
+      return response.data as MarketSnapshot;
+    });
   },
 
   async getArbitrage(symbol: string): Promise<ArbitrageData> {
-    const response = await api.get('/api/market/arb', { params: { symbol } });
-    return response.data;
+    const key = `arb:${symbol}`;
+    return _cachedMarketGet(key, 12000, async () => {
+      const response = await api.get('/api/market/arb', { params: { symbol } });
+      return response.data as ArbitrageData;
+    });
   },
 
   async getRiskReport(symbol: string = 'BTC/USDT'): Promise<RiskReport> {
-    const response = await api.get('/api/sentinel/risk', { params: { symbol } });
+    const key = `risk:${symbol}`;
+    return _cachedMarketGet(key, 15000, async () => {
+      const response = await api.get('/api/sentinel/risk', { params: { symbol } });
+      return response.data as RiskReport;
+    });
+  },
+
+  async getMarketSessions(): Promise<{
+    ok: boolean;
+    utc_time: string;
+    active_sessions: Array<{
+      name: string;
+      region: string;
+      is_open: boolean;
+      phase: string;
+      minutes_since_open: number;
+      minutes_to_close: number;
+      minutes_to_open: number;
+      impact: string;
+      crypto_correlation: number;
+      note?: string;
+    }>;
+    upcoming_events: Array<{
+      name: string;
+      in_minutes: number;
+      impact: string;
+      description: string;
+    }>;
+    opening_range: Array<{ name: string; note: string; minutes_since_open: number }>;
+    closing_sessions: Array<{ name: string; note: string; minutes_to_close: number }>;
+    session_overlap: string;
+    trading_recommendation: string;
+    volume_expectation: string;
+    crypto_impact_score: number;
+  }> {
+    const response = await api.get('/api/sentinel/sessions');
+    return response.data;
+  },
+
+  async getTechnicals(symbol: string = 'BTC/USDT'): Promise<{
+    ok: boolean;
+    symbol: string;
+    score: number;
+    current_price: number;
+    rsi_14: number;
+    rsi_signal: string;
+    volatility_score: number;
+    macd: { line: number; signal: number; histogram: number; trend: string };
+    bollinger_bands: { upper: number; middle: number; lower: number; pct_b: number; signal: string };
+    ema: { ema_20: number; ema_50: number; cross: string };
+    williams_r: { value: number; signal: string };
+    nearest_fib: { level: string; price: number; distance_pct: number } | null;
+    error: string | null;
+  }> {
+    const response = await api.get('/api/sentinel/technicals', { params: { symbol } });
     return response.data;
   },
 
@@ -290,6 +377,9 @@ export interface ActiveTrade {
   quantity: number;
   pnl: number;           // % unrealised P&L
   openedAt: number;      // unix ms
+  stopLoss?: number;     // % SL
+  takeProfit?: number;   // % TP
+  leverage?: number;
 }
 
 export interface TradeRecord {
@@ -476,7 +566,8 @@ export const brainAPI = {
     api_secret: string;
     symbol?: string;
     days?: number;
-  }): Promise<{ ok: boolean; trained: boolean; trade_count?: number; model_accuracy?: number }> {
+    market_type?: 'auto' | 'futures' | 'spot';
+  }): Promise<{ ok: boolean; trained: boolean; trade_count?: number; model_accuracy?: number; message?: string; market_type?: string }> {
     const response = await brainPost('/api/brain/sync', params);
     return response;
   },
@@ -493,7 +584,11 @@ export const brainAPI = {
 
   async getAutoTraderStatus(userId: string): Promise<AutoTraderStatus> {
     const response = await brainGet(`/api/brain/autotrader/${userId}`);
-    return response;
+    const rawTrades = Array.isArray(response.active_trades) ? response.active_trades : [];
+    return {
+      ...response,
+      active_trades: rawTrades.map((trade: Record<string, any>) => normalizeActiveTrade(trade)),
+    };
   },
 
   async enableAutoTrader(params: {
@@ -577,6 +672,157 @@ export const brainAPI = {
       api_secret: params.apiSecret,
       passphrase: params.passphrase,
     });
+    return response;
+  },
+
+  async learnFromPositions(params: {
+    user_id: string;
+    positions: Array<{
+      symbol: string;
+      side: string;
+      leverage: number;
+      pnlPct: number;
+      entryPrice: number;
+      markPrice: number;
+    }>;
+    total_unrealized_pnl: number;
+  }): Promise<{
+    ok: boolean;
+    learned: boolean;
+    feedback_count: number;
+    style_traits: string[];
+    avg_leverage: number;
+    max_leverage: number;
+  }> {
+    const response = await brainPost('/api/brain/learn', params);
+    return response;
+  },
+
+  async getTraderProfile(userId: string): Promise<{
+    ok: boolean;
+    profile: {
+      dominant_traits: Array<{ trait: string; frequency: number }>;
+      avg_leverage: number;
+      max_leverage_seen: number;
+      learning_snapshots: number;
+      model_trained: boolean;
+      model_accuracy: number | null;
+      trades_trained_on: number;
+    } | null;
+    message?: string;
+  }> {
+    const response = await brainGet(`/api/brain/trader-profile/${userId}`);
+    return response;
+  },
+
+  async startSleepMode(userId: string): Promise<{ ok: boolean; message?: string; error?: string; duration_hours?: number }> {
+    const response = await brainPost('/api/brain/autotrader/sleep-start', { user_id: userId });
+    return response;
+  },
+
+  async stopSleepMode(userId: string): Promise<{ ok: boolean; message?: string }> {
+    const response = await brainPost('/api/brain/autotrader/sleep-stop', { user_id: userId });
+    return response;
+  },
+
+  async getSleepStatus(userId: string): Promise<{
+    ok: boolean;
+    active: boolean;
+    started_at?: number;
+    ends_at?: number;
+    elapsed_s?: number;
+    remaining_s?: number;
+    trade_count?: number;
+    realized_pnl?: number;
+    status?: string;
+    trades?: Array<{
+      symbol: string;
+      side: string;
+      amount: number;
+      entry_price: number;
+      leverage: number;
+      sl_price: number;
+      tp_price: number;
+      confidence: number;
+      opened_at: number;
+      status: string;
+      pnl_pct?: number;
+      closed_at?: number;
+    }>;
+    log?: string[];
+  }> {
+    const response = await brainGet(`/api/brain/autotrader/sleep-status/${userId}`);
+    return response;
+  },
+
+  async updateTradeSlTp(userId: string, tradeId: string, stopLoss: number, takeProfit: number): Promise<{ ok: boolean }> {
+    const response = await brainPost('/api/brain/autotrader/update-sl-tp', {
+      user_id: userId,
+      trade_id: tradeId,
+      stop_loss_pct: stopLoss,
+      take_profit_pct: takeProfit,
+    });
+    return response;
+  },
+
+  async checkTradeProtection(params: {
+    user_id: string;
+    exchange: string;
+    api_key: string;
+    api_secret: string;
+    passphrase?: string;
+    mode: 'active' | 'sleep';
+    config: {
+      stop_loss_pct: number;
+      take_profit_pct: number;
+      max_leverage: number;
+      max_total_exposure_pct: number;
+    };
+  }): Promise<{
+    ok: boolean;
+    actions: Array<{
+      id: string;
+      type: 'hedge' | 'safe_order' | 'sl_adjust' | 'tp_adjust' | 'reduce';
+      symbol: string;
+      description: string;
+      timestamp: number;
+      status: 'pending' | 'executed' | 'failed';
+    }>;
+    risk_level?: string;
+  }> {
+    const response = await brainPost('/api/brain/autotrader/protection-check', params);
+    return response;
+  },
+
+  async getOpenPositions(params: {
+    user_id: string;
+    exchange: string;
+    api_key: string;
+    api_secret: string;
+    passphrase?: string;
+  }): Promise<{
+    ok: boolean;
+    positions: Array<{
+      symbol: string;
+      side: string;
+      contracts: number;
+      entryPrice: number;
+      markPrice: number;
+      unrealizedPnl: number;
+      pnlPct: number;
+      leverage: number;
+      marginMode: string;
+      liquidationPrice: number;
+      notional: number;
+      timestamp: number;
+    }>;
+    count: number;
+    total_unrealized_pnl: number;
+    total_notional: number;
+    ts: number;
+    error?: string;
+  }> {
+    const response = await brainPost('/api/brain/positions', params);
     return response;
   },
 
