@@ -329,7 +329,7 @@ export default function SignalsScreen() {
     const sl = (isShort ? base * 0.8 : base);
     const tp1 = (base * 1.1);
     const tp2 = (base * 1.8);
-    const leverage = liquidityTight ? '1x-2x' : (highVolatility ? '2x-3x' : '3x-5x');
+    const leverageBand = liquidityTight ? '1x-2x' : (highVolatility ? '2x-3x' : '3x-5x');
     const validationWindow = highVolatility ? '15-45 min' : '30-120 min';
 
     const symbolMarket = marketData[signal.symbol];
@@ -370,7 +370,7 @@ export default function SignalsScreen() {
       slPrice: toAbsPrice(sl, 'sl'),
       tp1Price: toAbsPrice(tp1, 'tp'),
       tp2Price: toAbsPrice(tp2, 'tp'),
-      leverage,
+      leverage: leverageBand,
       validationWindow,
       note,
     };
