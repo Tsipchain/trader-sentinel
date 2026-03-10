@@ -28,6 +28,7 @@ SCAN_INTERVAL_S = 60         # re-scan every 60s
 MAX_TRADES_PER_SESSION = 40  # cap total trades in one sleep
 ENTRY_COOLDOWN_S = 180       # min 3 min between entries on same symbol
 MIN_CONFIDENCE = 0.52        # lower threshold to increase trade frequency in 8h mode
+DEFAULT_ENTRY_MARGIN_PCT = 0.088  # default margin allocation per new sleep entry
 
 
 def _is_contract_activation_error(error_text: str) -> bool:
@@ -113,11 +114,29 @@ def _sl_tp_for_leverage(leverage: float, side: str, price: float, sl_pct: float,
     return round(sl_price, 6), round(tp_price, 6)
 
 
-def _position_size(equity: float, price: float, risk_pct: float, max_position_pct: float, leverage: int) -> float:
+def _position_size(
+    equity: float,
+    price: float,
+    risk_pct: float,
+    max_position_pct: float,
+    leverage: int,
+    entry_margin_pct: float = DEFAULT_ENTRY_MARGIN_PCT,
+) -> float:
     """Calculate position size in contracts (base asset amount)."""
     risk_usd = equity * (risk_pct / 100)
     max_usd = equity * (max_position_pct / 100)
-    notional = min(risk_usd * leverage, max_usd * leverage, equity * 0.5 * leverage)
+
+    # Standard sleep entry sizing: allocate a small fixed margin slice per new trade.
+    target_margin_usd = equity * (max(entry_margin_pct, 0.0) / 100)
+    capped_margin_usd = min(max(target_margin_usd, 0.0), max_usd)
+
+    # Respect risk caps while providing deterministic entry sizing.
+    notional = min(
+        capped_margin_usd * leverage,
+        risk_usd * leverage,
+        max_usd * leverage,
+        equity * 0.5 * leverage,
+    )
     if price <= 0:
         return 0.0
     amount = notional / price
@@ -347,6 +366,7 @@ async def run_sleep_session(
     max_position_pct = float(config.get("max_position_pct", 10.0))
     max_open = max(1, int(config.get("max_open_trades", 3)))
     max_exposure_pct = float(config.get("max_total_exposure_pct", 25.0))
+    entry_margin_pct = float(config.get("entry_margin_pct", DEFAULT_ENTRY_MARGIN_PCT))
 
     start_time = time.time()
     end_time = start_time + SLEEP_DURATION_S
@@ -368,6 +388,7 @@ async def run_sleep_session(
     session["blocked_symbols"] = []
     brain_store.save_autotrader(user_id, session)
     _log_sleep(user_id, f"Sleep Mode started — {len(symbols)} symbols, {max_leverage}x max leverage, {margin_mode} margin, futures")
+    _log_sleep(user_id, f"Entry sizing set to {entry_margin_pct:.3f}% margin allocation per new trade (target baseline).")
 
     # Set margin mode for all symbols at start
     for sym in symbols:
@@ -582,10 +603,10 @@ async def run_sleep_session(
 
                         elapsed_s = time.time() - start_time
                         dynamic_min_conf = MIN_CONFIDENCE
-                        if trade_count == 0 and elapsed_s > 2 * 3600:
-                            dynamic_min_conf = 0.35
-                        elif trade_count == 0 and elapsed_s > 3600:
-                            dynamic_min_conf = 0.42
+                        if trade_count == 0 and elapsed_s > 45 * 60:
+                            dynamic_min_conf = 0.40
+                        elif trade_count == 0 and elapsed_s > 15 * 60:
+                            dynamic_min_conf = 0.46
 
                         if dynamic_min_conf < MIN_CONFIDENCE and not forced_aggressive_logged:
                             _log_sleep(user_id, f"No fills yet after {elapsed_s/3600:.1f}h — entering aggressive mode (min confidence {dynamic_min_conf:.2f}).")
@@ -605,7 +626,7 @@ async def run_sleep_session(
                         )
 
                         # Calculate position size
-                        amount = _position_size(equity, price, risk_pct, max_position_pct, use_leverage)
+                        amount = _position_size(equity, price, risk_pct, max_position_pct, use_leverage, entry_margin_pct)
                         if amount <= 0:
                             continue
 
