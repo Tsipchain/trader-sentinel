@@ -453,7 +453,18 @@ export default function AutoTraderScreen() {
           onPress: async () => {
             setStartingSleep(true);
             try {
-              const res = await brainAPI.startSleepMode(user.id);
+              const res = await brainAPI.startSleepMode(user.id, {
+                symbols: cfg.symbols,
+                stop_loss_pct: cfg.stopLossPct,
+                take_profit_pct: cfg.takeProfitPct,
+                max_position_pct: cfg.maxPositionPct,
+                max_open_trades: cfg.maxOpenTrades,
+                margin_mode: cfg.marginMode,
+                max_leverage: cfg.maxLeverage,
+                risk_per_trade_pct: cfg.riskPerTradePct,
+                max_total_exposure_pct: cfg.maxTotalExposurePct,
+                entry_margin_pct: 0.088,
+              });
               if (res.ok) {
                 const startedAt = Date.now() / 1000;
                 const endsAt = startedAt + (8 * 3600);
