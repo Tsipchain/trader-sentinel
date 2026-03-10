@@ -13,9 +13,10 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, SPACING, FONT_SIZES, BORDER_RADIUS } from '../constants/theme';
 import { useStore, Signal } from '../store/useStore';
-import { marketAPI, analystAPI, type AnalystBriefing } from '../services/api';
+import { marketAPI, brainAPI } from '../services/api';
 import * as Haptics from 'expo-haptics';
 import * as Notifications from 'expo-notifications';
+import { CONFIG } from '../config';
 
 type SignalType = 'all' | 'arbitrage' | 'alert' | 'opportunity';
 
@@ -25,16 +26,17 @@ type TierSignalPolicy = {
   refreshMs: number;
 };
 
-const SIGNAL_POLICY: Record<string, TierSignalPolicy> = {
-  free: { directionalLimit: 1, allowNewCoinSignals: false, refreshMs: 20000 },
-  starter: { directionalLimit: 2, allowNewCoinSignals: false, refreshMs: 15000 },
-  pro: { directionalLimit: 5, allowNewCoinSignals: true, refreshMs: 12000 },
-  elite: { directionalLimit: 10, allowNewCoinSignals: true, refreshMs: 9000 },
-  whale: { directionalLimit: 99, allowNewCoinSignals: true, refreshMs: 7000 },
+const SIGNAL_REFRESH_MS: Record<string, number> = {
+  free: 20000,
+  starter: 15000,
+  pro: 12000,
+  elite: 9000,
+  whale: 7000,
 };
 
+const RISK_MIN_INTERVAL_MS = 30000;
 export default function SignalsScreen() {
-  const { signals, addSignal, clearSignals, watchlist, settings, subscription, marketData } = useStore();
+  const { signals, addSignal, clearSignals, watchlist, settings, subscription, marketData, user } = useStore();
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<SignalType>('all');
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -42,15 +44,25 @@ export default function SignalsScreen() {
   const [modalRefPrice, setModalRefPrice] = useState<number | null>(null);
   const notificationReadyRef = useRef(false);
   const nextFetchAllowedAtRef = useRef(0);
-  const nextAnalystSignalAtRef = useRef(0);
+  const riskReportCacheRef = useRef<Record<string, { at: number; value: any }>>({});
 
-  const tierPolicy = SIGNAL_POLICY[subscription] ?? SIGNAL_POLICY.free;
+  const tierDirectionalLimit = CONFIG.TIER_LIMITS[subscription] ?? CONFIG.TIER_LIMITS.free;
   const canUseAdvancedSignals = subscription !== 'free';
+  const tierPolicy: TierSignalPolicy = {
+    directionalLimit: Number.isFinite(tierDirectionalLimit) ? Math.max(1, tierDirectionalLimit) : watchlist.length || 1,
+    allowNewCoinSignals: subscription !== 'free' && subscription !== 'starter',
+    refreshMs: SIGNAL_REFRESH_MS[subscription] ?? SIGNAL_REFRESH_MS.free,
+  };
 
   const hasRecentDuplicate = useCallback((idPrefix: string) => {
     const now = Date.now();
     const currentSignals = useStore.getState().signals;
     return currentSignals.some((s) => s.id.startsWith(idPrefix) && now - s.timestamp < 10 * 60 * 1000);
+  }, []);
+
+  const hasAnySignalPrefix = useCallback((idPrefix: string) => {
+    const currentSignals = useStore.getState().signals;
+    return currentSignals.some((s) => s.id.startsWith(idPrefix));
   }, []);
 
   const maybeNotify = useCallback(async (signal: Signal) => {
@@ -83,7 +95,52 @@ export default function SignalsScreen() {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     }
     maybeNotify(signal);
-  }, [addSignal, maybeNotify, settings.hapticFeedback]);
+
+    if (subscription !== 'free' && user?.id) {
+      brainAPI.publishTelegramSignal({
+        user_id: user.id,
+        tier: subscription,
+        signal_type: signal.type,
+        symbol: signal.symbol,
+        message: signal.message,
+        timestamp: signal.timestamp,
+      }).catch(() => {
+        // best-effort relay; in-app signals should continue even if Telegram is down
+      });
+    }
+  }, [addSignal, maybeNotify, settings.hapticFeedback, subscription, user?.id]);
+
+
+  const getRiskReportWithMinInterval = useCallback(async (symbol: string) => {
+    const cache = riskReportCacheRef.current[symbol];
+    const now = Date.now();
+    if (cache && now - cache.at < RISK_MIN_INTERVAL_MS) {
+      return cache.value;
+    }
+
+    const risk = await marketAPI.getRiskReport(symbol);
+    riskReportCacheRef.current[symbol] = { at: now, value: risk };
+    return risk;
+  }, []);
+
+
+  const handleFetchError = useCallback((error: unknown) => {
+    const status = (error as any)?.response?.status;
+    const isNetworkError = (error as any)?.message === 'Network Error';
+    if (status === 429) {
+      // Client-side backoff to avoid hammering upstream when rate-limited
+      nextFetchAllowedAtRef.current = Date.now() + 60_000;
+    } else if (isNetworkError) {
+      // transient network issue: short cooldown to avoid retry storms
+      nextFetchAllowedAtRef.current = Date.now() + 15_000;
+    }
+
+    if (status === 429 || isNetworkError) {
+      console.warn('Signals fetch backoff:', status ?? 'network');
+    } else {
+      console.warn('Signals fetch failed:', (error as any)?.message ?? 'unknown error');
+    }
+  }, []);
 
   const fetchSignals = useCallback(async () => {
     if (Date.now() < nextFetchAllowedAtRef.current) {
@@ -130,8 +187,8 @@ export default function SignalsScreen() {
       if (!canUseAdvancedSignals && watchlist.length > 0) {
         const baseSymbol = watchlist[0];
         const prefix = `free-risk-${baseSymbol}`;
-        if (!hasRecentDuplicate(prefix)) {
-          const risk = await marketAPI.getRiskReport(baseSymbol);
+        if (!hasAnySignalPrefix(prefix)) {
+          const risk = await getRiskReportWithMinInterval(baseSymbol);
           const lowRisk = risk.composite_score <= 5.5;
           addSignalWithFeedback({
             id: `${prefix}-${Date.now()}`,
@@ -146,40 +203,16 @@ export default function SignalsScreen() {
         }
       }
 
-      // Analyst pattern signal (throttled) to surface potential market patterns.
-      if (Date.now() >= nextAnalystSignalAtRef.current) {
-        const analyst = await analystAPI.getBriefing();
-        if ((analyst as AnalystBriefing).briefing) {
-          const text = (analyst as AnalystBriefing).briefing;
-          const lower = text.toLowerCase();
-          const trend = lower.includes('accum') || lower.includes('bull') || lower.includes('long')
-            ? 'LONG/ACCUMULATE'
-            : (lower.includes('distribution') || lower.includes('bear') || lower.includes('short') ? 'SHORT/DEFENSIVE' : 'NEUTRAL');
-          const prefix = `analyst-pattern-${trend}`;
-          if (!hasRecentDuplicate(prefix)) {
-            addSignalWithFeedback({
-              id: `${prefix}-${Date.now()}`,
-              type: trend === 'SHORT/DEFENSIVE' ? 'alert' : 'opportunity',
-              symbol: watchlist[0] ?? 'BTC/USDT',
-              message: `Analyst pattern: ${trend} bias — ${text.slice(0, 160)}${text.length > 160 ? '…' : ''}`,
-              timestamp: Date.now(),
-              venues: ['sentinel-analyst'],
-            });
-          }
-          nextAnalystSignalAtRef.current = Date.now() + 10 * 60 * 1000;
-        }
-      }
       // Pro+ directional signals from composite risk framework
       if (canUseAdvancedSignals) {
         const directionalSymbols = watchlist.slice(0, tierPolicy.directionalLimit);
-        const riskSignals = await Promise.all(
-          directionalSymbols.map(async (symbol) => {
-            const risk = await marketAPI.getRiskReport(symbol);
-            return { symbol, risk };
-          })
+        const riskSettled = await Promise.allSettled(
+          directionalSymbols.map(async (symbol) => ({ symbol, risk: await getRiskReportWithMinInterval(symbol) }))
         );
 
-        riskSignals.forEach(({ symbol, risk }) => {
+        riskSettled.forEach((result) => {
+          if (result.status !== 'fulfilled') return;
+          const { symbol, risk } = result.value;
           const level = risk.recommendation?.level || 'UNKNOWN';
           const action = (risk.recommendation?.action || '').toLowerCase();
           const prefix = `dir-${symbol}-${level}`;
@@ -211,23 +244,9 @@ export default function SignalsScreen() {
         });
       }
     } catch (error) {
-      const status = (error as any)?.response?.status;
-      const isNetworkError = (error as any)?.message === 'Network Error';
-      if (status === 429) {
-        // Client-side backoff to avoid hammering upstream when rate-limited
-        nextFetchAllowedAtRef.current = Date.now() + 60_000;
-      } else if (isNetworkError) {
-        // transient network issue: short cooldown to avoid retry storms
-        nextFetchAllowedAtRef.current = Date.now() + 15_000;
-      }
-
-      if (status === 429 || isNetworkError) {
-        console.warn('Signals fetch backoff:', status ?? 'network');
-      } else {
-        console.warn('Signals fetch failed:', (error as any)?.message ?? 'unknown error');
-      }
+      handleFetchError(error);
     }
-  }, [watchlist, addSignalWithFeedback, canUseAdvancedSignals, hasRecentDuplicate, tierPolicy.allowNewCoinSignals, tierPolicy.directionalLimit]);
+  }, [watchlist, addSignalWithFeedback, canUseAdvancedSignals, hasRecentDuplicate, hasAnySignalPrefix, tierPolicy.allowNewCoinSignals, tierPolicy.directionalLimit, getRiskReportWithMinInterval, handleFetchError]);
 
 
   useEffect(() => {
@@ -278,9 +297,12 @@ export default function SignalsScreen() {
 
     const symbolMarket = marketData[signal.symbol];
     const refPrice = modalRefPrice || symbolMarket?.bestAsk || symbolMarket?.bestBid || symbolMarket?.prices?.[0]?.price;
-    const toAbsPrice = (pct: number) => {
+    const toAbsPrice = (pct: number, target: 'sl' | 'tp') => {
       if (!refPrice) return null;
       const factor = pct / 100;
+      if (target === 'sl') {
+        return isShort ? refPrice * (1 + factor) : refPrice * (1 - factor);
+      }
       return isShort ? refPrice * (1 - factor) : refPrice * (1 + factor);
     };
 
@@ -291,9 +313,9 @@ export default function SignalsScreen() {
       sl: `${sl.toFixed(2)}%`,
       tp1: `${tp1.toFixed(2)}%`,
       tp2: `${tp2.toFixed(2)}%`,
-      slPrice: toAbsPrice(sl),
-      tp1Price: toAbsPrice(tp1),
-      tp2Price: toAbsPrice(tp2),
+      slPrice: toAbsPrice(sl, 'sl'),
+      tp1Price: toAbsPrice(tp1, 'tp'),
+      tp2Price: toAbsPrice(tp2, 'tp'),
       leverage,
       validationWindow,
       note: liquidityTight
