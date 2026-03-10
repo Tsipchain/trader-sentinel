@@ -435,6 +435,18 @@ async def fetch_open_positions(
     finally:
         await ex.close()
 
+def _is_contract_activation_error(error_text: str) -> bool:
+    msg = (error_text or '').lower()
+    return (
+        'contract not activated' in msg
+        or '"code":1002' in msg
+        or "'code':1002" in msg
+        or 'code:1002' in msg
+    )
+
+
+
+
 
 def _normalise(raw: list, symbol: str) -> list[dict[str, Any]]:
     trades = []
@@ -464,13 +476,18 @@ async def set_margin_mode(
     symbol: str,
     margin_mode: str = "cross",
     passphrase: str | None = None,
+    leverage: int | None = None,
 ) -> bool:
     """Set margin mode (cross/isolated) for a futures symbol."""
     ex = _build_exchange(exchange, api_key, api_secret, passphrase, market_type="futures")
     try:
         futures_symbol = _adapt_symbol(symbol, "futures")
         if hasattr(ex, "set_margin_mode"):
-            await ex.set_margin_mode(margin_mode, futures_symbol)
+            params: dict[str, Any] = {}
+            # MEXC futures may require leverage to be passed with margin-mode updates.
+            if leverage and leverage > 0 and exchange.lower() == "mexc":
+                params["leverage"] = int(leverage)
+            await ex.set_margin_mode(margin_mode, futures_symbol, params)
         else:
             # Some exchanges use different method names
             await ex.private_post_set_margin_type({
@@ -555,8 +572,12 @@ async def create_limit_order(
             "timestamp": order.get("timestamp"),
         }
     except Exception as e:
+        err = str(e)
+        if _is_contract_activation_error(err):
+            log.warning("[exec] limit order blocked (contract not activated) %s %s: %s", side, symbol, e)
+            return {"ok": False, "error": err, "error_code": "contract_not_activated"}
         log.error("[exec] limit order failed %s %s: %s", side, symbol, e)
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": err}
     finally:
         await ex.close()
 
@@ -599,8 +620,12 @@ async def create_market_order(
             "timestamp": order.get("timestamp"),
         }
     except Exception as e:
+        err = str(e)
+        if _is_contract_activation_error(err):
+            log.warning("[exec] market order blocked (contract not activated) %s %s: %s", side, symbol, e)
+            return {"ok": False, "error": err, "error_code": "contract_not_activated"}
         log.error("[exec] market order failed %s %s: %s", side, symbol, e)
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": err}
     finally:
         await ex.close()
 

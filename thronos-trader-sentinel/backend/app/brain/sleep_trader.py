@@ -336,7 +336,7 @@ async def run_sleep_session(
         try:
             await connector.set_margin_mode(
                 creds["exchange"], creds["api_key"], creds["api_secret"],
-                sym, margin_mode, creds.get("passphrase"),
+                sym, margin_mode, creds.get("passphrase"), max_leverage,
             )
         except Exception:
             pass  # often already set
