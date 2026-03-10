@@ -142,138 +142,114 @@ export default function SignalsScreen() {
     }
   }, []);
 
+  const runSignalPipeline = useCallback(async () => {
+    // Fetch arbitrage data for watchlist (per-symbol fault tolerance)
+    const results = await Promise.allSettled(
+      watchlist.map(async (symbol) => {
+        const arb = await marketAPI.getArbitrage(symbol);
+        const signal = marketAPI.detectArbitrageSignal(arb, 0.1);
+        return { symbol, arb, signal };
+      })
+    );
+
+    // Add arbitrage signals
+    results.forEach((result) => {
+      if (result.status !== 'fulfilled') return;
+      const { signal, symbol, arb } = result.value;
+      if (signal && !hasRecentDuplicate(`arb-${symbol}`)) {
+        addSignalWithFeedback({ ...signal, id: `arb-${symbol}-${Date.now()}` });
+      }
+
+      // Pro+ signal: πιθανή cross-exchange "listing / availability" ευκαιρία
+      if (tierPolicy.allowNewCoinSignals && !hasRecentDuplicate(`newcoin-${symbol}`)) {
+        const listedVenue = arb.best_bid_venue || arb.best_ask_venue;
+        const noVenue = !arb.best_bid_venue || !arb.best_ask_venue;
+        if (listedVenue && noVenue) {
+          addSignalWithFeedback({
+            id: `newcoin-${symbol}-${Date.now()}`,
+            type: 'opportunity',
+            symbol,
+            message: `${symbol} εμφανίζει περιορισμένη διαθεσιμότητα σε venues — πιθανό early listing edge.`,
+            timestamp: Date.now(),
+            venues: [listedVenue],
+          });
+        }
+      }
+    });
+
+    // Free-tier baseline directional hint so users don't wait "all day" for a signal.
+    if (!canUseAdvancedSignals && watchlist.length > 0) {
+      const baseSymbol = watchlist[0];
+      const prefix = `free-risk-${baseSymbol}`;
+      if (!hasAnySignalPrefix(prefix)) {
+        const risk = await getRiskReportWithMinInterval(baseSymbol);
+        const lowRisk = risk.composite_score <= 5.5;
+        addSignalWithFeedback({
+          id: `${prefix}-${Date.now()}`,
+          type: lowRisk ? 'opportunity' : 'alert',
+          symbol: baseSymbol,
+          message: lowRisk
+            ? `Baseline LONG watch: risk ${risk.composite_score.toFixed(1)}/10 (${risk.recommendation.level}).`
+            : `Baseline DEFENSIVE watch: risk ${risk.composite_score.toFixed(1)}/10 (${risk.recommendation.level}).`,
+          timestamp: Date.now(),
+          venues: ['sentinel-risk'],
+        });
+      }
+    }
+
+    // Pro+ directional signals from composite risk framework
+    if (canUseAdvancedSignals) {
+      const directionalSymbols = watchlist.slice(0, tierPolicy.directionalLimit);
+      const riskSettled = await Promise.allSettled(
+        directionalSymbols.map(async (symbol) => ({ symbol, risk: await getRiskReportWithMinInterval(symbol) }))
+      );
+
+      riskSettled.forEach((result) => {
+        if (result.status !== 'fulfilled') return;
+        const { symbol, risk } = result.value;
+        const level = risk.recommendation?.level || 'UNKNOWN';
+        const action = (risk.recommendation?.action || '').toLowerCase();
+        const prefix = `dir-${symbol}-${level}`;
+
+        if (hasRecentDuplicate(prefix)) return;
+
+        if (action.includes('reduce') || action.includes('hedge') || level === 'CAUTION' || level === 'CRITICAL') {
+          addSignalWithFeedback({
+            id: `${prefix}-${Date.now()}`,
+            type: 'alert',
+            symbol,
+            message: `SHORT/DEFENSIVE bias: Risk ${risk.composite_score.toFixed(1)}/10 (${level}) — ${risk.recommendation.description}`,
+            timestamp: Date.now(),
+            venues: ['sentinel-risk'],
+          });
+          return;
+        }
+
+        if (level === 'NEUTRAL' || action.includes('accumulate') || action.includes('long')) {
+          addSignalWithFeedback({
+            id: `${prefix}-${Date.now()}`,
+            type: 'opportunity',
+            symbol,
+            message: `LONG/ACCUMULATE bias: Risk ${risk.composite_score.toFixed(1)}/10 (${level}) — ${risk.recommendation.description}`,
+            timestamp: Date.now(),
+            venues: ['sentinel-risk'],
+          });
+        }
+      });
+    }
+  }, [watchlist, addSignalWithFeedback, canUseAdvancedSignals, hasRecentDuplicate, hasAnySignalPrefix, tierPolicy.allowNewCoinSignals, tierPolicy.directionalLimit, getRiskReportWithMinInterval]);
+
   const fetchSignals = useCallback(async () => {
     if (Date.now() < nextFetchAllowedAtRef.current) {
       return;
     }
 
-    const allowedPairs = getAllowedPairs(watchlist, subscription);
-
-    // ── Arbitrage signals (all pairs, all tiers) — separate try/catch ──
-    const SCAN_PAIRS = [
-      'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'DOGE/USDT',
-      'NEAR/USDT', 'AVAX/USDT', 'LINK/USDT', 'DOT/USDT', 'ADA/USDT',
-      'MATIC/USDT', 'ARB/USDT', 'OP/USDT', 'SUI/USDT', 'APT/USDT',
-      'PEPE/USDT', 'WIF/USDT', 'FET/USDT', 'INJ/USDT', 'TIA/USDT',
-    ];
-    const arbPairs = [...new Set([...watchlist, ...SCAN_PAIRS])];
-
     try {
-      const results = await Promise.allSettled(
-        arbPairs.map(async (symbol) => {
-          const arb = await marketAPI.getArbitrage(symbol);
-          const signal = marketAPI.detectArbitrageSignal(arb, 0.05);
-          return { symbol, arb, signal };
-        })
-      );
-
-      results.forEach((result) => {
-        if (result.status !== 'fulfilled') return;
-        const { signal, symbol, arb } = result.value;
-        if (signal && !hasRecentDuplicate(`arb-${symbol}`)) {
-          addSignalWithFeedback({ ...signal, id: `arb-${symbol}-${Date.now()}` });
-        }
-
-        // Micro-spread alerts for monitored pairs
-        if (!signal && arb.best_bid && arb.best_ask && arb.spread !== null) {
-          const spreadPct = Math.abs(arb.spread / arb.best_ask) * 100;
-          const sym = symbol.replace('/USDT', '');
-          if (spreadPct > 0.02 && !hasRecentDuplicate(`spread-${sym}`)) {
-            addSignalWithFeedback({
-              id: `spread-${sym}-${Date.now()}`, type: 'arbitrage', symbol: sym,
-              message: `${sym} spread ${spreadPct.toFixed(3)}% — ${arb.best_ask_venue} $${arb.best_ask.toFixed(4)} / ${arb.best_bid_venue} $${arb.best_bid.toFixed(4)}. Monitor for widening.`,
-              profit: spreadPct, timestamp: Date.now(),
-              venues: [arb.best_ask_venue, arb.best_bid_venue],
-            });
-          }
-        }
-
-        if (tierPolicy.allowNewCoinSignals && !hasRecentDuplicate(`newcoin-${symbol}`)) {
-          const listedVenue = arb.best_bid_venue || arb.best_ask_venue;
-          const noVenue = !arb.best_bid_venue || !arb.best_ask_venue;
-          if (listedVenue && noVenue) {
-            addSignalWithFeedback({
-              id: `newcoin-${symbol}-${Date.now()}`, type: 'opportunity', symbol,
-              message: `${symbol} limited venue availability — possible early listing edge.`,
-              timestamp: Date.now(), venues: [listedVenue],
-            });
-          }
-        }
-      });
+      await runSignalPipeline();
     } catch (error) {
       _handleFetchError(error);
     }
-
-    // ── Free-tier baseline risk hint — separate try/catch ──
-    try {
-      if (!canUseAdvancedSignals && allowedPairs.length > 0) {
-        const baseSymbol = allowedPairs[0];
-        const prefix = `free-risk-${baseSymbol}`;
-        if (!hasAnySignalPrefix(prefix)) {
-          const risk = await getRiskReportWithMinInterval(baseSymbol);
-          const lowRisk = risk.composite_score <= 5.5;
-          addSignalWithFeedback({
-            id: `${prefix}-${Date.now()}`,
-            type: lowRisk ? 'opportunity' : 'alert',
-            symbol: baseSymbol,
-            message: lowRisk
-              ? `Baseline LONG watch: risk ${risk.composite_score.toFixed(1)}/10 (${risk.recommendation.level}).`
-              : `Baseline DEFENSIVE watch: risk ${risk.composite_score.toFixed(1)}/10 (${risk.recommendation.level}).`,
-            timestamp: Date.now(),
-            venues: ['sentinel-risk'],
-          });
-        }
-      }
-    } catch {
-      // non-blocking
-    }
-
-      // Pro+ directional signals from composite risk framework
-      if (canUseAdvancedSignals) {
-        const directionalSymbols = watchlist.slice(0, tierPolicy.directionalLimit);
-        const riskSettled = await Promise.allSettled(
-          directionalSymbols.map(async (symbol) => ({ symbol, risk: await getRiskReportWithMinInterval(symbol) }))
-        );
-
-        riskSettled.forEach((result) => {
-          if (result.status !== 'fulfilled') return;
-          const { symbol, risk } = result.value;
-          const level = risk.recommendation?.level || 'UNKNOWN';
-          const action = (risk.recommendation?.action || '').toLowerCase();
-          const prefix = `dir-${symbol}-${level}`;
-
-          if (hasRecentDuplicate(prefix)) return;
-
-          if (action.includes('reduce') || action.includes('hedge') || level === 'CAUTION' || level === 'CRITICAL') {
-            addSignalWithFeedback({
-              id: `${prefix}-${Date.now()}`,
-              type: 'alert',
-              symbol,
-              message: `SHORT/DEFENSIVE bias: Risk ${risk.composite_score.toFixed(1)}/10 (${level}) — ${risk.recommendation.description}`,
-              timestamp: Date.now(),
-              venues: ['sentinel-risk'],
-            });
-            return;
-          }
-
-          if (level === 'NEUTRAL' || action.includes('accumulate') || action.includes('long')) {
-            addSignalWithFeedback({
-              id: `${prefix}-${Date.now()}`,
-              type: 'opportunity',
-              symbol,
-              message: `LONG/ACCUMULATE bias: Risk ${risk.composite_score.toFixed(1)}/10 (${level}) — ${risk.recommendation.description}`,
-              timestamp: Date.now(),
-              venues: ['sentinel-risk'],
-            });
-          }
-        });
-      } catch (error) {
-        _handleFetchError(error);
-      }
-    } catch (error) {
-      _handleFetchError(error);
-    }
-  }, [watchlist, addSignalWithFeedback, canUseAdvancedSignals, hasRecentDuplicate, hasAnySignalPrefix, tierPolicy.allowNewCoinSignals, tierPolicy.directionalLimit, getRiskReportWithMinInterval, _handleFetchError]);
+  }, [runSignalPipeline, _handleFetchError]);
 
 
   useEffect(() => {
