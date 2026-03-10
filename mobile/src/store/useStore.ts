@@ -13,6 +13,10 @@ export interface User {
   rewardsBalance: number;
   referralCode: string;
   createdAt: string;
+  subscriptionStartedAt?: string;
+  subscriptionExpiresAt?: string;
+  lastSubscriptionPaymentAt?: string;
+  subscriptionPaymentsCount?: number;
 }
 
 export type SubscriptionTier = 'free' | 'starter' | 'pro' | 'elite' | 'whale';
