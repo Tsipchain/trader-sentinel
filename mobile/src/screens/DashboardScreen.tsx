@@ -27,7 +27,22 @@ interface PriceData {
   spread: number;
   bestBid: string;
   bestAsk: string;
+  best_bid: number;
+  best_ask: number;
 }
+
+
+const _toNumber = (value: unknown, fallback: number = 0): number => {
+  const num = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(num) ? num : fallback;
+};
+
+const _safePct = (numerator: number, denominator: number): number => {
+  if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator <= 0) {
+    return 0;
+  }
+  return (numerator / denominator) * 100;
+};
 
 export default function DashboardScreen() {
   const navigation = useNavigation<NavigationProp>();
@@ -37,24 +52,66 @@ export default function DashboardScreen() {
   const [arbitrageOpps, setArbitrageOpps] = useState<ArbitrageData[]>([]);
   const [loading, setLoading] = useState(true);
 
+  const recentSignals = signals
+    .filter((sig) => sig.type === 'arbitrage')
+    .sort((a, b) => b.timestamp - a.timestamp);
+
+  const arbitrageSignalOpps = recentSignals
+    .slice(0, subscription === 'free' ? 1 : 3)
+    .map((sig) => ({
+      symbol: sig.symbol,
+      message: sig.message,
+      timestamp: sig.timestamp,
+    }));
+
   const fetchData = useCallback(async () => {
     try {
-      const results = await Promise.all(
+      const settled = await Promise.allSettled(
         watchlist.map(async (symbol) => {
-          const arb = await marketAPI.getArbitrage(symbol);
+          const [arbResult, snapshotResult] = await Promise.allSettled([
+            marketAPI.getArbitrage(symbol),
+            marketAPI.getSnapshot(symbol),
+          ]);
+
+          const arb = arbResult.status === 'fulfilled' ? arbResult.value : null;
+          const snapshot = snapshotResult.status === 'fulfilled' ? snapshotResult.value : null;
+
+          const snapshotLast = snapshot?.venues?.find((v) => v.last !== null)?.last ?? null;
+          const dexLast = _toNumber(arb?.dex_last, _toNumber(snapshotLast));
+          const bestBid = _toNumber(arb?.best_bid, dexLast);
+          const bestAsk = _toNumber(arb?.best_ask, dexLast);
+          const spread = _toNumber(arb?.spread, bestBid - bestAsk);
+
+          if (!bestBid && !bestAsk && !dexLast) {
+            return null;
+          }
+
           return {
             symbol,
-            price: arb.best_bid,
+            price: bestBid || bestAsk || dexLast,
             change24h: 0,
-            spread: arb.spread,
-            bestBid: arb.best_bid_venue,
-            bestAsk: arb.best_ask_venue,
-            ...arb,
+            spread,
+            bestBid: arb?.best_bid_venue || 'dex',
+            bestAsk: arb?.best_ask_venue || 'dex',
+            best_bid: bestBid || dexLast,
+            best_ask: bestAsk || dexLast,
+            best_bid_venue: arb?.best_bid_venue || 'dex',
+            best_ask_venue: arb?.best_ask_venue || 'dex',
+            dex_last: dexLast,
+            dex_minus_best_ask: _toNumber(arb?.dex_minus_best_ask, 0),
           };
         })
       );
+
+      const results = settled
+        .filter((result): result is PromiseFulfilledResult<PriceData & ArbitrageData> => result.status === 'fulfilled' && !!result.value)
+        .map((result) => result.value);
+
       setPrices(results);
-      const opps = results.filter((r) => (r.spread / r.price) * 100 > 0.1);
+      const opps = results.filter((r) => {
+        const pct = _safePct(_toNumber(r.spread), _toNumber(r.best_ask || r.price));
+        return pct > 0.05 && r.bestBid !== r.bestAsk;
+      });
       setArbitrageOpps(opps as any);
     } catch (error) {
       console.error('Failed to fetch data:', error);
@@ -227,7 +284,7 @@ export default function DashboardScreen() {
                   <View style={styles.arbProfit}>
                     <Ionicons name="trending-up" size={16} color={COLORS.success} />
                     <Text style={styles.arbProfitText}>
-                      {((opp.spread / opp.best_ask) * 100).toFixed(3)}%
+                      {_safePct(_toNumber(opp.spread), _toNumber(opp.best_ask)).toFixed(3)}%
                     </Text>
                   </View>
                 </View>
@@ -235,15 +292,28 @@ export default function DashboardScreen() {
                   <View style={styles.arbVenue}>
                     <Text style={styles.arbVenueLabel}>Buy on</Text>
                     <Text style={styles.arbVenueName}>{opp.best_ask_venue}</Text>
-                    <Text style={styles.arbPrice}>${opp.best_ask.toFixed(2)}</Text>
+                    <Text style={styles.arbPrice}>${_toNumber(opp.best_ask).toFixed(2)}</Text>
                   </View>
                   <Ionicons name="arrow-forward" size={20} color={COLORS.textMuted} />
                   <View style={styles.arbVenue}>
                     <Text style={styles.arbVenueLabel}>Sell on</Text>
                     <Text style={styles.arbVenueName}>{opp.best_bid_venue}</Text>
-                    <Text style={styles.arbPrice}>${opp.best_bid.toFixed(2)}</Text>
+                    <Text style={styles.arbPrice}>${_toNumber(opp.best_bid).toFixed(2)}</Text>
                   </View>
                 </View>
+              </View>
+            ))
+          ) : arbitrageSignalOpps.length > 0 ? (
+            arbitrageSignalOpps.map((opp, index) => (
+              <View key={`signal-${index}`} style={styles.arbCard}>
+                <View style={styles.arbHeader}>
+                  <Text style={styles.arbSymbol}>{opp.symbol}</Text>
+                  <View style={styles.arbProfit}>
+                    <Ionicons name="flash" size={16} color={COLORS.primary} />
+                    <Text style={styles.arbProfitText}>Signal</Text>
+                  </View>
+                </View>
+                <Text style={styles.arbVenueLabel}>{opp.message}</Text>
               </View>
             ))
           ) : (
@@ -279,7 +349,7 @@ export default function DashboardScreen() {
                 </Text>
               </View>
               <View style={styles.watchlistRight}>
-                <Text style={styles.watchlistPrice}>${item.price.toLocaleString()}</Text>
+                <Text style={styles.watchlistPrice}>${_toNumber(item.price).toLocaleString()}</Text>
                 <Text
                   style={[
                     styles.watchlistChange,

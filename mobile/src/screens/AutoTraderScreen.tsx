@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, Switch, TouchableOpacity,
   Alert, TextInput, ActivityIndicator,
@@ -9,6 +9,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { COLORS, SPACING, FONT_SIZES, BORDER_RADIUS, SHADOWS } from '../constants/theme';
 import { useStore } from '../store/useStore';
 import { brainAPI } from '../services/api';
+import CONFIG from '../config';
 import type { ActiveTrade } from '../services/api';
 
 const SYMBOL_OPTIONS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT'];
@@ -16,11 +17,12 @@ const EXCHANGE_OPTIONS = ['binance', 'bybit', 'okx', 'mexc'];
 const SNAPSHOT_MAX_AGE_MS = 5 * 60 * 1000;
 
 export default function AutoTraderScreen() {
-  const { user, autoTrader, setAutoTrader } = useStore();
+  const { user, subscription, autoTrader, setAutoTrader } = useStore();
   const [toggling, setToggling] = useState(false);
   const [loadingStatus, setLoadingStatus] = useState(false);
   const [closingId, setClosingId] = useState<string | null>(null);
   const [syncingPortfolio, setSyncingPortfolio] = useState(false);
+  const hasShownBrainMisconfigAlert = useRef(false);
 
   const isEnabled = autoTrader.enabled;
   const cfg = autoTrader.config;
@@ -33,6 +35,11 @@ export default function AutoTraderScreen() {
     lastSyncTs: null,
   };
   const exchangeAvailability = autoTrader.exchangeAvailability ?? {};
+
+  const tierMaxOpenTrades = CONFIG.TIER_LIMITS[subscription] ?? CONFIG.TIER_LIMITS.free;
+  const clampMaxOpenTrades = (value: number) => Math.max(1, Math.min(value, tierMaxOpenTrades));
+  const effectiveMaxOpenTrades = clampMaxOpenTrades(cfg.maxOpenTrades);
+  const formatOpenTradesCap = (value: number) => (Number.isFinite(value) ? String(value) : '∞');
 
   const refreshStatus = useCallback(async () => {
     setLoadingStatus(true);
@@ -59,6 +66,12 @@ export default function AutoTraderScreen() {
   const updateCfg = (patch: Partial<typeof cfg>) =>
     setAutoTrader({ config: { ...cfg, ...patch } });
 
+  useEffect(() => {
+    if (Number.isFinite(tierMaxOpenTrades) && cfg.maxOpenTrades > tierMaxOpenTrades) {
+      setAutoTrader({ config: { maxOpenTrades: tierMaxOpenTrades } });
+    }
+  }, [cfg.maxOpenTrades, tierMaxOpenTrades, setAutoTrader]);
+
   const toggleSymbol = (sym: string) => {
     if (isEnabled) return;
     const next = cfg.symbols.includes(sym)
@@ -79,7 +92,19 @@ export default function AutoTraderScreen() {
     try {
       const serviceCheck = await brainAPI.checkServiceType();
       if (!serviceCheck.isBrain) {
-        console.warn('Brain service-type validation warning:', serviceCheck.reason || 'unknown');
+        const reason = serviceCheck.reason || 'unknown';
+        if (!hasShownBrainMisconfigAlert.current) {
+          hasShownBrainMisconfigAlert.current = true;
+          if (__DEV__) {
+            console.info(
+              `Brain service-type validation warning (${CONFIG.BRAIN_URL}):`,
+              reason,
+            );
+          }
+        }
+        // Do not hard-block here: continue and let real API call/fallback decide.
+      } else {
+        hasShownBrainMisconfigAlert.current = false;
       }
 
       const res = await brainAPI.getExchangeSnapshot({
@@ -158,6 +183,15 @@ export default function AutoTraderScreen() {
               const ok = await ensureFreshSnapshot();
               if (!ok) return;
 
+              if ((portfolio.equity || 0) < 50) {
+                Alert.alert(
+                  'Minimum Balance Required',
+                  'AutoTrader requires at least 50 USDT equity in your trading account before activation.',
+                );
+                return;
+              }
+
+              const requestedLeverage = Math.max(1, Number(cfg.maxLeverage) || 1);
               await brainAPI.enableAutoTrader({
                 user_id: user.id,
                 exchange: cfg.exchange,
@@ -168,9 +202,10 @@ export default function AutoTraderScreen() {
                 stop_loss_pct: cfg.stopLossPct,
                 take_profit_pct: cfg.takeProfitPct,
                 max_position_pct: cfg.maxPositionPct,
-                max_open_trades: cfg.maxOpenTrades,
+                max_open_trades: effectiveMaxOpenTrades,
                 margin_mode: cfg.marginMode,
-                max_leverage: cfg.maxLeverage,
+                max_leverage: requestedLeverage,
+                leverage: requestedLeverage,
                 risk_per_trade_pct: cfg.riskPerTradePct,
                 max_total_exposure_pct: cfg.maxTotalExposurePct,
               }).catch(() => {});
@@ -235,7 +270,7 @@ export default function AutoTraderScreen() {
               <View style={styles.toggleText}>
                 <Text style={styles.toggleTitle}>Sleep Mode</Text>
                 <Text style={styles.toggleSub}>
-                  {isEnabled ? 'AI is trading on your behalf' : 'Hand over trades to Sentinel AI'}
+                  {isEnabled ? 'Managed trades stay active, bot can open new ones' : 'Hand over new trade execution to Sentinel AI'}
                 </Text>
               </View>
             </View>
@@ -250,9 +285,9 @@ export default function AutoTraderScreen() {
           {isEnabled && (
             <View style={styles.activeStats}>
               {[
-                { label: 'Open', value: autoTrader.activeTrades.length },
-                { label: 'Symbols', value: cfg.symbols.length },
-                { label: 'Max Trades', value: cfg.maxOpenTrades },
+                { label: 'Managed trades', value: portfolio.positions.length || autoTrader.activeTrades.length },
+                { label: 'Opened by bot', value: autoTrader.activeTrades.length },
+                { label: 'Max Trades', value: formatOpenTradesCap(tierMaxOpenTrades) },
               ].map(({ label, value }) => (
                 <View key={label} style={styles.activeStat}>
                   <Text style={styles.activeStatValue}>{value}</Text>
@@ -384,7 +419,7 @@ export default function AutoTraderScreen() {
               { label: 'Stop Loss %', key: 'stopLossPct' },
               { label: 'Take Profit %', key: 'takeProfitPct' },
               { label: 'Max Position %', key: 'maxPositionPct' },
-              { label: 'Max Open Trades', key: 'maxOpenTrades' },
+              { label: `Max Open Trades (tier cap: ${formatOpenTradesCap(tierMaxOpenTrades)})`, key: 'maxOpenTrades' },
               { label: 'Max Leverage', key: 'maxLeverage' },
               { label: 'Risk / Trade %', key: 'riskPerTradePct' },
               { label: 'Max Total Exposure %', key: 'maxTotalExposurePct' },
@@ -396,7 +431,12 @@ export default function AutoTraderScreen() {
                   value={String(cfg[key])}
                   onChangeText={(v) => {
                     const n = key === 'maxOpenTrades' ? parseInt(v, 10) : parseFloat(v);
-                    if (!isNaN(n)) updateCfg({ [key]: n } as Partial<typeof cfg>);
+                    if (isNaN(n)) return;
+                    if (key === 'maxOpenTrades') {
+                      updateCfg({ maxOpenTrades: clampMaxOpenTrades(n) });
+                      return;
+                    }
+                    updateCfg({ [key]: n } as Partial<typeof cfg>);
                   }}
                   keyboardType="numeric"
                   editable={!isEnabled}
