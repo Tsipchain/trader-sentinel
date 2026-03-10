@@ -722,12 +722,26 @@ def get_sleep_status(user_id: str) -> dict:
     sleep = session.get("sleep_mode", {})
     is_active = user_id in _active_sessions and not _active_sessions[user_id].done()
 
+    started_at = float(sleep.get("started_at") or 0)
+    ends_at = float(sleep.get("ends_at") or 0)
+
+    # Keep status responsive between polling ticks by deriving elapsed/remaining on read.
+    elapsed_s = int(sleep.get("elapsed_s") or 0)
+    remaining_s = int(sleep.get("remaining_s") or 0)
+    now = time.time()
+    if is_active and started_at > 0 and ends_at > 0:
+        elapsed_s = max(0, int(now - started_at))
+        remaining_s = max(0, int(ends_at - now))
+    elif started_at > 0 and ends_at > 0 and (elapsed_s <= 0 or remaining_s <= 0):
+        elapsed_s = max(0, int((sleep.get("ended_at") or now) - started_at))
+        remaining_s = max(0, int(ends_at - (sleep.get("ended_at") or now)))
+
     return {
         "active": is_active,
         "started_at": sleep.get("started_at"),
         "ends_at": sleep.get("ends_at"),
-        "elapsed_s": sleep.get("elapsed_s", 0),
-        "remaining_s": sleep.get("remaining_s", 0),
+        "elapsed_s": elapsed_s,
+        "remaining_s": remaining_s,
         "trade_count": sleep.get("trade_count", 0),
         "realized_pnl": sleep.get("realized_pnl", 0),
         "status": sleep.get("status", "idle"),
