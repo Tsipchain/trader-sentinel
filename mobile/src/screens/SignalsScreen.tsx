@@ -458,7 +458,7 @@ export default function SignalsScreen() {
         </View>
       </TouchableOpacity>
     );
-  }, []);
+  };
 
   const FilterButton = ({ type, label }: { type: SignalType; label: string }) => (
     <TouchableOpacity
