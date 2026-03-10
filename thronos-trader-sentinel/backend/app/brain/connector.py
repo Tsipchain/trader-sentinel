@@ -464,13 +464,18 @@ async def set_margin_mode(
     symbol: str,
     margin_mode: str = "cross",
     passphrase: str | None = None,
+    leverage: int | None = None,
 ) -> bool:
     """Set margin mode (cross/isolated) for a futures symbol."""
     ex = _build_exchange(exchange, api_key, api_secret, passphrase, market_type="futures")
     try:
         futures_symbol = _adapt_symbol(symbol, "futures")
         if hasattr(ex, "set_margin_mode"):
-            await ex.set_margin_mode(margin_mode, futures_symbol)
+            params: dict[str, Any] = {}
+            # MEXC futures may require leverage to be passed with margin-mode updates.
+            if leverage and leverage > 0 and exchange.lower() == "mexc":
+                params["leverage"] = int(leverage)
+            await ex.set_margin_mode(margin_mode, futures_symbol, params)
         else:
             # Some exchanges use different method names
             await ex.private_post_set_margin_type({
