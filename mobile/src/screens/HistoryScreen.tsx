@@ -243,6 +243,13 @@ export default function HistoryScreen() {
     setApiSecret(autoTrader.config.apiSecret);
   }, [autoTrader.config.exchange, autoTrader.config.apiKey, autoTrader.config.apiSecret]);
 
+  useEffect(() => {
+    // Keep History screen credentials in sync with shared AutoTrader config.
+    setExchange(autoTrader.config.exchange);
+    setApiKey(autoTrader.config.apiKey);
+    setApiSecret(autoTrader.config.apiSecret);
+  }, [autoTrader.config.exchange, autoTrader.config.apiKey, autoTrader.config.apiSecret]);
+
   const { trades, stats, lastSynced, aiAnalysis } = tradeHistory;
 
   const handleSync = useCallback(async () => {
