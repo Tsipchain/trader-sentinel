@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, Switch, TouchableOpacity,
   Alert, TextInput, ActivityIndicator, Modal,
@@ -135,6 +135,71 @@ export default function AutoTraderScreen() {
   const effectiveMaxOpenTrades = clampMaxOpenTrades(cfg.maxOpenTrades);
   const formatOpenTradesCap = (value: number) => (Number.isFinite(value) ? String(value) : '∞');
 
+  const [sleepStatus, setSleepStatus] = useState<SleepStatus>({ active: false, trades: [], log: [] });
+  const [startingSleep, setStartingSleep] = useState(false);
+  const [stoppingSleep, setStoppingSleep] = useState(false);
+  const [protectionEnabled, setProtectionEnabled] = useState(true);
+  const [protectionChecking, setProtectionChecking] = useState(false);
+  const [protectionActions, setProtectionActions] = useState<ProtectionAction[]>([]);
+  const [editingTrade, setEditingTrade] = useState<ActiveTrade | null>(null);
+  const [editSL, setEditSL] = useState('');
+  const [editTP, setEditTP] = useState('');
+  const [savingSlTp, setSavingSlTp] = useState(false);
+
+  const pollSleepStatus = useCallback(async () => {
+    if (!user?.id) return;
+    try {
+      const status = await brainAPI.getSleepStatus(user.id);
+      if (status.ok) {
+        setSleepStatus((prev) => ({
+          ...prev,
+          ...status,
+          active: !!status.active,
+          trades: status.trades ?? prev.trades ?? [],
+          log: status.log ?? prev.log ?? [],
+        }));
+      }
+    } catch {
+      // silent background polling
+    }
+  }, [user?.id]);
+
+  const refreshProtection = useCallback(async () => {
+    if (!user?.id || !isEnabled || !protectionEnabled) return;
+    setProtectionChecking(true);
+    try {
+      const response = await brainAPI.checkTradeProtection({
+        user_id: user.id,
+        exchange: cfg.exchange,
+        api_key: cfg.apiKey.trim(),
+        api_secret: cfg.apiSecret.trim(),
+        passphrase: cfg.passphrase || undefined,
+        mode: sleepStatus.active ? 'sleep' : 'active',
+        config: {
+          stop_loss_pct: cfg.stopLossPct,
+          take_profit_pct: cfg.takeProfitPct,
+          max_leverage: cfg.maxLeverage,
+          max_total_exposure_pct: cfg.maxTotalExposurePct,
+        },
+      });
+      if (response?.ok && Array.isArray(response.actions) && response.actions.length > 0) {
+        const normalized: ProtectionAction[] = response.actions.map((a: any, idx: number) => ({
+          id: String(a.id ?? `${Date.now()}-${idx}`),
+          type: a.type ?? 'sl_adjust',
+          symbol: a.symbol ?? 'UNKNOWN',
+          description: a.description ?? a.message ?? 'Protection action',
+          timestamp: Number(a.timestamp ?? Date.now()),
+          status: a.status ?? 'executed',
+        }));
+        setProtectionActions((prev) => [...normalized, ...prev].slice(0, 20));
+      }
+    } catch {
+      // silent background polling
+    } finally {
+      setProtectionChecking(false);
+    }
+  }, [user?.id, isEnabled, protectionEnabled, sleepStatus.active, cfg.exchange, cfg.apiKey, cfg.apiSecret, cfg.passphrase, cfg.stopLossPct, cfg.takeProfitPct, cfg.maxLeverage, cfg.maxTotalExposurePct]);
+
   const refreshStatus = useCallback(async () => {
     setLoadingStatus(true);
     try {
@@ -157,6 +222,20 @@ export default function AutoTraderScreen() {
   }, [user?.id, setAutoTrader, pollSleepStatus]);
 
   useEffect(() => { refreshStatus(); }, [refreshStatus]);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      pollSleepStatus();
+    }, SLEEP_POLL_MS);
+    return () => clearInterval(id);
+  }, [pollSleepStatus]);
+
+  useEffect(() => {
+    if (!isEnabled || !protectionEnabled) return;
+    refreshProtection();
+    const id = setInterval(refreshProtection, PROTECTION_POLL_MS);
+    return () => clearInterval(id);
+  }, [isEnabled, protectionEnabled, refreshProtection]);
 
   const updateCfg = (patch: Partial<typeof cfg>) =>
     setAutoTrader({ config: { ...cfg, ...patch } });
@@ -381,6 +460,34 @@ export default function AutoTraderScreen() {
         },
       },
     ]);
+  };
+
+  const openEditSlTp = (trade: ActiveTrade) => {
+    setEditingTrade(trade);
+    setEditSL(String(trade.stopLoss ?? cfg.stopLossPct));
+    setEditTP(String(trade.takeProfit ?? cfg.takeProfitPct));
+  };
+
+  const handleSaveSlTp = async () => {
+    if (!user?.id || !editingTrade) return;
+    const sl = parseFloat(editSL);
+    const tp = parseFloat(editTP);
+    if (!Number.isFinite(sl) || !Number.isFinite(tp) || sl <= 0 || tp <= 0) {
+      Alert.alert('Invalid Values', 'Please enter valid positive SL/TP percentages.');
+      return;
+    }
+    setSavingSlTp(true);
+    try {
+      await brainAPI.updateTradeSlTp(user.id, editingTrade.id, sl, tp);
+      setAutoTrader({
+        activeTrades: autoTrader.activeTrades.map((t) => (t.id === editingTrade.id ? { ...t, stopLoss: sl, takeProfit: tp } : t)),
+      });
+      setEditingTrade(null);
+    } catch {
+      Alert.alert('Update Failed', 'Could not update SL/TP right now.');
+    } finally {
+      setSavingSlTp(false);
+    }
   };
 
   const handleCloseTrade = (trade: ActiveTrade) => {
