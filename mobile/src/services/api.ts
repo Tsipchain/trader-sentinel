@@ -815,6 +815,9 @@ export const brainAPI = {
       liquidationPrice: number;
       notional: number;
       timestamp: number;
+      tradeId?: string;
+      stopLossPct?: number;
+      takeProfitPct?: number;
     }>;
     count: number;
     total_unrealized_pnl: number;

@@ -9,6 +9,8 @@ import { View, ActivityIndicator, StyleSheet } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as SplashScreen from 'expo-splash-screen';
+import * as Notifications from 'expo-notifications';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // Screens
 import WelcomeScreen from './src/screens/WelcomeScreen';
@@ -124,7 +126,39 @@ function MainTabs() {
 
 export default function App() {
   const [isReady, setIsReady] = useState(false);
-  const { isAuthenticated, wallet } = useStore();
+  const { isAuthenticated, wallet, user, settings, subscription } = useStore();
+
+  useEffect(() => {
+    const scheduleExpiryReminder = async () => {
+      if (!user?.subscriptionExpiresAt || subscription === 'free' || !settings.notifications) return;
+
+      const expiryMs = Date.parse(user.subscriptionExpiresAt);
+      if (!Number.isFinite(expiryMs) || expiryMs <= Date.now()) return;
+
+      const reminderMs = expiryMs - (2 * 24 * 60 * 60 * 1000);
+      if (reminderMs <= Date.now()) return;
+
+      const reminderKey = `subscription-reminder:${user.id}:${user.subscriptionExpiresAt}`;
+      const already = await AsyncStorage.getItem(reminderKey);
+      if (already) return;
+
+      const perm = await Notifications.requestPermissionsAsync();
+      if (!perm.granted) return;
+
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: 'Subscription expiring soon',
+          body: `Your ${subscription.toUpperCase()} plan expires in 2 days. Renew to keep AutoTrader, Signals and premium features active.`,
+          data: { kind: 'subscription-expiry', expiresAt: user.subscriptionExpiresAt },
+        },
+        trigger: new Date(reminderMs) as any,
+      });
+
+      await AsyncStorage.setItem(reminderKey, '1');
+    };
+
+    scheduleExpiryReminder().catch(() => {});
+  }, [user?.id, user?.subscriptionExpiresAt, subscription, settings.notifications]);
 
   useEffect(() => {
     async function prepare() {

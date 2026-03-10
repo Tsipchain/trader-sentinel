@@ -39,7 +39,7 @@ const packages: Package[] = [
 ];
 
 export default function SubscriptionScreen() {
-  const { subscription, wallet, setSubscription } = useStore();
+  const { subscription, wallet, user, setUser, setSubscription } = useStore();
   const [selectedPackage, setSelectedPackage] = useState<Package | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('crypto');
   const [selectedChain, setSelectedChain] = useState<CryptoChain>('ETHEREUM');
@@ -162,6 +162,24 @@ export default function SubscriptionScreen() {
 
         // 2. Update local subscription state immediately
         setSubscription(selectedPackage.id as any);
+
+        const now = new Date();
+        const nowIso = now.toISOString();
+        const currentExpiryMs = user?.subscriptionExpiresAt ? Date.parse(user.subscriptionExpiresAt) : 0;
+        const baseMs = currentExpiryMs > now.getTime() ? currentExpiryMs : now.getTime();
+        const nextExpiryIso = new Date(baseMs + (30 * 24 * 60 * 60 * 1000)).toISOString();
+
+        if (user) {
+          setUser({
+            ...user,
+            subscription: selectedPackage.id as any,
+            subscriptionStartedAt: user.subscriptionStartedAt || nowIso,
+            subscriptionExpiresAt: nextExpiryIso,
+            lastSubscriptionPaymentAt: nowIso,
+            subscriptionPaymentsCount: (user.subscriptionPaymentsCount || 0) + 1,
+          });
+        }
+
         setShowPaymentModal(false);
 
         // 3. Register with Brain (best-effort, payment already confirmed on-chain)
