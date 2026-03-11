@@ -73,6 +73,36 @@ def _margin_utilization_pct(snapshot: dict[str, Any], max_leverage: int) -> floa
     return max(0.0, (approx_used / equity) * 100)
 
 
+def _macro_event_profile(upcoming_events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return macro-event-aware trading modifiers for sleep entries."""
+    if not upcoming_events:
+        return {"calendar_score": 5.0, "entry_bonus": 0.0, "cooldown_mult": 1.0, "label": None}
+
+    keywords = ("cpi", "ppi", "fomc", "fed", "nfp", "powell")
+    macro = None
+    for ev in upcoming_events:
+        name = str(ev.get("name") or "")
+        impact = str(ev.get("impact") or "").lower()
+        if impact == "high" and any(k in name.lower() for k in keywords):
+            macro = ev
+            break
+
+    if not macro:
+        return {"calendar_score": 5.5, "entry_bonus": 0.0, "cooldown_mult": 1.0, "label": None}
+
+    in_minutes = int(macro.get("in_minutes") or 0)
+    label = f"{macro.get('name', 'macro event')} in {in_minutes}m"
+
+    # Existing session gate already blocks very-near high-impact opens; here we tune behavior outside that strict gate.
+    if in_minutes <= 20:
+        return {"calendar_score": 8.8, "entry_bonus": -0.08, "cooldown_mult": 1.2, "label": label}
+    if in_minutes <= 90:
+        return {"calendar_score": 8.0, "entry_bonus": 0.06, "cooldown_mult": 0.7, "label": label}
+    if in_minutes <= 180:
+        return {"calendar_score": 7.2, "entry_bonus": 0.03, "cooldown_mult": 0.85, "label": label}
+    return {"calendar_score": 6.2, "entry_bonus": 0.01, "cooldown_mult": 1.0, "label": label}
+
+
 def _position_risk_score(pos: dict[str, Any]) -> float:
     leverage = float(pos.get("leverage") or 1)
     pnl = float(pos.get("unrealizedPnl") or 0)
@@ -466,8 +496,15 @@ async def run_sleep_session(
             # Count current open sleep trades
             open_trades = [t for t in session.get("sleep_trades", []) if t.get("status") == "open"]
 
-            # 2. Check market session timing
+            # 2. Check market session timing + macro event profile
+            session_report = sessions_module.calculate()
             session_bias = sessions_module.get_session_bias()
+            macro_profile = _macro_event_profile(session_report.upcoming_events)
+            macro_label = macro_profile.get("label")
+            if macro_label and session.get("sleep_mode", {}).get("last_macro_log") != macro_label:
+                _log_sleep(user_id, f"Macro regime detected: {macro_label}. Adjusting confidence/cooldown for event volatility.")
+                session.setdefault("sleep_mode", {})["last_macro_log"] = macro_label
+
             if session_bias.get("wait_minutes", 0) > 0:
                 # Don't stay idle early in the sleep cycle: allow first entries even in low-session windows.
                 if trade_count == 0 and not open_trades:
@@ -563,9 +600,10 @@ async def run_sleep_session(
                         if _canonical_symbol(symbol) in blocked_symbols:
                             continue
 
-                        # Cooldown check
+                        # Cooldown check (faster reaction in macro-volatility windows)
+                        cooldown_s = max(60, int(ENTRY_COOLDOWN_S * float(macro_profile.get("cooldown_mult", 1.0))))
                         last_entry = last_entry_by_symbol.get(symbol, 0)
-                        if time.time() - last_entry < ENTRY_COOLDOWN_S:
+                        if time.time() - last_entry < cooldown_s:
                             continue
 
                         # Already have open trade on this symbol?
@@ -589,7 +627,7 @@ async def run_sleep_session(
                                 "rsi": rsi,
                                 "atr_score": ta.get("score", 5),
                                 "geo_score": 5.0,
-                                "calendar_score": 5.0,
+                                "calendar_score": macro_profile.get("calendar_score", 5.0),
                             })
                         except Exception:
                             pass
@@ -600,6 +638,7 @@ async def run_sleep_session(
                         # Opening range = higher confidence (trend confirmation)
                         if is_opening_range:
                             confidence += 0.08
+                        confidence += float(macro_profile.get("entry_bonus", 0.0))
 
                         elapsed_s = time.time() - start_time
                         dynamic_min_conf = MIN_CONFIDENCE
