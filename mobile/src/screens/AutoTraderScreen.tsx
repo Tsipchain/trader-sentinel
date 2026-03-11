@@ -936,11 +936,11 @@ export default function AutoTraderScreen() {
 
           {portfolio.lastSyncTs && (
             <Text style={styles.syncMeta}>
-              Synced {new Date(portfolio.lastSyncTs).toLocaleTimeString()} · Total Equity ${(portfolio.equity ?? 0).toFixed(2)} · Used Margin ${(portfolio.usedMargin ?? 0).toFixed(2)}
-
-              Futures {portfolio.futures?.quoteAsset ?? 'USDT'} Free ${(portfolio.futures?.quoteFree ?? 0).toFixed(2)} · Used ${(portfolio.futures?.quoteUsed ?? 0).toFixed(2)} · Total ${(portfolio.futures?.quoteTotal ?? 0).toFixed(2)}
-
-              Spot {portfolio.spot?.quoteAsset ?? 'USDT'} Free ${(portfolio.spot?.quoteFree ?? 0).toFixed(2)} · Used ${(portfolio.spot?.quoteUsed ?? 0).toFixed(2)} · Total ${(portfolio.spot?.quoteTotal ?? 0).toFixed(2)}
+              {`Synced ${new Date(portfolio.lastSyncTs).toLocaleTimeString()} · Total Equity $${(portfolio.equity ?? 0).toFixed(2)} · Used Margin $${(portfolio.usedMargin ?? 0).toFixed(2)}
+` +
+                `Futures ${portfolio.futures?.quoteAsset ?? 'USDT'} — Free $${(portfolio.futures?.quoteFree ?? 0).toFixed(2)} · Used $${(portfolio.futures?.quoteUsed ?? 0).toFixed(2)} · Total $${(portfolio.futures?.quoteTotal ?? 0).toFixed(2)}
+` +
+                `Spot ${portfolio.spot?.quoteAsset ?? 'USDT'} — Free $${(portfolio.spot?.quoteFree ?? 0).toFixed(2)} · Used $${(portfolio.spot?.quoteUsed ?? 0).toFixed(2)} · Total $${(portfolio.spot?.quoteTotal ?? 0).toFixed(2)}`}
             </Text>
           )}
 
