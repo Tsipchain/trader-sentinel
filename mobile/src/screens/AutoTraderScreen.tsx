@@ -147,6 +147,8 @@ export default function AutoTraderScreen() {
     positions: [],
     usedMargin: 0,
     maxLeverageBySymbol: {},
+    futures: { equity: 0, quoteAsset: 'USDT', quoteFree: 0, quoteUsed: 0, quoteTotal: 0 },
+    spot: { equity: 0, quoteAsset: 'USDT', quoteFree: 0, quoteUsed: 0, quoteTotal: 0 },
     lastSyncTs: null,
   };
   const exchangeAvailability = autoTrader.exchangeAvailability ?? {};
@@ -349,6 +351,20 @@ export default function AutoTraderScreen() {
           positions: res.snapshot.positions,
           usedMargin: res.snapshot.usedMargin,
           maxLeverageBySymbol: res.snapshot.maxLeverageBySymbol,
+          futures: {
+            equity: res.snapshot.futures?.equity ?? 0,
+            quoteAsset: res.snapshot.futures?.quoteAsset ?? 'USDT',
+            quoteFree: res.snapshot.futures?.quoteFree ?? 0,
+            quoteUsed: res.snapshot.futures?.quoteUsed ?? 0,
+            quoteTotal: res.snapshot.futures?.quoteTotal ?? 0,
+          },
+          spot: {
+            equity: res.snapshot.spot?.equity ?? 0,
+            quoteAsset: res.snapshot.spot?.quoteAsset ?? 'USDT',
+            quoteFree: res.snapshot.spot?.quoteFree ?? 0,
+            quoteUsed: res.snapshot.spot?.quoteUsed ?? 0,
+            quoteTotal: res.snapshot.spot?.quoteTotal ?? 0,
+          },
           lastSyncTs: Date.now(),
         },
       });
@@ -405,10 +421,15 @@ export default function AutoTraderScreen() {
               const ok = await ensureFreshSnapshot();
               if (!ok) return;
 
-              if ((portfolio.equity || 0) < 50) {
+              const futuresFree = portfolio.futures?.quoteFree ?? 0;
+              const spotFree = portfolio.spot?.quoteFree ?? 0;
+              const effectiveTradable = cfg.exchange.toLowerCase() === 'mexc'
+                ? Math.max(spotFree, futuresFree)
+                : Math.max(futuresFree, spotFree);
+              if (effectiveTradable < 5) {
                 Alert.alert(
-                  'Minimum Balance Required',
-                  'AutoTrader requires at least 50 USDT equity in your trading account before activation.',
+                  'Minimum Tradable Balance Required',
+                  `AutoTrader needs available ${portfolio.futures?.quoteAsset ?? 'USDT'} in the target wallet. Futures free: ${futuresFree.toFixed(2)}, Spot free: ${spotFree.toFixed(2)}.`,
                 );
                 return;
               }
@@ -915,7 +936,11 @@ export default function AutoTraderScreen() {
 
           {portfolio.lastSyncTs && (
             <Text style={styles.syncMeta}>
-              Synced {new Date(portfolio.lastSyncTs).toLocaleTimeString()} · Equity ${(portfolio.equity ?? 0).toFixed(2)} · Used Margin ${(portfolio.usedMargin ?? 0).toFixed(2)}
+              {`Synced ${new Date(portfolio.lastSyncTs).toLocaleTimeString()} · Total Equity $${(portfolio.equity ?? 0).toFixed(2)} · Used Margin $${(portfolio.usedMargin ?? 0).toFixed(2)}
+` +
+                `Futures ${portfolio.futures?.quoteAsset ?? 'USDT'} — Free $${(portfolio.futures?.quoteFree ?? 0).toFixed(2)} · Used $${(portfolio.futures?.quoteUsed ?? 0).toFixed(2)} · Total $${(portfolio.futures?.quoteTotal ?? 0).toFixed(2)}
+` +
+                `Spot ${portfolio.spot?.quoteAsset ?? 'USDT'} — Free $${(portfolio.spot?.quoteFree ?? 0).toFixed(2)} · Used $${(portfolio.spot?.quoteUsed ?? 0).toFixed(2)} · Total $${(portfolio.spot?.quoteTotal ?? 0).toFixed(2)}`}
             </Text>
           )}
 

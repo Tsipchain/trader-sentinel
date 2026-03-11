@@ -62,6 +62,74 @@ const SIGNAL_REFRESH_MS: Record<string, number> = {
 };
 
 const RISK_MIN_INTERVAL_MS = 30000;
+
+const MAX_RENDERED_SIGNALS = 150;
+
+const getSignalIcon = (type: Signal['type']) => {
+  switch (type) {
+    case 'arbitrage':
+      return { name: 'swap-horizontal', color: COLORS.success };
+    case 'alert':
+      return { name: 'warning', color: COLORS.warning };
+    case 'opportunity':
+      return { name: 'trending-up', color: COLORS.primary };
+    default:
+      return { name: 'information-circle', color: COLORS.info };
+  }
+};
+
+const formatSignalTime = (timestamp: number) => {
+  const diff = Date.now() - timestamp;
+  const minutes = Math.floor(diff / 60000);
+  const hours = Math.floor(diff / 3600000);
+
+  if (minutes < 1) return 'Just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  if (hours < 24) return `${hours}h ago`;
+  return new Date(timestamp).toLocaleDateString();
+};
+
+type SignalRowProps = {
+  item: Signal;
+  onPress: (signal: Signal) => void;
+};
+
+const SignalRow = React.memo(({ item, onPress }: SignalRowProps) => {
+  const icon = getSignalIcon(item.type);
+
+  return (
+    <TouchableOpacity style={styles.signalCard} onPress={() => onPress(item)}>
+      <View style={[styles.signalIcon, { backgroundColor: icon.color + '20' }]}>
+        <Ionicons name={icon.name as any} size={24} color={icon.color} />
+      </View>
+      <View style={styles.signalContent}>
+        <View style={styles.signalHeader}>
+          <Text style={styles.signalSymbol}>{item.symbol}</Text>
+          <Text style={styles.signalTime}>{formatSignalTime(item.timestamp)}</Text>
+        </View>
+        <Text style={styles.signalMessage}>{item.message}</Text>
+        {item.profit && (
+          <View style={styles.signalProfit}>
+            <Ionicons name="trending-up" size={14} color={COLORS.success} />
+            <Text style={styles.signalProfitText}>
+              Potential: +{item.profit.toFixed(3)}%
+            </Text>
+          </View>
+        )}
+        <View style={styles.signalVenues}>
+          {item.venues.map((venue, index) => (
+            <View key={`${venue}-${index}`} style={styles.venueBadge}>
+              <Text style={styles.venueBadgeText}>{venue}</Text>
+            </View>
+          ))}
+        </View>
+      </View>
+    </TouchableOpacity>
+  );
+});
+
+SignalRow.displayName = 'SignalRow';
+
 export default function SignalsScreen() {
   const { signals, addSignal, clearSignals, watchlist, settings, subscription, marketData, user } = useStore();
   const [refreshing, setRefreshing] = useState(false);
@@ -422,36 +490,12 @@ export default function SignalsScreen() {
     setRefreshing(false);
   }, [fetchSignals]);
 
-  const filteredSignals = useMemo(() => signals.filter((s) => {
-    if (filter === 'all') return true;
-    return s.type === filter;
-  }), [signals, filter]);
+  const filteredSignals = useMemo(() => {
+    const scoped = signals.filter((s) => (filter === 'all' ? true : s.type === filter));
+    return scoped.slice(0, MAX_RENDERED_SIGNALS);
+  }, [signals, filter]);
 
-  const getSignalIcon = (type: Signal['type']) => {
-    switch (type) {
-      case 'arbitrage':
-        return { name: 'swap-horizontal', color: COLORS.success };
-      case 'alert':
-        return { name: 'warning', color: COLORS.warning };
-      case 'opportunity':
-        return { name: 'trending-up', color: COLORS.primary };
-      default:
-        return { name: 'information-circle', color: COLORS.info };
-    }
-  };
-
-  const formatTime = (timestamp: number) => {
-    const diff = Date.now() - timestamp;
-    const minutes = Math.floor(diff / 60000);
-    const hours = Math.floor(diff / 3600000);
-
-    if (minutes < 1) return 'Just now';
-    if (minutes < 60) return `${minutes}m ago`;
-    if (hours < 24) return `${hours}h ago`;
-    return new Date(timestamp).toLocaleDateString();
-  };
-
-  const signalKeyExtractor = (item: Signal) => item.id;
+  const signalKeyExtractor = useCallback((item: Signal) => item.id, []);
 
   const getSignalItemLayout = (_data: ArrayLike<Signal> | null | undefined, index: number) => ({
     length: 96,
@@ -461,39 +505,26 @@ export default function SignalsScreen() {
 
   const fmtPrice = (value: number) => (value >= 1 ? `$${value.toFixed(4)}` : `$${value.toPrecision(4)}`);
 
-  const renderSignal = useCallback(({ item }: { item: Signal }) => {
-    const icon = getSignalIcon(item.type);
+  const onSignalPress = useCallback((signal: Signal) => {
+    setSelectedSignal(signal);
+  }, []);
 
-    return (
-      <TouchableOpacity style={styles.signalCard} onPress={() => setSelectedSignal(item)}>
-        <View style={[styles.signalIcon, { backgroundColor: icon.color + '20' }]}>
-          <Ionicons name={icon.name as any} size={24} color={icon.color} />
-        </View>
-        <View style={styles.signalContent}>
-          <View style={styles.signalHeader}>
-            <Text style={styles.signalSymbol}>{item.symbol}</Text>
-            <Text style={styles.signalTime}>{formatTime(item.timestamp)}</Text>
-          </View>
-          <Text style={styles.signalMessage}>{item.message}</Text>
-          {item.profit && (
-            <View style={styles.signalProfit}>
-              <Ionicons name="trending-up" size={14} color={COLORS.success} />
-              <Text style={styles.signalProfitText}>
-                Potential: +{item.profit.toFixed(3)}%
-              </Text>
-            </View>
-          )}
-          <View style={styles.signalVenues}>
-            {item.venues.map((venue, index) => (
-              <View key={index} style={styles.venueBadge}>
-                <Text style={styles.venueBadgeText}>{venue}</Text>
-              </View>
-            ))}
-          </View>
-        </View>
-      </TouchableOpacity>
-    );
-  }, [setSelectedSignal]);
+  const renderSignal = useCallback(({ item }: { item: Signal }) => (
+    <SignalRow item={item} onPress={onSignalPress} />
+  ), [onSignalPress]);
+
+  const listHeaderComponent = useMemo(() => (
+    signals.length > 0 ? (
+      <View style={styles.listHeader}>
+        <Text style={styles.signalCount}>
+          {filteredSignals.length} signals
+        </Text>
+        <TouchableOpacity onPress={clearSignals}>
+          <Text style={styles.clearButton}>Clear All</Text>
+        </TouchableOpacity>
+      </View>
+    ) : null
+  ), [signals.length, filteredSignals.length, clearSignals]);
 
   const FilterButton = ({ type, label }: { type: SignalType; label: string }) => (
     <TouchableOpacity
@@ -566,6 +597,8 @@ export default function SignalsScreen() {
         initialNumToRender={8}
         updateCellsBatchingPeriod={50}
         getItemLayout={getSignalItemLayout}
+        scrollEventThrottle={16}
+        legacyImplementation={false}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
@@ -582,18 +615,7 @@ export default function SignalsScreen() {
             </Text>
           </View>
         }
-        ListHeaderComponent={
-          signals.length > 0 ? (
-            <View style={styles.listHeader}>
-              <Text style={styles.signalCount}>
-                {filteredSignals.length} signals
-              </Text>
-              <TouchableOpacity onPress={clearSignals}>
-                <Text style={styles.clearButton}>Clear All</Text>
-              </TouchableOpacity>
-            </View>
-          ) : null
-        }
+        ListHeaderComponent={listHeaderComponent}
       />
 
       <Modal visible={!!selectedSignal} transparent animationType="slide" onRequestClose={() => setSelectedSignal(null)}>

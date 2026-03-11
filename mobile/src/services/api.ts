@@ -453,6 +453,20 @@ export interface PortfolioSnapshot {
   }>;
   usedMargin: number;
   maxLeverageBySymbol: Record<string, number>;
+  futures?: {
+    equity: number;
+    quoteAsset: string;
+    quoteFree: number;
+    quoteUsed: number;
+    quoteTotal: number;
+  };
+  spot?: {
+    equity: number;
+    quoteAsset: string;
+    quoteFree: number;
+    quoteUsed: number;
+    quoteTotal: number;
+  };
   ts: number;
 }
 
