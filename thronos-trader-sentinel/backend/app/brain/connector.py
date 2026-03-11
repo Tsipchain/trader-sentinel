@@ -318,6 +318,65 @@ async def fetch_open_positions(
         if not active_raw:
             return positions
 
+        # Optional: infer SL/TP from open reduce-only orders when exchange positions omit them.
+        inferred_by_symbol: dict[str, dict[str, float]] = {}
+        if ex.has.get("fetchOpenOrders"):
+            for pos in active_raw:
+                sym = str(pos.get("symbol") or "")
+                if not sym or sym in inferred_by_symbol:
+                    continue
+                inferred_by_symbol[sym] = {"stopLossPrice": 0.0, "takeProfitPrice": 0.0}
+                try:
+                    open_orders = await ex.fetch_open_orders(sym)
+                except Exception:
+                    continue
+
+                side = str(pos.get("side") or "").lower()
+                contracts = _to_float(pos.get("contracts") or pos.get("positionAmt"))
+                if side not in ("long", "short"):
+                    side = "long" if contracts > 0 else "short"
+                close_side = "sell" if side == "long" else "buy"
+                entry = _to_float(pos.get("entryPrice") or (pos.get("info") or {}).get("entryPrice"))
+
+                for order in open_orders or []:
+                    order_side = str(order.get("side") or "").lower()
+                    if order_side != close_side:
+                        continue
+                    params = order.get("params") or {}
+                    info = order.get("info") or {}
+                    reduce_only = bool(
+                        order.get("reduceOnly")
+                        or params.get("reduceOnly")
+                        or info.get("reduceOnly")
+                        or info.get("closePosition")
+                    )
+                    if not reduce_only:
+                        continue
+                    trigger = _to_float(
+                        order.get("stopPrice")
+                        or order.get("triggerPrice")
+                        or order.get("price")
+                        or params.get("stopPrice")
+                        or params.get("triggerPrice")
+                        or info.get("stopPrice")
+                        or info.get("triggerPrice")
+                        or info.get("planPrice")
+                    )
+                    if trigger <= 0:
+                        continue
+
+                    if entry > 0:
+                        if side == "long":
+                            if trigger < entry and inferred_by_symbol[sym]["stopLossPrice"] <= 0:
+                                inferred_by_symbol[sym]["stopLossPrice"] = trigger
+                            elif trigger > entry and inferred_by_symbol[sym]["takeProfitPrice"] <= 0:
+                                inferred_by_symbol[sym]["takeProfitPrice"] = trigger
+                        else:
+                            if trigger > entry and inferred_by_symbol[sym]["stopLossPrice"] <= 0:
+                                inferred_by_symbol[sym]["stopLossPrice"] = trigger
+                            elif trigger < entry and inferred_by_symbol[sym]["takeProfitPrice"] <= 0:
+                                inferred_by_symbol[sym]["takeProfitPrice"] = trigger
+
         # Fetch live prices for positions missing mark price
         symbols_needing_price = set()
         for pos in active_raw:
@@ -400,6 +459,19 @@ async def fetch_open_positions(
                         price_change_pct = -price_change_pct
                     unrealized_pnl = notional * price_change_pct
 
+            stop_loss_price, take_profit_price = _extract_sl_tp_prices(
+                pos,
+                side,
+                entry_price,
+                inferred_by_symbol.get(symbol),
+            )
+            stop_loss_pct = 0.0
+            take_profit_pct = 0.0
+            if entry_price > 0 and stop_loss_price > 0:
+                stop_loss_pct = abs((entry_price - stop_loss_price) / entry_price) * 100
+            if entry_price > 0 and take_profit_price > 0:
+                take_profit_pct = abs((take_profit_price - entry_price) / entry_price) * 100
+
             # Calculate PnL percentage
             if entry_price > 0 and mark_price > 0:
                 if side == "long":
@@ -428,6 +500,10 @@ async def fetch_open_positions(
                     or 0
                 ),
                 "notional": round(notional, 4),
+                "stopLossPrice": round(stop_loss_price, 8) if stop_loss_price > 0 else None,
+                "takeProfitPrice": round(take_profit_price, 8) if take_profit_price > 0 else None,
+                "stopLossPct": round(stop_loss_pct, 4) if stop_loss_pct > 0 else None,
+                "takeProfitPct": round(take_profit_pct, 4) if take_profit_pct > 0 else None,
                 "timestamp": pos.get("timestamp") or int(time.time() * 1000),
             })
 
@@ -435,6 +511,72 @@ async def fetch_open_positions(
     finally:
         await ex.close()
 
+def _is_contract_activation_error(error_text: str) -> bool:
+    msg = (error_text or '').lower()
+    return (
+        'contract not activated' in msg
+        or '"code":1002' in msg
+        or "'code':1002" in msg
+        or 'code:1002' in msg
+    )
+
+
+
+
+
+
+
+def _to_float(value: Any) -> float:
+    try:
+        n = float(value)
+        return n if n == n else 0.0
+    except Exception:
+        return 0.0
+
+
+def _extract_sl_tp_prices(position: dict[str, Any], side: str, entry_price: float, fallback: dict[str, float] | None = None) -> tuple[float, float]:
+    info = position.get("info") or {}
+    stop_loss_price = _to_float(
+        position.get("stopLossPrice")
+        or position.get("stop_loss_price")
+        or position.get("slPrice")
+        or position.get("sl_price")
+        or info.get("stopLossPrice")
+        or info.get("stopLoss")
+        or info.get("slPrice")
+        or info.get("sl_price")
+        or info.get("stopPx")
+    )
+    take_profit_price = _to_float(
+        position.get("takeProfitPrice")
+        or position.get("take_profit_price")
+        or position.get("tpPrice")
+        or position.get("tp_price")
+        or info.get("takeProfitPrice")
+        or info.get("takeProfit")
+        or info.get("tpPrice")
+        or info.get("tp_price")
+        or info.get("takePx")
+    )
+
+    if fallback:
+        if stop_loss_price <= 0:
+            stop_loss_price = _to_float(fallback.get("stopLossPrice"))
+        if take_profit_price <= 0:
+            take_profit_price = _to_float(fallback.get("takeProfitPrice"))
+
+    if entry_price > 0 and stop_loss_price > 0:
+        if side == "long" and stop_loss_price >= entry_price:
+            stop_loss_price = 0.0
+        if side == "short" and stop_loss_price <= entry_price:
+            stop_loss_price = 0.0
+    if entry_price > 0 and take_profit_price > 0:
+        if side == "long" and take_profit_price <= entry_price:
+            take_profit_price = 0.0
+        if side == "short" and take_profit_price >= entry_price:
+            take_profit_price = 0.0
+
+    return stop_loss_price, take_profit_price
 
 def _normalise(raw: list, symbol: str) -> list[dict[str, Any]]:
     trades = []
@@ -464,13 +606,18 @@ async def set_margin_mode(
     symbol: str,
     margin_mode: str = "cross",
     passphrase: str | None = None,
+    leverage: int | None = None,
 ) -> bool:
     """Set margin mode (cross/isolated) for a futures symbol."""
     ex = _build_exchange(exchange, api_key, api_secret, passphrase, market_type="futures")
     try:
         futures_symbol = _adapt_symbol(symbol, "futures")
         if hasattr(ex, "set_margin_mode"):
-            await ex.set_margin_mode(margin_mode, futures_symbol)
+            params: dict[str, Any] = {}
+            # MEXC futures may require leverage to be passed with margin-mode updates.
+            if leverage and leverage > 0 and exchange.lower() == "mexc":
+                params["leverage"] = int(leverage)
+            await ex.set_margin_mode(margin_mode, futures_symbol, params)
         else:
             # Some exchanges use different method names
             await ex.private_post_set_margin_type({
@@ -555,8 +702,12 @@ async def create_limit_order(
             "timestamp": order.get("timestamp"),
         }
     except Exception as e:
+        err = str(e)
+        if _is_contract_activation_error(err):
+            log.warning("[exec] limit order blocked (contract not activated) %s %s: %s", side, symbol, e)
+            return {"ok": False, "error": err, "error_code": "contract_not_activated"}
         log.error("[exec] limit order failed %s %s: %s", side, symbol, e)
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": err}
     finally:
         await ex.close()
 
@@ -599,8 +750,12 @@ async def create_market_order(
             "timestamp": order.get("timestamp"),
         }
     except Exception as e:
+        err = str(e)
+        if _is_contract_activation_error(err):
+            log.warning("[exec] market order blocked (contract not activated) %s %s: %s", side, symbol, e)
+            return {"ok": False, "error": err, "error_code": "contract_not_activated"}
         log.error("[exec] market order failed %s %s: %s", side, symbol, e)
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": err}
     finally:
         await ex.close()
 
@@ -710,5 +865,42 @@ async def get_ticker_price(
         return float(ticker.get("last") or ticker.get("close") or 0)
     except Exception:
         return 0.0
+    finally:
+        await ex.close()
+
+
+async def get_funding_snapshot(
+    exchange: str,
+    api_key: str,
+    api_secret: str,
+    symbol: str,
+    passphrase: str | None = None,
+) -> dict[str, Any]:
+    """Fetch current funding context for a futures symbol.
+
+    Returns best-effort values. If unsupported by exchange, returns ok=False.
+    """
+    ex = _build_exchange(exchange, api_key, api_secret, passphrase, market_type="futures")
+    try:
+        futures_symbol = _adapt_symbol(symbol, "futures")
+        data = await ex.fetch_funding_rate(futures_symbol)
+        now_ms = int(time.time() * 1000)
+        next_ts = int(data.get("nextFundingTimestamp") or 0)
+        prev_ts = int(data.get("fundingTimestamp") or 0)
+        rate = float(data.get("fundingRate") or 0)
+        interval_h = 8
+        if next_ts > prev_ts:
+            interval_h = max(1, int(round((next_ts - prev_ts) / 3_600_000)))
+        mins_to_next = int((next_ts - now_ms) / 60000) if next_ts > now_ms else 0
+        return {
+            "ok": True,
+            "symbol": symbol,
+            "funding_rate": rate,
+            "next_funding_ts": next_ts or None,
+            "minutes_to_next": mins_to_next,
+            "interval_h": interval_h,
+        }
+    except Exception as e:
+        return {"ok": False, "symbol": symbol, "error": str(e)}
     finally:
         await ex.close()
