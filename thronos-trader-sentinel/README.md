@@ -66,6 +66,10 @@ uvicorn app.main:app --host 0.0.0.0 --port 8081
 ## Environment
 See `.env.example`.
 
+
+## AutoTrader execution note
+For the deep MEXC analysis and the production plan for reliable Futures + Spot AutoTrader/Sleep Mode execution, see `EXCHANGE_FUTURES_GUIDE.md`.
+
 ## Notes
 - Public price endpoints do **not** require exchange keys.
 - For private endpoints (positions, orders) you can add keys later.

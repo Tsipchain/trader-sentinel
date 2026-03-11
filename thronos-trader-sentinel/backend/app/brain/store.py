@@ -195,6 +195,18 @@ def delete_autotrader(user_id: str) -> None:
     log.info("[store] deleted autotrader session for user=%s", user_id)
 
 
+
+def list_autotrader_user_ids() -> list[str]:
+    """Return user ids that currently have persisted autotrader sessions."""
+    if not AUTOTRADER_DIR.exists():
+        return []
+    user_ids: list[str] = []
+    for path in AUTOTRADER_DIR.glob('*.json'):
+        if not path.is_file():
+            continue
+        user_ids.append(path.stem)
+    return sorted(set(user_ids))
+
 def storage_status() -> dict:
     def _count_files(path: Path, suffix: str = "") -> int:
         if not path.exists():

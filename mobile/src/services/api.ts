@@ -453,6 +453,20 @@ export interface PortfolioSnapshot {
   }>;
   usedMargin: number;
   maxLeverageBySymbol: Record<string, number>;
+  futures?: {
+    equity: number;
+    quoteAsset: string;
+    quoteFree: number;
+    quoteUsed: number;
+    quoteTotal: number;
+  };
+  spot?: {
+    equity: number;
+    quoteAsset: string;
+    quoteFree: number;
+    quoteUsed: number;
+    quoteTotal: number;
+  };
   ts: number;
 }
 
@@ -753,6 +767,7 @@ export const brainAPI = {
       risk_per_trade_pct?: number;
       max_total_exposure_pct?: number;
       entry_margin_pct?: number;
+      sleep_duration_hours?: number;
     },
   ): Promise<{ ok: boolean; message?: string; error?: string; duration_hours?: number }> {
     const response = await brainPost('/api/brain/autotrader/sleep-start', {
