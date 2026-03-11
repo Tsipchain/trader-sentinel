@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -34,7 +35,7 @@ from app.brain.predictor import PredictionEngine
 from app.brain import store as brain_store
 from app.brain import sleep_trader
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO))
 log = logging.getLogger(__name__)
 
 limiter = Limiter(key_func=get_remote_address)
@@ -122,8 +123,30 @@ class TelegramSignalRequest(BaseModel):
     timestamp: int
 
 
+
+_sleep_worker_task: asyncio.Task | None = None
+
+
+@app.on_event("startup")
+async def _startup_sleep_worker():
+    global _sleep_worker_task
+    if os.getenv("START_SLEEP_WORKER_IN_API", "0") != "1":
+        return
+    if _sleep_worker_task and not _sleep_worker_task.done():
+        return
+    _sleep_worker_task = asyncio.create_task(
+        sleep_trader.run_worker_loop(_brain_engine, interval_s=int(os.getenv("SLEEP_WORKER_INTERVAL_S", "5")))
+    )
+    log.info("[sleep-worker] embedded worker started in API process")
+
+
 @app.on_event("shutdown")
 async def _shutdown():
+    global _sleep_worker_task
+    if _sleep_worker_task and not _sleep_worker_task.done():
+        _sleep_worker_task.cancel()
+        with contextlib.suppress(Exception):
+            await _sleep_worker_task
     await _cex.close()
     await _dex.close()
     await tech_module.close_exchange_pool()

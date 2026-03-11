@@ -9,6 +9,7 @@ Target: 25–30% portfolio profit across multiple small, high-conviction trades.
 """
 import asyncio
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -22,6 +23,10 @@ log = logging.getLogger(__name__)
 
 # ── Active sleep sessions (in-memory) ────────────────────────────────────────
 _active_sessions: dict[str, asyncio.Task] = {}
+
+SLEEP_EXECUTION_MODE = os.getenv("SLEEP_EXECUTION_MODE", "worker").strip().lower()
+# worker(default): API writes desired state, external worker executes loops
+# api: run loops in-process (legacy mode)
 
 DEFAULT_SLEEP_DURATION_H = 8
 MAX_SLEEP_DURATION_H = 48
@@ -516,6 +521,7 @@ async def run_sleep_session(
         "trade_count": 0,
         "realized_pnl": 0.0,
         "status": "running",
+        "desired_state": "running",
         "execution_market": execution_market,
         "duration_hours": sleep_hours,
     }
@@ -927,6 +933,8 @@ async def run_sleep_session(
                             else:
                                 err_msg = str(order.get("error", "unknown"))
                                 _log_sleep(user_id, f"Order failed for {symbol}: {err_msg}")
+                                _set_last_error(user_id, f"order_failed exchange={creds.get('exchange')} symbol={symbol} side={side} amount={amount:.6f} err={err_msg[:180]}")
+                                log.error("[sleep] order_failed exchange=%s symbol=%s side=%s amount=%.6f err=%s", creds.get("exchange"), symbol, side, amount, err_msg)
                                 if _is_contract_activation_error(err_msg):
                                     blocked_symbols.add(_canonical_symbol(symbol))
                                     session["blocked_symbols"] = sorted(blocked_symbols)
@@ -937,7 +945,10 @@ async def run_sleep_session(
                                     brain_store.save_autotrader(user_id, session)
 
                         except Exception as e:
-                            _log_sleep(user_id, f"Execution error on {symbol}: {str(e)[:100]}")
+                            err_txt = str(e)
+                            _log_sleep(user_id, f"Execution error on {symbol}: {err_txt[:100]}")
+                            _set_last_error(user_id, f"execution_error exchange={creds.get('exchange')} symbol={symbol} side={side} amount={amount:.6f} err={err_txt[:180]}")
+                            log.error("[sleep] order_failed exchange=%s symbol=%s side=%s amount=%.6f err=%s", creds.get("exchange"), symbol, side, amount, err_txt)
 
                         # Don't flood — small delay between entries
                         await asyncio.sleep(5)
@@ -955,7 +966,9 @@ async def run_sleep_session(
     except asyncio.CancelledError:
         _log_sleep(user_id, "Sleep Mode cancelled by user")
     except Exception as e:
-        _log_sleep(user_id, f"Sleep Mode error: {str(e)[:200]}")
+        err_txt = str(e)
+        _log_sleep(user_id, f"Sleep Mode error: {err_txt[:200]}")
+        _set_last_error(user_id, f"session_error err={err_txt[:240]}")
         log.exception("[sleep] session error for %s", user_id)
     finally:
         # Finalize session
@@ -965,6 +978,7 @@ async def run_sleep_session(
         session["sleep_mode"]["ended_at"] = time.time()
         session["sleep_mode"]["total_trades"] = trade_count
         session["sleep_mode"]["total_realized_pnl"] = round(total_realized_pnl, 4)
+        session["sleep_mode"]["desired_state"] = "stopped"
         brain_store.save_autotrader(user_id, session)
 
         elapsed_h = (time.time() - start_time) / 3600
@@ -1005,12 +1019,67 @@ def _save_sleep_snapshot(user_id: str, kind: str, symbol: str, content: dict[str
 
 
 
+def _set_last_error(user_id: str, message: str) -> None:
+    session = brain_store.load_autotrader(user_id) or {}
+    sleep = session.setdefault("sleep_mode", {})
+    sleep["last_error"] = message
+    sleep["last_error_at"] = time.time()
+    brain_store.save_autotrader(user_id, session)
+
+
+def _set_desired_sleep_state(user_id: str, desired: str) -> None:
+    session = brain_store.load_autotrader(user_id) or {}
+    sleep = session.setdefault("sleep_mode", {})
+    sleep["desired_state"] = desired
+    sleep["desired_state_at"] = time.time()
+    brain_store.save_autotrader(user_id, session)
+
+
+def _is_running(user_id: str) -> bool:
+    return user_id in _active_sessions and not _active_sessions[user_id].done()
+
+
+async def worker_tick(brain_engine: PredictionEngine) -> dict[str, int]:
+    """One reconciliation tick: align desired sleep state with running tasks."""
+    started = 0
+    stopped = 0
+    for user_id in brain_store.list_autotrader_user_ids():
+        session = brain_store.load_autotrader(user_id) or {}
+        if not session.get("enabled"):
+            continue
+        desired = str((session.get("sleep_mode") or {}).get("desired_state") or "stopped")
+        running = _is_running(user_id)
+
+        if desired == "running" and not running:
+            task = asyncio.create_task(run_sleep_session(user_id, brain_engine))
+            _active_sessions[user_id] = task
+            started += 1
+        elif desired != "running" and running:
+            _active_sessions[user_id].cancel()
+            _active_sessions.pop(user_id, None)
+            stopped += 1
+
+    return {"started": started, "stopped": stopped}
+
+
+async def run_worker_loop(brain_engine: PredictionEngine, interval_s: int = 5) -> None:
+    """Dedicated worker loop for Sleep Mode task orchestration."""
+    log.info("[sleep-worker] loop starting mode=%s interval=%ss", SLEEP_EXECUTION_MODE, interval_s)
+    while True:
+        try:
+            stats = await worker_tick(brain_engine)
+            if stats["started"] or stats["stopped"]:
+                log.info("[sleep-worker] reconciled started=%d stopped=%d", stats["started"], stats["stopped"])
+        except Exception as exc:
+            log.exception("[sleep-worker] reconciliation failed: %s", exc)
+        await asyncio.sleep(max(1, interval_s))
+
+
+
 def start_sleep_mode(user_id: str, brain_engine: PredictionEngine) -> dict:
-    """Start a sleep trading session. Returns status."""
-    if user_id in _active_sessions:
-        task = _active_sessions[user_id]
-        if not task.done():
-            return {"ok": False, "error": "Sleep Mode already active", "active": True}
+    """Request a sleep trading session. In worker mode this only sets desired state."""
+    if _is_running(user_id):
+        return {"ok": False, "error": "Sleep Mode already active", "active": True}
 
     session = brain_store.load_autotrader(user_id) or {}
     config = session.get("config", {})
@@ -1019,19 +1088,21 @@ def start_sleep_mode(user_id: str, brain_engine: PredictionEngine) -> dict:
     execution_market = configured_market_mode if configured_market_mode in ("futures", "spot") else ("spot" if exchange.lower() == "mexc" else "futures")
     sleep_hours = _resolve_sleep_duration_hours(config, exchange, execution_market)
 
-    task = asyncio.create_task(run_sleep_session(user_id, brain_engine))
-    _active_sessions[user_id] = task
-    return {"ok": True, "message": "Sleep Mode started", "duration_hours": sleep_hours}
+    _set_desired_sleep_state(user_id, "running")
+    if SLEEP_EXECUTION_MODE != "worker":
+        task = asyncio.create_task(run_sleep_session(user_id, brain_engine))
+        _active_sessions[user_id] = task
+
+    return {"ok": True, "message": "Sleep Mode queued", "duration_hours": sleep_hours, "execution_mode": SLEEP_EXECUTION_MODE}
 
 
 def stop_sleep_mode(user_id: str) -> dict:
-    """Stop an active sleep session."""
+    """Stop an active sleep session (desired state + immediate cancel if local task exists)."""
+    _set_desired_sleep_state(user_id, "stopped")
     task = _active_sessions.get(user_id)
-    if not task or task.done():
-        return {"ok": True, "message": "No active sleep session"}
-
-    task.cancel()
-    _active_sessions.pop(user_id, None)
+    if task and not task.done():
+        task.cancel()
+        _active_sessions.pop(user_id, None)
 
     session = brain_store.load_autotrader(user_id)
     if session and session.get("sleep_mode"):
@@ -1040,7 +1111,7 @@ def stop_sleep_mode(user_id: str) -> dict:
         session["sleep_mode"]["ended_at"] = time.time()
         brain_store.save_autotrader(user_id, session)
 
-    return {"ok": True, "message": "Sleep Mode stopped"}
+    return {"ok": True, "message": "Sleep Mode stop requested"}
 
 
 def get_sleep_status(user_id: str) -> dict:
@@ -1050,7 +1121,7 @@ def get_sleep_status(user_id: str) -> dict:
         return {"active": False}
 
     sleep = session.get("sleep_mode", {})
-    is_active = user_id in _active_sessions and not _active_sessions[user_id].done()
+    is_active = _is_running(user_id)
 
     started_at = float(sleep.get("started_at") or 0)
     ends_at = float(sleep.get("ends_at") or 0)
@@ -1075,6 +1146,9 @@ def get_sleep_status(user_id: str) -> dict:
         "trade_count": sleep.get("trade_count", 0),
         "realized_pnl": sleep.get("realized_pnl", 0),
         "status": sleep.get("status", "idle"),
+        "desired_state": sleep.get("desired_state", "stopped"),
+        "last_error": sleep.get("last_error"),
+        "last_error_at": sleep.get("last_error_at"),
         "trades": session.get("sleep_trades", []),
         "log": session.get("log", [])[-30:],
     }
