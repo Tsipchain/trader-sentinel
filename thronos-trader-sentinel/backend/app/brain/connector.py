@@ -189,7 +189,9 @@ async def fetch_exchange_snapshot(
         else:
             all_balance_map[asset] = b
 
-    equity = futures_data.get("equity", 0) + spot_data.get("equity", 0)
+    futures_equity = float(futures_data.get("equity") or 0)
+    spot_equity = float(spot_data.get("equity") or 0)
+    equity = futures_equity + spot_equity
     used_margin = futures_data.get("usedMargin", 0)
 
     return {
@@ -198,6 +200,20 @@ async def fetch_exchange_snapshot(
         "positions": positions,
         "usedMargin": used_margin,
         "maxLeverageBySymbol": futures_data.get("maxLeverageBySymbol", {}),
+        "futures": {
+            "equity": futures_equity,
+            "quoteAsset": futures_data.get("quoteAsset", "USDT"),
+            "quoteFree": float(futures_data.get("quoteFree") or 0),
+            "quoteUsed": float(futures_data.get("quoteUsed") or 0),
+            "quoteTotal": float(futures_data.get("quoteTotal") or 0),
+        },
+        "spot": {
+            "equity": spot_equity,
+            "quoteAsset": spot_data.get("quoteAsset", "USDT"),
+            "quoteFree": float(spot_data.get("quoteFree") or 0),
+            "quoteUsed": float(spot_data.get("quoteUsed") or 0),
+            "quoteTotal": float(spot_data.get("quoteTotal") or 0),
+        },
         "ts": time.time(),
     }
 
@@ -267,17 +283,27 @@ async def _fetch_snapshot_for_type(
             if leverage > (max_lev_by_symbol.get(symbol) or 0):
                 max_lev_by_symbol[symbol] = leverage
 
+        quote_asset = "USDT"
+        quote_total = float(totals.get(quote_asset) or (bal.get(quote_asset) or {}).get("total") or 0)
+        quote_free = float(frees.get(quote_asset) or (bal.get(quote_asset) or {}).get("free") or 0)
+        quote_used = float(useds.get(quote_asset) or (bal.get(quote_asset) or {}).get("used") or 0)
+
         return {
             "equity": equity,
             "balances": balances,
             "positions": normalized_positions,
             "usedMargin": used_margin,
             "maxLeverageBySymbol": max_lev_by_symbol,
+            "marketType": market_type,
+            "quoteAsset": quote_asset,
+            "quoteTotal": quote_total,
+            "quoteFree": quote_free,
+            "quoteUsed": quote_used,
             "ts": time.time(),
         }
     except Exception as e:
         log.warning("[connector] snapshot error for %s %s: %s", exchange, market_type, e)
-        return {"equity": 0, "balances": [], "positions": [], "usedMargin": 0, "maxLeverageBySymbol": {}, "ts": time.time()}
+        return {"equity": 0, "balances": [], "positions": [], "usedMargin": 0, "maxLeverageBySymbol": {}, "marketType": market_type, "quoteAsset": "USDT", "quoteTotal": 0, "quoteFree": 0, "quoteUsed": 0, "ts": time.time()}
     finally:
         await ex.close()
 
@@ -902,5 +928,64 @@ async def get_funding_snapshot(
         }
     except Exception as e:
         return {"ok": False, "symbol": symbol, "error": str(e)}
+    finally:
+        await ex.close()
+
+
+async def create_spot_market_order(
+    exchange: str,
+    api_key: str,
+    api_secret: str,
+    symbol: str,
+    side: str,
+    amount: float,
+    passphrase: str | None = None,
+) -> dict[str, Any]:
+    """Place a market order on spot market. Returns order info."""
+    ex = _build_exchange(exchange, api_key, api_secret, passphrase, market_type="spot")
+    try:
+        spot_symbol = _adapt_symbol(symbol, "spot")
+        order = await ex.create_order(
+            symbol=spot_symbol,
+            type="market",
+            side=side,
+            amount=amount,
+        )
+        log.info("[exec] spot market %s %s %.6f on %s → %s", side, spot_symbol, amount, exchange, order.get("id"))
+        return {
+            "ok": True,
+            "id": order.get("id"),
+            "symbol": spot_symbol,
+            "side": side,
+            "amount": amount,
+            "price": float(order.get("average") or order.get("price") or 0),
+            "cost": float(order.get("cost") or 0),
+            "status": order.get("status"),
+            "timestamp": order.get("timestamp"),
+            "market_type": "spot",
+        }
+    except Exception as e:
+        err = str(e)
+        log.error("[exec] spot market order failed %s %s: %s", side, symbol, e)
+        return {"ok": False, "error": err, "market_type": "spot"}
+    finally:
+        await ex.close()
+
+
+async def get_spot_ticker_price(
+    exchange: str,
+    api_key: str,
+    api_secret: str,
+    symbol: str,
+    passphrase: str | None = None,
+) -> float:
+    """Fetch current spot price for a symbol."""
+    ex = _build_exchange(exchange, api_key, api_secret, passphrase, market_type="spot")
+    try:
+        spot_symbol = _adapt_symbol(symbol, "spot")
+        ticker = await ex.fetch_ticker(spot_symbol)
+        return float(ticker.get("last") or ticker.get("close") or 0)
+    except Exception:
+        return 0.0
     finally:
         await ex.close()
