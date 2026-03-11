@@ -867,3 +867,40 @@ async def get_ticker_price(
         return 0.0
     finally:
         await ex.close()
+
+
+async def get_funding_snapshot(
+    exchange: str,
+    api_key: str,
+    api_secret: str,
+    symbol: str,
+    passphrase: str | None = None,
+) -> dict[str, Any]:
+    """Fetch current funding context for a futures symbol.
+
+    Returns best-effort values. If unsupported by exchange, returns ok=False.
+    """
+    ex = _build_exchange(exchange, api_key, api_secret, passphrase, market_type="futures")
+    try:
+        futures_symbol = _adapt_symbol(symbol, "futures")
+        data = await ex.fetch_funding_rate(futures_symbol)
+        now_ms = int(time.time() * 1000)
+        next_ts = int(data.get("nextFundingTimestamp") or 0)
+        prev_ts = int(data.get("fundingTimestamp") or 0)
+        rate = float(data.get("fundingRate") or 0)
+        interval_h = 8
+        if next_ts > prev_ts:
+            interval_h = max(1, int(round((next_ts - prev_ts) / 3_600_000)))
+        mins_to_next = int((next_ts - now_ms) / 60000) if next_ts > now_ms else 0
+        return {
+            "ok": True,
+            "symbol": symbol,
+            "funding_rate": rate,
+            "next_funding_ts": next_ts or None,
+            "minutes_to_next": mins_to_next,
+            "interval_h": interval_h,
+        }
+    except Exception as e:
+        return {"ok": False, "symbol": symbol, "error": str(e)}
+    finally:
+        await ex.close()

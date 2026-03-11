@@ -103,6 +103,52 @@ def _macro_event_profile(upcoming_events: list[dict[str, Any]]) -> dict[str, Any
     return {"calendar_score": 6.2, "entry_bonus": 0.01, "cooldown_mult": 1.0, "label": label}
 
 
+def _funding_profile(funding: dict[str, Any]) -> dict[str, Any]:
+    """Translate funding-rate context to directional confidence tuning."""
+    if not funding.get("ok"):
+        return {
+            "entry_bonus": 0.0,
+            "long_bonus": 0.0,
+            "short_bonus": 0.0,
+            "cooldown_mult": 1.0,
+            "label": None,
+        }
+
+    rate = float(funding.get("funding_rate") or 0.0)
+    mins_to_next = int(funding.get("minutes_to_next") or 0)
+    abs_rate = abs(rate)
+    basis_points = rate * 10_000
+    if abs_rate < 0.0002:
+        return {
+            "entry_bonus": 0.0,
+            "long_bonus": 0.0,
+            "short_bonus": 0.0,
+            "cooldown_mult": 1.0,
+            "label": None,
+        }
+
+    if rate > 0:
+        long_bonus = -0.02
+        short_bonus = 0.05 if abs_rate >= 0.0008 else 0.03
+        bias = "short bias"
+    else:
+        long_bonus = 0.05 if abs_rate >= 0.0008 else 0.03
+        short_bonus = -0.02
+        bias = "long bias"
+
+    near_roll = 0 < mins_to_next <= 20
+    roll_bonus = 0.02 if near_roll else 0.0
+    cooldown_mult = 0.8 if near_roll else 1.0
+    label = f"Funding {basis_points:+.2f} bps ({bias}), next reset in {mins_to_next}m"
+    return {
+        "entry_bonus": roll_bonus,
+        "long_bonus": long_bonus,
+        "short_bonus": short_bonus,
+        "cooldown_mult": cooldown_mult,
+        "label": label,
+    }
+
+
 def _position_risk_score(pos: dict[str, Any]) -> float:
     leverage = float(pos.get("leverage") or 1)
     pnl = float(pos.get("unrealizedPnl") or 0)
@@ -505,6 +551,8 @@ async def run_sleep_session(
                 _log_sleep(user_id, f"Macro regime detected: {macro_label}. Adjusting confidence/cooldown for event volatility.")
                 session.setdefault("sleep_mode", {})["last_macro_log"] = macro_label
 
+            funding_cache: dict[str, dict[str, Any]] = {}
+
             if session_bias.get("wait_minutes", 0) > 0:
                 # Don't stay idle early in the sleep cycle: allow first entries even in low-session windows.
                 if trade_count == 0 and not open_trades:
@@ -600,8 +648,23 @@ async def run_sleep_session(
                         if _canonical_symbol(symbol) in blocked_symbols:
                             continue
 
-                        # Cooldown check (faster reaction in macro-volatility windows)
-                        cooldown_s = max(60, int(ENTRY_COOLDOWN_S * float(macro_profile.get("cooldown_mult", 1.0))))
+                        funding_data = funding_cache.get(symbol)
+                        if funding_data is None:
+                            funding_data = await connector.get_funding_snapshot(
+                                creds["exchange"], creds["api_key"], creds["api_secret"], symbol, creds.get("passphrase"),
+                            )
+                            funding_cache[symbol] = funding_data
+
+                        funding_profile = _funding_profile(funding_data)
+                        funding_label = funding_profile.get("label")
+                        funding_key = f"funding::{symbol}"
+                        if funding_label and session.get("sleep_mode", {}).get(funding_key) != funding_label:
+                            _log_sleep(user_id, f"{symbol}: {funding_label}. Tilting entries based on funding pressure.")
+                            session.setdefault("sleep_mode", {})[funding_key] = funding_label
+
+                        # Cooldown check (faster reaction in macro/funding volatility windows)
+                        cooldown_mult = float(macro_profile.get("cooldown_mult", 1.0)) * float(funding_profile.get("cooldown_mult", 1.0))
+                        cooldown_s = max(60, int(ENTRY_COOLDOWN_S * cooldown_mult))
                         last_entry = last_entry_by_symbol.get(symbol, 0)
                         if time.time() - last_entry < cooldown_s:
                             continue
@@ -639,6 +702,11 @@ async def run_sleep_session(
                         if is_opening_range:
                             confidence += 0.08
                         confidence += float(macro_profile.get("entry_bonus", 0.0))
+                        confidence += float(funding_profile.get("entry_bonus", 0.0))
+                        if side == "buy":
+                            confidence += float(funding_profile.get("long_bonus", 0.0))
+                        elif side == "sell":
+                            confidence += float(funding_profile.get("short_bonus", 0.0))
 
                         elapsed_s = time.time() - start_time
                         dynamic_min_conf = MIN_CONFIDENCE
