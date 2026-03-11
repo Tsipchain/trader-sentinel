@@ -1017,6 +1017,22 @@ async def brain_sleep_start(payload: dict = Body(default_factory=dict), _: str =
     if not session or not session.get("config", {}).get("api_key"):
         return {"ok": False, "error": "Enable AutoTrader first with exchange credentials"}
 
+    # Optional runtime config overrides from client (applied at sleep start).
+    cfg_patch = payload.get("config") or {}
+    if isinstance(cfg_patch, dict) and cfg_patch:
+        cfg = session.setdefault("config", {})
+        cfg["symbols"] = cfg_patch.get("symbols") or cfg.get("symbols") or ["BTC/USDT"]
+        cfg["stop_loss_pct"] = float(cfg_patch.get("stop_loss_pct") or cfg_patch.get("stopLossPct") or cfg.get("stop_loss_pct") or 2.0)
+        cfg["take_profit_pct"] = float(cfg_patch.get("take_profit_pct") or cfg_patch.get("takeProfitPct") or cfg.get("take_profit_pct") or 4.0)
+        cfg["max_position_pct"] = float(cfg_patch.get("max_position_pct") or cfg_patch.get("maxPositionPct") or cfg.get("max_position_pct") or 10.0)
+        cfg["max_open_trades"] = int(cfg_patch.get("max_open_trades") or cfg_patch.get("maxOpenTrades") or cfg.get("max_open_trades") or 3)
+        cfg["margin_mode"] = cfg_patch.get("margin_mode") or cfg_patch.get("marginMode") or cfg.get("margin_mode") or "cross"
+        cfg["max_leverage"] = float(cfg_patch.get("max_leverage") or cfg_patch.get("maxLeverage") or cfg.get("max_leverage") or 20)
+        cfg["risk_per_trade_pct"] = float(cfg_patch.get("risk_per_trade_pct") or cfg_patch.get("riskPerTradePct") or cfg.get("risk_per_trade_pct") or 1)
+        cfg["max_total_exposure_pct"] = float(cfg_patch.get("max_total_exposure_pct") or cfg_patch.get("maxTotalExposurePct") or cfg.get("max_total_exposure_pct") or 25)
+        cfg["entry_margin_pct"] = float(cfg_patch.get("entry_margin_pct") or cfg_patch.get("entryMarginPct") or cfg.get("entry_margin_pct") or 0.088)
+        brain_store.save_autotrader(user_id, session)
+
     result = sleep_trader.start_sleep_mode(user_id, _brain_engine)
     return result
 
