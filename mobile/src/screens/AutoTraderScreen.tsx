@@ -464,9 +464,10 @@ export default function AutoTraderScreen() {
 
   const handleStartSleep = () => {
     if (!user?.id || !isEnabled) return;
+    const plannedSleepHours = cfg.exchange.toLowerCase() === 'mexc' ? 48 : 8;
     Alert.alert(
       'Activate Sleep Mode?',
-      `Sentinel will autonomously trade ${cfg.symbols.join(', ')} on ${(cfg.exchange || '').toUpperCase()} for up to 8 hours while you rest.\n\nObjective: ${sleepTargetRange} portfolio return range (not guaranteed).\nRisk controls: SL/TP + protection checks.\nMax leverage: ${cfg.maxLeverage}x\nPortfolio: $${(portfolio.equity ?? 0).toFixed(2)}`,
+      `Sentinel will autonomously trade ${cfg.symbols.join(', ')} on ${(cfg.exchange || '').toUpperCase()} for up to ${plannedSleepHours} hours while you rest.\n\nObjective: steady risk-managed execution window (not guaranteed).\nRisk controls: SL/TP + protection checks.\nMax leverage: ${cfg.maxLeverage}x\nPortfolio: $${(portfolio.equity ?? 0).toFixed(2)}`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -485,10 +486,12 @@ export default function AutoTraderScreen() {
                 risk_per_trade_pct: cfg.riskPerTradePct,
                 max_total_exposure_pct: cfg.maxTotalExposurePct,
                 entry_margin_pct: 0.088,
+                sleep_duration_hours: plannedSleepHours,
               });
               if (res.ok) {
                 const startedAt = Date.now() / 1000;
-                const endsAt = startedAt + (8 * 3600);
+                const durationHours = res.duration_hours ?? plannedSleepHours;
+                const endsAt = startedAt + (durationHours * 3600);
                 setSleepModeStatus({
                   active: true,
                   status: 'running',
@@ -497,7 +500,7 @@ export default function AutoTraderScreen() {
                   started_at: startedAt,
                   ends_at: endsAt,
                   elapsed_s: 0,
-                  remaining_s: 8 * 3600,
+                  remaining_s: (res.duration_hours ?? plannedSleepHours) * 3600,
                 });
               } else {
                 Alert.alert('Sleep Mode', res.error || 'Could not start sleep mode.');
@@ -708,7 +711,7 @@ export default function AutoTraderScreen() {
               </Text>
             </View>
             <Text style={{ color: COLORS.textSecondary, fontSize: FONT_SIZES.xs, marginBottom: SPACING.md, lineHeight: 16 }}>
-              {`Activate when you go to sleep. Sentinel runs for up to 8 hours with an objective of ${sleepTargetRange} portfolio return (not guaranteed), using TA-driven entries and SL/TP protection.`}
+              {`Activate when you go to sleep. Sentinel runs in a configurable window (up to 48h for MEXC) with risk-managed execution (not guaranteed), using TA-driven entries and SL/TP protection.`}
             </Text>
 
             {!sleepModeStatus.active ? (
@@ -722,7 +725,7 @@ export default function AutoTraderScreen() {
                 ) : (
                   <>
                     <Ionicons name="moon" size={18} color="#fff" />
-                    <Text style={styles.sleepBtnText}>Start Sleep Mode (8h)</Text>
+                    <Text style={styles.sleepBtnText}>{`Start Sleep Mode (${cfg.exchange.toLowerCase() === 'mexc' ? 48 : 8}h)`}</Text>
                   </>
                 )}
               </TouchableOpacity>

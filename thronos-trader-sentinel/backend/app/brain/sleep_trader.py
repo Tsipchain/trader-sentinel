@@ -23,12 +23,23 @@ log = logging.getLogger(__name__)
 # ── Active sleep sessions (in-memory) ────────────────────────────────────────
 _active_sessions: dict[str, asyncio.Task] = {}
 
-SLEEP_DURATION_S = 8 * 3600  # 8 hours
+DEFAULT_SLEEP_DURATION_H = 8
+MAX_SLEEP_DURATION_H = 48
+
 SCAN_INTERVAL_S = 60         # re-scan every 60s
 MAX_TRADES_PER_SESSION = 40  # cap total trades in one sleep
 ENTRY_COOLDOWN_S = 180       # min 3 min between entries on same symbol
 MIN_CONFIDENCE = 0.52        # lower threshold to increase trade frequency in 8h mode
 DEFAULT_ENTRY_MARGIN_PCT = 0.088  # default margin allocation per new sleep entry
+
+
+def _resolve_sleep_duration_hours(config: dict[str, Any], exchange: str, execution_market: str) -> int:
+    requested = float(config.get("sleep_duration_hours") or 0)
+    if requested > 0:
+        return max(1, min(int(round(requested)), MAX_SLEEP_DURATION_H))
+    if exchange.lower() == "mexc" and execution_market == "spot":
+        return MAX_SLEEP_DURATION_H
+    return DEFAULT_SLEEP_DURATION_H
 
 
 def _is_contract_activation_error(error_text: str) -> bool:
@@ -458,7 +469,7 @@ async def run_sleep_session(
     user_id: str,
     brain_engine: PredictionEngine,
 ):
-    """Main sleep trading loop. Runs for up to 8 hours."""
+    """Main sleep trading loop. Runs for configurable duration (max 48h)."""
     session = brain_store.load_autotrader(user_id)
     if not session:
         log.warning("[sleep] no session found for %s", user_id)
@@ -489,8 +500,9 @@ async def run_sleep_session(
     configured_market_mode = str(config.get("market_mode", "auto")).lower()
     execution_market = configured_market_mode if configured_market_mode in ("futures", "spot") else ("spot" if creds["exchange"].lower() == "mexc" else "futures")
 
+    sleep_hours = _resolve_sleep_duration_hours(config, creds["exchange"], execution_market)
     start_time = time.time()
-    end_time = start_time + SLEEP_DURATION_S
+    end_time = start_time + (sleep_hours * 3600)
     trade_count = 0
     total_realized_pnl = 0.0
     last_entry_by_symbol: dict[str, float] = {}
@@ -505,11 +517,12 @@ async def run_sleep_session(
         "realized_pnl": 0.0,
         "status": "running",
         "execution_market": execution_market,
+        "duration_hours": sleep_hours,
     }
     session["sleep_trades"] = []
     session["blocked_symbols"] = []
     brain_store.save_autotrader(user_id, session)
-    _log_sleep(user_id, f"Sleep Mode started — {len(symbols)} symbols, route={execution_market}, {max_leverage}x max leverage, {margin_mode} margin")
+    _log_sleep(user_id, f"Sleep Mode started — {len(symbols)} symbols, route={execution_market}, duration={sleep_hours}h, {max_leverage}x max leverage, {margin_mode} margin")
     _log_sleep(user_id, f"Entry sizing set to {entry_margin_pct:.3f}% margin allocation per new trade (target baseline).")
 
     if execution_market == "futures":
@@ -999,9 +1012,16 @@ def start_sleep_mode(user_id: str, brain_engine: PredictionEngine) -> dict:
         if not task.done():
             return {"ok": False, "error": "Sleep Mode already active", "active": True}
 
+    session = brain_store.load_autotrader(user_id) or {}
+    config = session.get("config", {})
+    exchange = str(config.get("exchange") or "mexc")
+    configured_market_mode = str(config.get("market_mode", "auto")).lower()
+    execution_market = configured_market_mode if configured_market_mode in ("futures", "spot") else ("spot" if exchange.lower() == "mexc" else "futures")
+    sleep_hours = _resolve_sleep_duration_hours(config, exchange, execution_market)
+
     task = asyncio.create_task(run_sleep_session(user_id, brain_engine))
     _active_sessions[user_id] = task
-    return {"ok": True, "message": "Sleep Mode started", "duration_hours": 8}
+    return {"ok": True, "message": "Sleep Mode started", "duration_hours": sleep_hours}
 
 
 def stop_sleep_mode(user_id: str) -> dict:
