@@ -786,6 +786,8 @@ def brain_autotrader_enable(payload: dict = Body(default_factory=dict), _: str =
             "max_leverage": float(payload.get("max_leverage") or payload.get("maxLeverage") or 3),
             "risk_per_trade_pct": float(payload.get("risk_per_trade_pct") or payload.get("riskPerTradePct") or 1),
             "max_total_exposure_pct": float(payload.get("max_total_exposure_pct") or payload.get("maxTotalExposurePct") or 25),
+            "market_mode": (payload.get("market_mode") or payload.get("marketMode") or "auto"),
+            "sleep_duration_hours": float(payload.get("sleep_duration_hours") or payload.get("sleepDurationHours") or 0),
         },
         "active_trades": [],
         "log": [f"AutoTrader enabled at {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}"],
@@ -1007,7 +1009,7 @@ async def sentinel_session_bias(request: Request, _: str = Security(verify_api_k
 
 @app.post("/api/brain/autotrader/sleep-start")
 async def brain_sleep_start(payload: dict = Body(default_factory=dict), _: str = Security(verify_api_key)):
-    """Start Sleep Mode: autonomous trading for up to 8 hours."""
+    """Start Sleep Mode: autonomous trading for configurable duration (up to 48h)."""
     user_id = payload.get("user_id") or payload.get("userId")
     if not user_id:
         return {"ok": False, "error": "Missing user_id"}
@@ -1031,6 +1033,8 @@ async def brain_sleep_start(payload: dict = Body(default_factory=dict), _: str =
         cfg["risk_per_trade_pct"] = float(cfg_patch.get("risk_per_trade_pct") or cfg_patch.get("riskPerTradePct") or cfg.get("risk_per_trade_pct") or 1)
         cfg["max_total_exposure_pct"] = float(cfg_patch.get("max_total_exposure_pct") or cfg_patch.get("maxTotalExposurePct") or cfg.get("max_total_exposure_pct") or 25)
         cfg["entry_margin_pct"] = float(cfg_patch.get("entry_margin_pct") or cfg_patch.get("entryMarginPct") or cfg.get("entry_margin_pct") or 0.088)
+        cfg["market_mode"] = cfg_patch.get("market_mode") or cfg_patch.get("marketMode") or cfg.get("market_mode") or "auto"
+        cfg["sleep_duration_hours"] = float(cfg_patch.get("sleep_duration_hours") or cfg_patch.get("sleepDurationHours") or cfg.get("sleep_duration_hours") or 0)
         brain_store.save_autotrader(user_id, session)
 
     result = sleep_trader.start_sleep_mode(user_id, _brain_engine)
