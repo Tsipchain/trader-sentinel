@@ -160,6 +160,73 @@ def _adapt_symbol(symbol: str, market_type: str) -> str:
     return symbol
 
 
+def _pick_first_number(*values: Any) -> float:
+    for value in values:
+        if value is None:
+            continue
+        try:
+            f = float(value)
+            if f == f:
+                return f
+        except Exception:
+            continue
+    return 0.0
+
+
+def _extract_quote_metrics_from_balance(balance: dict[str, Any], quote_asset: str = "USDT") -> tuple[float, float, float]:
+    totals = balance.get("total") or {}
+    frees = balance.get("free") or {}
+    useds = balance.get("used") or {}
+
+    quote_total = _pick_first_number(
+        totals.get(quote_asset),
+        (balance.get(quote_asset) or {}).get("total"),
+        (balance.get(quote_asset) or {}).get("walletBalance"),
+    )
+    quote_free = _pick_first_number(
+        frees.get(quote_asset),
+        (balance.get(quote_asset) or {}).get("free"),
+        (balance.get(quote_asset) or {}).get("available"),
+        (balance.get(quote_asset) or {}).get("availableBalance"),
+    )
+    quote_used = _pick_first_number(
+        useds.get(quote_asset),
+        (balance.get(quote_asset) or {}).get("used"),
+        (balance.get(quote_asset) or {}).get("frozen"),
+        (balance.get(quote_asset) or {}).get("frozenBalance"),
+    )
+
+    info = balance.get("info") or {}
+    quote_total = quote_total or _pick_first_number(
+        info.get("equity"), info.get("totalMarginBalance"), info.get("walletBalance"), info.get("balance")
+    )
+    quote_free = quote_free or _pick_first_number(
+        info.get("availableBalance"), info.get("availableMargin"), info.get("free")
+    )
+    quote_used = quote_used or _pick_first_number(
+        info.get("usedMargin"), info.get("positionMargin"), info.get("frozenBalance"), info.get("locked")
+    )
+
+    if quote_used <= 0 and quote_total > 0 and quote_free >= 0:
+        quote_used = max(0.0, quote_total - quote_free)
+
+    return float(quote_total), float(quote_free), float(quote_used)
+
+
+def _estimate_used_margin_from_positions(positions: list[dict[str, Any]]) -> float:
+    estimated = 0.0
+    for pos in positions:
+        initial_margin = _pick_first_number(pos.get("initialMargin"), (pos.get("info") or {}).get("initialMargin"))
+        if initial_margin > 0:
+            estimated += initial_margin
+            continue
+        notional = abs(_pick_first_number(pos.get("notional"), (pos.get("info") or {}).get("notional")))
+        lev = _pick_first_number(pos.get("leverage"), (pos.get("info") or {}).get("leverage"))
+        if notional > 0 and lev > 0:
+            estimated += notional / max(lev, 1.0)
+    return float(estimated)
+
+
 async def fetch_exchange_snapshot(
     exchange: str,
     api_key: str,
@@ -252,12 +319,25 @@ async def _fetch_snapshot_for_type(
                 "used": float(useds.get(asset) or 0),
             })
 
-        used_margin = float(useds.get("USDT") or bal.get("usedMargin") or 0)
+        quote_asset = "USDT"
+        quote_total, quote_free, quote_used = _extract_quote_metrics_from_balance(bal, quote_asset)
+
+        used_margin = float(
+            _pick_first_number(
+                useds.get(quote_asset),
+                bal.get("usedMargin"),
+                (bal.get("info") or {}).get("usedMargin"),
+                (bal.get("info") or {}).get("positionMargin"),
+            )
+        )
         equity = float(
-            totals.get("USDT")
-            or (bal.get("USDT") or {}).get("total")
-            or sum(b.get("total", 0) for b in balances)
-            or 0
+            _pick_first_number(
+                totals.get(quote_asset),
+                (bal.get(quote_asset) or {}).get("total"),
+                (bal.get("info") or {}).get("equity"),
+                (bal.get("info") or {}).get("totalMarginBalance"),
+                sum(b.get("total", 0) for b in balances),
+            )
         )
 
         normalized_positions = []
@@ -283,10 +363,16 @@ async def _fetch_snapshot_for_type(
             if leverage > (max_lev_by_symbol.get(symbol) or 0):
                 max_lev_by_symbol[symbol] = leverage
 
-        quote_asset = "USDT"
-        quote_total = float(totals.get(quote_asset) or (bal.get(quote_asset) or {}).get("total") or 0)
-        quote_free = float(frees.get(quote_asset) or (bal.get(quote_asset) or {}).get("free") or 0)
-        quote_used = float(useds.get(quote_asset) or (bal.get(quote_asset) or {}).get("used") or 0)
+        if market_type == "futures":
+            estimated_used_margin = _estimate_used_margin_from_positions(positions)
+            if estimated_used_margin > 0 and (used_margin <= 0 or abs(estimated_used_margin - used_margin) / max(estimated_used_margin, 1.0) > 0.4):
+                used_margin = estimated_used_margin
+            if equity <= 0 and quote_total > 0:
+                equity = quote_total
+            if quote_used <= 0 and used_margin > 0:
+                quote_used = used_margin
+            if quote_free <= 0 and equity > 0 and quote_used >= 0:
+                quote_free = max(0.0, equity - quote_used)
 
         return {
             "equity": equity,
