@@ -53,6 +53,16 @@ const extractReferencePriceFromSignalMessage = (message: string): number | null 
   return generic ? parseFloat(generic[1]) : null;
 };
 
+
+
+const normalizeSignalMessage = (message: string): string => {
+  return message
+    .toLowerCase()
+    .replace(/\$?[0-9]+(\.[0-9]+)?/g, '#')
+    .replace(/\s+/g, ' ')
+    .trim();
+};
+
 const SIGNAL_REFRESH_MS: Record<string, number> = {
   free: 20000,
   starter: 15000,
@@ -62,6 +72,9 @@ const SIGNAL_REFRESH_MS: Record<string, number> = {
 };
 
 const RISK_MIN_INTERVAL_MS = 30000;
+const SIGNAL_DEDUPE_WINDOW_MS = 20 * 60 * 1000;
+const SIGNAL_MAX_PER_SYMBOL_WINDOW_MS = 3 * 60 * 1000;
+const SIGNAL_MAX_PER_SYMBOL_WINDOW = 2;
 
 const MAX_RENDERED_SIGNALS = 150;
 
@@ -139,6 +152,8 @@ export default function SignalsScreen() {
   const [modalRefPrice, setModalRefPrice] = useState<number | null>(null);
   const notificationReadyRef = useRef(false);
   const nextFetchAllowedAtRef = useRef(0);
+  const isFetchingRef = useRef(false);
+  const semanticDedupeRef = useRef<Record<string, number>>({});
   const riskReportCacheRef = useRef<Record<string, { at: number; value: any }>>({});
 
   const tierDirectionalLimit = CONFIG.TIER_LIMITS[subscription] ?? CONFIG.TIER_LIMITS.free;
@@ -185,6 +200,42 @@ export default function SignalsScreen() {
   }, [settings.notifications, subscription]);
 
   const addSignalWithFeedback = useCallback((signal: Signal) => {
+    const now = Date.now();
+    const normalizedSymbol = signal.symbol.trim().toUpperCase();
+    const semanticKey = `${signal.type}|${normalizedSymbol}|${normalizeSignalMessage(signal.message)}`;
+
+    // local semantic dedupe cache (protects against same signal produced by parallel pipeline steps)
+    const previousSeen = semanticDedupeRef.current[semanticKey];
+    if (previousSeen && now - previousSeen < SIGNAL_DEDUPE_WINDOW_MS) {
+      return;
+    }
+
+    // dedupe against already persisted signals
+    const currentSignals = useStore.getState().signals;
+    const duplicatePersisted = currentSignals.some((s) => {
+      const key = `${s.type}|${s.symbol.trim().toUpperCase()}|${normalizeSignalMessage(s.message)}`;
+      return key === semanticKey && now - s.timestamp < SIGNAL_DEDUPE_WINDOW_MS;
+    });
+    if (duplicatePersisted) {
+      semanticDedupeRef.current[semanticKey] = now;
+      return;
+    }
+
+    // flood control: avoid >2 signals per symbol in short window
+    const recentForSymbol = currentSignals.filter(
+      (s) => s.symbol.trim().toUpperCase() === normalizedSymbol && now - s.timestamp < SIGNAL_MAX_PER_SYMBOL_WINDOW_MS,
+    ).length;
+    if (recentForSymbol >= SIGNAL_MAX_PER_SYMBOL_WINDOW) {
+      return;
+    }
+
+    semanticDedupeRef.current[semanticKey] = now;
+    for (const [k, ts] of Object.entries(semanticDedupeRef.current)) {
+      if (now - ts > SIGNAL_DEDUPE_WINDOW_MS * 2) {
+        delete semanticDedupeRef.current[k];
+      }
+    }
+
     addSignal(signal);
     if (settings.hapticFeedback) {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -338,11 +389,17 @@ export default function SignalsScreen() {
     if (Date.now() < nextFetchAllowedAtRef.current) {
       return;
     }
+    if (isFetchingRef.current) {
+      return;
+    }
 
+    isFetchingRef.current = true;
     try {
       await runSignalPipeline();
     } catch (error) {
       _handleFetchError(error);
+    } finally {
+      isFetchingRef.current = false;
     }
   }, [runSignalPipeline, _handleFetchError]);
 
