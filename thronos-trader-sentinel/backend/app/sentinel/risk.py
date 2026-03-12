@@ -181,6 +181,12 @@ async def generate_report(symbol: str = "BTC/USDT") -> RiskReport:
     if tech_result.volatility_score >= 7.0:
         alerts.append(f"{symbol} ATR volatility elevated (score {tech_result.volatility_score}/10)")
 
+    if tech_result.orderbook_imbalance is not None and abs(tech_result.orderbook_imbalance) >= 0.35:
+        side = "bid-dominant" if tech_result.orderbook_imbalance > 0 else "ask-dominant"
+        alerts.append(
+            f"{symbol} orderbook depth imbalance {tech_result.orderbook_imbalance:+.2f} ({side}) — monitor short-term liquidity pressure"
+        )
+
     if tech_result.nearest_fib and tech_result.nearest_fib["distance_pct"] < 1.0:
         fib = tech_result.nearest_fib
         alerts.append(
@@ -219,6 +225,9 @@ async def generate_report(symbol: str = "BTC/USDT") -> RiskReport:
             "nearest_fib": tech_result.nearest_fib,
             "cycle_deviation_pct": tech_result.cycle_deviation,
             "fib_levels": tech_result.fib_levels,
+            "orderbook_imbalance": tech_result.orderbook_imbalance,
+            "orderbook_score": tech_result.orderbook_score,
+            "orderbook_buckets": tech_result.orderbook_buckets,
         },
         ts=int(datetime.datetime.utcnow().timestamp()),
     )

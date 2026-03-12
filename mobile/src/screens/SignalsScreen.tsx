@@ -53,6 +53,32 @@ const extractReferencePriceFromSignalMessage = (message: string): number | null 
   return generic ? parseFloat(generic[1]) : null;
 };
 
+
+
+const normalizeSignalMessage = (message: string): string => {
+  return message
+    .toLowerCase()
+    .replace(/\$?[0-9]+(\.[0-9]+)?/g, '#')
+    .replace(/\s+/g, ' ')
+    .trim();
+};
+
+const toCompactSignalMessage = (message: string): string => {
+  const compact = message
+    .replace(/\s+/g, ' ')
+    .replace(/\s*[-–—]\s*/g, ' — ')
+    .trim();
+
+  if (compact.length <= 88) return compact;
+
+  const firstSentence = compact.split(/[.!?]/)[0]?.trim();
+  if (firstSentence && firstSentence.length >= 24 && firstSentence.length <= 88) {
+    return firstSentence;
+  }
+
+  return `${compact.slice(0, 85).trimEnd()}…`;
+};
+
 const SIGNAL_REFRESH_MS: Record<string, number> = {
   free: 20000,
   starter: 15000,
@@ -62,15 +88,94 @@ const SIGNAL_REFRESH_MS: Record<string, number> = {
 };
 
 const RISK_MIN_INTERVAL_MS = 30000;
+const SIGNAL_DEDUPE_WINDOW_MS = 20 * 60 * 1000;
+const SIGNAL_MAX_PER_SYMBOL_WINDOW_MS = 3 * 60 * 1000;
+const SIGNAL_MAX_PER_SYMBOL_WINDOW = 2;
+
+const MAX_RENDERED_SIGNALS = 150;
+
+const getSignalIcon = (type: Signal['type']) => {
+  switch (type) {
+    case 'arbitrage':
+      return { name: 'swap-horizontal', color: COLORS.success };
+    case 'alert':
+      return { name: 'warning', color: COLORS.warning };
+    case 'opportunity':
+      return { name: 'trending-up', color: COLORS.primary };
+    default:
+      return { name: 'information-circle', color: COLORS.info };
+  }
+};
+
+const formatSignalTime = (timestamp: number) => {
+  const diff = Date.now() - timestamp;
+  const minutes = Math.floor(diff / 60000);
+  const hours = Math.floor(diff / 3600000);
+
+  if (minutes < 1) return 'Just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  if (hours < 24) return `${hours}h ago`;
+  return new Date(timestamp).toLocaleDateString();
+};
+
+type SignalRowProps = {
+  item: Signal;
+  onPress: (signal: Signal) => void;
+  compactMode: boolean;
+};
+
+const SignalRow = React.memo(({ item, onPress, compactMode }: SignalRowProps) => {
+  const icon = getSignalIcon(item.type);
+  const compactMessage = useMemo(() => toCompactSignalMessage(item.message), [item.message]);
+  const renderedMessage = compactMode ? compactMessage : item.message;
+
+  return (
+    <TouchableOpacity style={styles.signalCard} onPress={() => onPress(item)}>
+      <View style={[styles.signalIcon, { backgroundColor: icon.color + '20' }]}>
+        <Ionicons name={icon.name as any} size={24} color={icon.color} />
+      </View>
+      <View style={styles.signalContent}>
+        <View style={styles.signalHeader}>
+          <Text style={styles.signalSymbol}>{item.symbol}</Text>
+          <Text style={styles.signalTime}>{formatSignalTime(item.timestamp)}</Text>
+        </View>
+        <Text style={styles.signalMessage} numberOfLines={compactMode ? 2 : 3} ellipsizeMode="tail">
+          {renderedMessage}
+        </Text>
+        {item.profit && (
+          <View style={styles.signalProfit}>
+            <Ionicons name="trending-up" size={14} color={COLORS.success} />
+            <Text style={styles.signalProfitText}>
+              Potential: +{item.profit.toFixed(3)}%
+            </Text>
+          </View>
+        )}
+        <View style={styles.signalVenues}>
+          {item.venues.map((venue, index) => (
+            <View key={`${venue}-${index}`} style={styles.venueBadge}>
+              <Text style={styles.venueBadgeText}>{venue}</Text>
+            </View>
+          ))}
+        </View>
+      </View>
+    </TouchableOpacity>
+  );
+});
+
+SignalRow.displayName = 'SignalRow';
+
 export default function SignalsScreen() {
   const { signals, addSignal, clearSignals, watchlist, settings, subscription, marketData, user } = useStore();
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<SignalType>('all');
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [compactMode, setCompactMode] = useState(true);
   const [selectedSignal, setSelectedSignal] = useState<Signal | null>(null);
   const [modalRefPrice, setModalRefPrice] = useState<number | null>(null);
   const notificationReadyRef = useRef(false);
   const nextFetchAllowedAtRef = useRef(0);
+  const isFetchingRef = useRef(false);
+  const semanticDedupeRef = useRef<Record<string, number>>({});
   const riskReportCacheRef = useRef<Record<string, { at: number; value: any }>>({});
 
   const tierDirectionalLimit = CONFIG.TIER_LIMITS[subscription] ?? CONFIG.TIER_LIMITS.free;
@@ -117,6 +222,42 @@ export default function SignalsScreen() {
   }, [settings.notifications, subscription]);
 
   const addSignalWithFeedback = useCallback((signal: Signal) => {
+    const now = Date.now();
+    const normalizedSymbol = signal.symbol.trim().toUpperCase();
+    const semanticKey = `${signal.type}|${normalizedSymbol}|${normalizeSignalMessage(signal.message)}`;
+
+    // local semantic dedupe cache (protects against same signal produced by parallel pipeline steps)
+    const previousSeen = semanticDedupeRef.current[semanticKey];
+    if (previousSeen && now - previousSeen < SIGNAL_DEDUPE_WINDOW_MS) {
+      return;
+    }
+
+    // dedupe against already persisted signals
+    const currentSignals = useStore.getState().signals;
+    const duplicatePersisted = currentSignals.some((s) => {
+      const key = `${s.type}|${s.symbol.trim().toUpperCase()}|${normalizeSignalMessage(s.message)}`;
+      return key === semanticKey && now - s.timestamp < SIGNAL_DEDUPE_WINDOW_MS;
+    });
+    if (duplicatePersisted) {
+      semanticDedupeRef.current[semanticKey] = now;
+      return;
+    }
+
+    // flood control: avoid >2 signals per symbol in short window
+    const recentForSymbol = currentSignals.filter(
+      (s) => s.symbol.trim().toUpperCase() === normalizedSymbol && now - s.timestamp < SIGNAL_MAX_PER_SYMBOL_WINDOW_MS,
+    ).length;
+    if (recentForSymbol >= SIGNAL_MAX_PER_SYMBOL_WINDOW) {
+      return;
+    }
+
+    semanticDedupeRef.current[semanticKey] = now;
+    for (const [k, ts] of Object.entries(semanticDedupeRef.current)) {
+      if (now - ts > SIGNAL_DEDUPE_WINDOW_MS * 2) {
+        delete semanticDedupeRef.current[k];
+      }
+    }
+
     addSignal(signal);
     if (settings.hapticFeedback) {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -270,11 +411,17 @@ export default function SignalsScreen() {
     if (Date.now() < nextFetchAllowedAtRef.current) {
       return;
     }
+    if (isFetchingRef.current) {
+      return;
+    }
 
+    isFetchingRef.current = true;
     try {
       await runSignalPipeline();
     } catch (error) {
       _handleFetchError(error);
+    } finally {
+      isFetchingRef.current = false;
     }
   }, [runSignalPipeline, _handleFetchError]);
 
@@ -422,36 +569,12 @@ export default function SignalsScreen() {
     setRefreshing(false);
   }, [fetchSignals]);
 
-  const filteredSignals = useMemo(() => signals.filter((s) => {
-    if (filter === 'all') return true;
-    return s.type === filter;
-  }), [signals, filter]);
+  const filteredSignals = useMemo(() => {
+    const scoped = signals.filter((s) => (filter === 'all' ? true : s.type === filter));
+    return scoped.slice(0, MAX_RENDERED_SIGNALS);
+  }, [signals, filter]);
 
-  const getSignalIcon = (type: Signal['type']) => {
-    switch (type) {
-      case 'arbitrage':
-        return { name: 'swap-horizontal', color: COLORS.success };
-      case 'alert':
-        return { name: 'warning', color: COLORS.warning };
-      case 'opportunity':
-        return { name: 'trending-up', color: COLORS.primary };
-      default:
-        return { name: 'information-circle', color: COLORS.info };
-    }
-  };
-
-  const formatTime = (timestamp: number) => {
-    const diff = Date.now() - timestamp;
-    const minutes = Math.floor(diff / 60000);
-    const hours = Math.floor(diff / 3600000);
-
-    if (minutes < 1) return 'Just now';
-    if (minutes < 60) return `${minutes}m ago`;
-    if (hours < 24) return `${hours}h ago`;
-    return new Date(timestamp).toLocaleDateString();
-  };
-
-  const signalKeyExtractor = (item: Signal) => item.id;
+  const signalKeyExtractor = useCallback((item: Signal) => item.id, []);
 
   const getSignalItemLayout = (_data: ArrayLike<Signal> | null | undefined, index: number) => ({
     length: 96,
@@ -461,39 +584,26 @@ export default function SignalsScreen() {
 
   const fmtPrice = (value: number) => (value >= 1 ? `$${value.toFixed(4)}` : `$${value.toPrecision(4)}`);
 
-  const renderSignal = useCallback(({ item }: { item: Signal }) => {
-    const icon = getSignalIcon(item.type);
+  const onSignalPress = useCallback((signal: Signal) => {
+    setSelectedSignal(signal);
+  }, []);
 
-    return (
-      <TouchableOpacity style={styles.signalCard} onPress={() => setSelectedSignal(item)}>
-        <View style={[styles.signalIcon, { backgroundColor: icon.color + '20' }]}>
-          <Ionicons name={icon.name as any} size={24} color={icon.color} />
-        </View>
-        <View style={styles.signalContent}>
-          <View style={styles.signalHeader}>
-            <Text style={styles.signalSymbol}>{item.symbol}</Text>
-            <Text style={styles.signalTime}>{formatTime(item.timestamp)}</Text>
-          </View>
-          <Text style={styles.signalMessage}>{item.message}</Text>
-          {item.profit && (
-            <View style={styles.signalProfit}>
-              <Ionicons name="trending-up" size={14} color={COLORS.success} />
-              <Text style={styles.signalProfitText}>
-                Potential: +{item.profit.toFixed(3)}%
-              </Text>
-            </View>
-          )}
-          <View style={styles.signalVenues}>
-            {item.venues.map((venue, index) => (
-              <View key={index} style={styles.venueBadge}>
-                <Text style={styles.venueBadgeText}>{venue}</Text>
-              </View>
-            ))}
-          </View>
-        </View>
-      </TouchableOpacity>
-    );
-  }, [setSelectedSignal]);
+  const renderSignal = useCallback(({ item }: { item: Signal }) => (
+    <SignalRow item={item} onPress={onSignalPress} compactMode={compactMode} />
+  ), [onSignalPress, compactMode]);
+
+  const listHeaderComponent = useMemo(() => (
+    signals.length > 0 ? (
+      <View style={styles.listHeader}>
+        <Text style={styles.signalCount}>
+          {filteredSignals.length} signals
+        </Text>
+        <TouchableOpacity onPress={clearSignals}>
+          <Text style={styles.clearButton}>Clear All</Text>
+        </TouchableOpacity>
+      </View>
+    ) : null
+  ), [signals.length, filteredSignals.length, clearSignals]);
 
   const FilterButton = ({ type, label }: { type: SignalType; label: string }) => (
     <TouchableOpacity
@@ -517,6 +627,13 @@ export default function SignalsScreen() {
       <View style={styles.header}>
         <Text style={styles.title}>Trading Signals</Text>
         <View style={styles.headerRight}>
+          <Text style={styles.autoRefreshLabel}>Brief</Text>
+          <Switch
+            value={compactMode}
+            onValueChange={setCompactMode}
+            trackColor={{ false: COLORS.border, true: COLORS.primary }}
+            thumbColor={COLORS.text}
+          />
           <Text style={styles.autoRefreshLabel}>Auto</Text>
           <Switch
             value={autoRefresh}
@@ -566,6 +683,8 @@ export default function SignalsScreen() {
         initialNumToRender={8}
         updateCellsBatchingPeriod={50}
         getItemLayout={getSignalItemLayout}
+        scrollEventThrottle={16}
+        legacyImplementation={false}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
@@ -582,18 +701,7 @@ export default function SignalsScreen() {
             </Text>
           </View>
         }
-        ListHeaderComponent={
-          signals.length > 0 ? (
-            <View style={styles.listHeader}>
-              <Text style={styles.signalCount}>
-                {filteredSignals.length} signals
-              </Text>
-              <TouchableOpacity onPress={clearSignals}>
-                <Text style={styles.clearButton}>Clear All</Text>
-              </TouchableOpacity>
-            </View>
-          ) : null
-        }
+        ListHeaderComponent={listHeaderComponent}
       />
 
       <Modal visible={!!selectedSignal} transparent animationType="slide" onRequestClose={() => setSelectedSignal(null)}>
