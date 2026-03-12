@@ -63,6 +63,22 @@ const normalizeSignalMessage = (message: string): string => {
     .trim();
 };
 
+const toCompactSignalMessage = (message: string): string => {
+  const compact = message
+    .replace(/\s+/g, ' ')
+    .replace(/\s*[-–—]\s*/g, ' — ')
+    .trim();
+
+  if (compact.length <= 88) return compact;
+
+  const firstSentence = compact.split(/[.!?]/)[0]?.trim();
+  if (firstSentence && firstSentence.length >= 24 && firstSentence.length <= 88) {
+    return firstSentence;
+  }
+
+  return `${compact.slice(0, 85).trimEnd()}…`;
+};
+
 const SIGNAL_REFRESH_MS: Record<string, number> = {
   free: 20000,
   starter: 15000,
@@ -105,10 +121,13 @@ const formatSignalTime = (timestamp: number) => {
 type SignalRowProps = {
   item: Signal;
   onPress: (signal: Signal) => void;
+  compactMode: boolean;
 };
 
-const SignalRow = React.memo(({ item, onPress }: SignalRowProps) => {
+const SignalRow = React.memo(({ item, onPress, compactMode }: SignalRowProps) => {
   const icon = getSignalIcon(item.type);
+  const compactMessage = useMemo(() => toCompactSignalMessage(item.message), [item.message]);
+  const renderedMessage = compactMode ? compactMessage : item.message;
 
   return (
     <TouchableOpacity style={styles.signalCard} onPress={() => onPress(item)}>
@@ -120,7 +139,9 @@ const SignalRow = React.memo(({ item, onPress }: SignalRowProps) => {
           <Text style={styles.signalSymbol}>{item.symbol}</Text>
           <Text style={styles.signalTime}>{formatSignalTime(item.timestamp)}</Text>
         </View>
-        <Text style={styles.signalMessage}>{item.message}</Text>
+        <Text style={styles.signalMessage} numberOfLines={compactMode ? 2 : 3} ellipsizeMode="tail">
+          {renderedMessage}
+        </Text>
         {item.profit && (
           <View style={styles.signalProfit}>
             <Ionicons name="trending-up" size={14} color={COLORS.success} />
@@ -148,6 +169,7 @@ export default function SignalsScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<SignalType>('all');
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [compactMode, setCompactMode] = useState(true);
   const [selectedSignal, setSelectedSignal] = useState<Signal | null>(null);
   const [modalRefPrice, setModalRefPrice] = useState<number | null>(null);
   const notificationReadyRef = useRef(false);
@@ -567,8 +589,8 @@ export default function SignalsScreen() {
   }, []);
 
   const renderSignal = useCallback(({ item }: { item: Signal }) => (
-    <SignalRow item={item} onPress={onSignalPress} />
-  ), [onSignalPress]);
+    <SignalRow item={item} onPress={onSignalPress} compactMode={compactMode} />
+  ), [onSignalPress, compactMode]);
 
   const listHeaderComponent = useMemo(() => (
     signals.length > 0 ? (
@@ -605,6 +627,13 @@ export default function SignalsScreen() {
       <View style={styles.header}>
         <Text style={styles.title}>Trading Signals</Text>
         <View style={styles.headerRight}>
+          <Text style={styles.autoRefreshLabel}>Brief</Text>
+          <Switch
+            value={compactMode}
+            onValueChange={setCompactMode}
+            trackColor={{ false: COLORS.border, true: COLORS.primary }}
+            thumbColor={COLORS.text}
+          />
           <Text style={styles.autoRefreshLabel}>Auto</Text>
           <Switch
             value={autoRefresh}
