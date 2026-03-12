@@ -368,6 +368,12 @@ async def sentinel_technicals(request: Request, symbol: str = Query("BTC/USDT"),
             "value": result.williams_r,
             "signal": result.williams_r_signal,
         },
+        # Orderbook depth buckets
+        "orderbook": {
+            "imbalance": result.orderbook_imbalance,
+            "score": result.orderbook_score,
+            "buckets": result.orderbook_buckets,
+        },
         # Fibonacci
         "nearest_fib": result.nearest_fib,
         "fib_levels": result.fib_levels,

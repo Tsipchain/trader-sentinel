@@ -1,5 +1,6 @@
 from app.brain.connector import _adapt_symbol
 from app.brain.sleep_trader import _sl_tp_for_leverage, _position_size
+from app.sentinel.technicals import _orderbook_bucket_profile
 
 
 def test_symbol_normalization_spot_vs_futures_suffix():
@@ -30,3 +31,15 @@ def test_position_size_non_decreasing_with_leverage_for_small_base():
 
     assert a2 >= a1
     assert a3 >= a2
+
+
+def test_orderbook_bucket_profile_detects_bid_pressure():
+    orderbook = {
+        "bids": [[100.0, 0.1], [99.5, 1.2], [99.0, 10.0]],
+        "asks": [[100.5, 0.05], [101.0, 0.2], [101.5, 0.5]],
+    }
+    buckets, imbalance, score = _orderbook_bucket_profile(orderbook)
+
+    assert len(buckets) >= 6
+    assert imbalance > 0
+    assert score > 0
