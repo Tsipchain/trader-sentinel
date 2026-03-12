@@ -124,7 +124,7 @@ type SignalRowProps = {
   compactMode: boolean;
 };
 
-const SignalRow = React.memo(({ item, onPress, compactMode }: SignalRowProps) => {
+const SignalRow = ({ item, onPress, compactMode }: SignalRowProps) => {
   const icon = getSignalIcon(item.type);
   const compactMessage = useMemo(() => toCompactSignalMessage(item.message), [item.message]);
   const renderedMessage = compactMode ? compactMessage : item.message;
@@ -160,12 +160,26 @@ const SignalRow = React.memo(({ item, onPress, compactMode }: SignalRowProps) =>
       </View>
     </TouchableOpacity>
   );
-});
+};
 
 SignalRow.displayName = 'SignalRow';
 
+const areSignalRowPropsEqual = (prev: SignalRowProps, next: SignalRowProps) => {
+  if (prev.compactMode != next.compactMode) return false;
+  if (prev.item.id !== next.item.id) return false;
+  if (prev.item.timestamp !== next.item.timestamp) return false;
+  if (prev.item.message !== next.item.message) return false;
+  if (prev.item.symbol !== next.item.symbol) return false;
+  if ((prev.item.profit ?? null) !== (next.item.profit ?? null)) return false;
+  if (prev.item.venues.length !== next.item.venues.length) return false;
+  if (prev.item.venues.join('|') !== next.item.venues.join('|')) return false;
+  return true;
+};
+
+const MemoSignalRow = React.memo(SignalRow, areSignalRowPropsEqual);
+
 export default function SignalsScreen() {
-  const { signals, addSignal, clearSignals, watchlist, settings, subscription, marketData, user } = useStore();
+  const { signals, addSignal, clearSignals, watchlist, settings, subscription, user } = useStore();
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<SignalType>('all');
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -436,8 +450,9 @@ export default function SignalsScreen() {
       }
 
       const symbolKeys = resolveSignalSymbolKeys(selectedSignal.symbol);
+      const marketDataState = useStore.getState().marketData;
       const cached = symbolKeys
-        .map((key) => marketData[key])
+        .map((key) => marketDataState[key])
         .find((value) => value != null);
       const cachedRef = cached?.bestAsk || cached?.bestBid || cached?.prices?.[0]?.price || null;
       const msgPrice = extractReferencePriceFromSignalMessage(selectedSignal.message);
@@ -462,7 +477,7 @@ export default function SignalsScreen() {
     return () => {
       cancelled = true;
     };
-  }, [selectedSignal, marketData]);
+  }, [selectedSignal]);
 
   const inferTradePlan = useCallback((signal: Signal) => {
     const isShort = /short|defensive|bear/i.test(signal.message);
@@ -503,8 +518,9 @@ export default function SignalsScreen() {
     const leverageBand = liquidityTight ? '1x-2x' : (highVolatility ? '2x-3x' : '3x-5x');
     const validationWindow = highVolatility ? '15-45 min' : '30-120 min';
 
+    const marketDataState = useStore.getState().marketData;
     const symbolMarket = resolveSignalSymbolKeys(signal.symbol)
-      .map((key) => marketData[key])
+      .map((key) => marketDataState[key])
       .find((value) => value != null);
     const messagePrice = extractReferencePriceFromSignalMessage(signal.message);
     const refPrice = modalRefPrice || messagePrice || symbolMarket?.bestAsk || symbolMarket?.bestBid || symbolMarket?.prices?.[0]?.price;
@@ -548,7 +564,7 @@ export default function SignalsScreen() {
       validationWindow,
       note,
     };
-  }, [marketData, modalRefPrice]);
+  }, [modalRefPrice]);
 
   useEffect(() => {
     fetchSignals();
@@ -589,7 +605,7 @@ export default function SignalsScreen() {
   }, []);
 
   const renderSignal = useCallback(({ item }: { item: Signal }) => (
-    <SignalRow item={item} onPress={onSignalPress} compactMode={compactMode} />
+    <MemoSignalRow item={item} onPress={onSignalPress} compactMode={compactMode} />
   ), [onSignalPress, compactMode]);
 
   const listHeaderComponent = useMemo(() => (
