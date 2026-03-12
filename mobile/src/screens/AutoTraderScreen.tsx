@@ -147,6 +147,8 @@ export default function AutoTraderScreen() {
     positions: [],
     usedMargin: 0,
     maxLeverageBySymbol: {},
+    futures: { equity: 0, quoteAsset: 'USDT', quoteFree: 0, quoteUsed: 0, quoteTotal: 0 },
+    spot: { equity: 0, quoteAsset: 'USDT', quoteFree: 0, quoteUsed: 0, quoteTotal: 0 },
     lastSyncTs: null,
   };
   const exchangeAvailability = autoTrader.exchangeAvailability ?? {};
@@ -349,6 +351,20 @@ export default function AutoTraderScreen() {
           positions: res.snapshot.positions,
           usedMargin: res.snapshot.usedMargin,
           maxLeverageBySymbol: res.snapshot.maxLeverageBySymbol,
+          futures: {
+            equity: res.snapshot.futures?.equity ?? 0,
+            quoteAsset: res.snapshot.futures?.quoteAsset ?? 'USDT',
+            quoteFree: res.snapshot.futures?.quoteFree ?? 0,
+            quoteUsed: res.snapshot.futures?.quoteUsed ?? 0,
+            quoteTotal: res.snapshot.futures?.quoteTotal ?? 0,
+          },
+          spot: {
+            equity: res.snapshot.spot?.equity ?? 0,
+            quoteAsset: res.snapshot.spot?.quoteAsset ?? 'USDT',
+            quoteFree: res.snapshot.spot?.quoteFree ?? 0,
+            quoteUsed: res.snapshot.spot?.quoteUsed ?? 0,
+            quoteTotal: res.snapshot.spot?.quoteTotal ?? 0,
+          },
           lastSyncTs: Date.now(),
         },
       });
@@ -405,10 +421,15 @@ export default function AutoTraderScreen() {
               const ok = await ensureFreshSnapshot();
               if (!ok) return;
 
-              if ((portfolio.equity || 0) < 50) {
+              const futuresFree = portfolio.futures?.quoteFree ?? 0;
+              const spotFree = portfolio.spot?.quoteFree ?? 0;
+              const effectiveTradable = cfg.exchange.toLowerCase() === 'mexc'
+                ? Math.max(spotFree, futuresFree)
+                : Math.max(futuresFree, spotFree);
+              if (effectiveTradable < 5) {
                 Alert.alert(
-                  'Minimum Balance Required',
-                  'AutoTrader requires at least 50 USDT equity in your trading account before activation.',
+                  'Minimum Tradable Balance Required',
+                  `AutoTrader needs available ${portfolio.futures?.quoteAsset ?? 'USDT'} in the target wallet. Futures free: ${futuresFree.toFixed(2)}, Spot free: ${spotFree.toFixed(2)}.`,
                 );
                 return;
               }
@@ -443,9 +464,10 @@ export default function AutoTraderScreen() {
 
   const handleStartSleep = () => {
     if (!user?.id || !isEnabled) return;
+    const plannedSleepHours = cfg.exchange.toLowerCase() === 'mexc' ? 48 : 8;
     Alert.alert(
       'Activate Sleep Mode?',
-      `Sentinel will autonomously trade ${cfg.symbols.join(', ')} on ${(cfg.exchange || '').toUpperCase()} for up to 8 hours while you rest.\n\nObjective: ${sleepTargetRange} portfolio return range (not guaranteed).\nRisk controls: SL/TP + protection checks.\nMax leverage: ${cfg.maxLeverage}x\nPortfolio: $${(portfolio.equity ?? 0).toFixed(2)}`,
+      `Sentinel will autonomously trade ${cfg.symbols.join(', ')} on ${(cfg.exchange || '').toUpperCase()} for up to ${plannedSleepHours} hours while you rest.\n\nObjective: steady risk-managed execution window (not guaranteed).\nRisk controls: SL/TP + protection checks.\nMax leverage: ${cfg.maxLeverage}x\nPortfolio: $${(portfolio.equity ?? 0).toFixed(2)}`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -464,10 +486,12 @@ export default function AutoTraderScreen() {
                 risk_per_trade_pct: cfg.riskPerTradePct,
                 max_total_exposure_pct: cfg.maxTotalExposurePct,
                 entry_margin_pct: 0.088,
+                sleep_duration_hours: plannedSleepHours,
               });
               if (res.ok) {
                 const startedAt = Date.now() / 1000;
-                const endsAt = startedAt + (8 * 3600);
+                const durationHours = res.duration_hours ?? plannedSleepHours;
+                const endsAt = startedAt + (durationHours * 3600);
                 setSleepModeStatus({
                   active: true,
                   status: 'running',
@@ -476,7 +500,7 @@ export default function AutoTraderScreen() {
                   started_at: startedAt,
                   ends_at: endsAt,
                   elapsed_s: 0,
-                  remaining_s: 8 * 3600,
+                  remaining_s: (res.duration_hours ?? plannedSleepHours) * 3600,
                 });
               } else {
                 Alert.alert('Sleep Mode', res.error || 'Could not start sleep mode.');
@@ -687,7 +711,7 @@ export default function AutoTraderScreen() {
               </Text>
             </View>
             <Text style={{ color: COLORS.textSecondary, fontSize: FONT_SIZES.xs, marginBottom: SPACING.md, lineHeight: 16 }}>
-              {`Activate when you go to sleep. Sentinel runs for up to 8 hours with an objective of ${sleepTargetRange} portfolio return (not guaranteed), using TA-driven entries and SL/TP protection.`}
+              {`Activate when you go to sleep. Sentinel runs in a configurable window (up to 48h for MEXC) with risk-managed execution (not guaranteed), using TA-driven entries and SL/TP protection.`}
             </Text>
 
             {!sleepModeStatus.active ? (
@@ -701,7 +725,7 @@ export default function AutoTraderScreen() {
                 ) : (
                   <>
                     <Ionicons name="moon" size={18} color="#fff" />
-                    <Text style={styles.sleepBtnText}>Start Sleep Mode (8h)</Text>
+                    <Text style={styles.sleepBtnText}>{`Start Sleep Mode (${cfg.exchange.toLowerCase() === 'mexc' ? 48 : 8}h)`}</Text>
                   </>
                 )}
               </TouchableOpacity>
@@ -915,7 +939,11 @@ export default function AutoTraderScreen() {
 
           {portfolio.lastSyncTs && (
             <Text style={styles.syncMeta}>
-              Synced {new Date(portfolio.lastSyncTs).toLocaleTimeString()} · Equity ${(portfolio.equity ?? 0).toFixed(2)} · Used Margin ${(portfolio.usedMargin ?? 0).toFixed(2)}
+              {`Synced ${new Date(portfolio.lastSyncTs).toLocaleTimeString()} · Total Equity $${(portfolio.equity ?? 0).toFixed(2)} · Used Margin $${(portfolio.usedMargin ?? 0).toFixed(2)}
+` +
+                `Futures ${portfolio.futures?.quoteAsset ?? 'USDT'} — Free $${(portfolio.futures?.quoteFree ?? 0).toFixed(2)} · Used $${(portfolio.futures?.quoteUsed ?? 0).toFixed(2)} · Total $${(portfolio.futures?.quoteTotal ?? 0).toFixed(2)}
+` +
+                `Spot ${portfolio.spot?.quoteAsset ?? 'USDT'} — Free $${(portfolio.spot?.quoteFree ?? 0).toFixed(2)} · Used $${(portfolio.spot?.quoteUsed ?? 0).toFixed(2)} · Total $${(portfolio.spot?.quoteTotal ?? 0).toFixed(2)}`}
             </Text>
           )}
 

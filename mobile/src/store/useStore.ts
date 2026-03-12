@@ -88,6 +88,20 @@ export interface PortfolioState {
   }>;
   usedMargin: number;
   maxLeverageBySymbol: Record<string, number>;
+  futures: {
+    equity: number;
+    quoteAsset: string;
+    quoteFree: number;
+    quoteUsed: number;
+    quoteTotal: number;
+  };
+  spot: {
+    equity: number;
+    quoteAsset: string;
+    quoteFree: number;
+    quoteUsed: number;
+    quoteTotal: number;
+  };
   lastSyncTs: number | null;
 }
 
@@ -113,6 +127,8 @@ const DEFAULT_PORTFOLIO: PortfolioState = {
   positions: [],
   usedMargin: 0,
   maxLeverageBySymbol: {},
+  futures: { equity: 0, quoteAsset: 'USDT', quoteFree: 0, quoteUsed: 0, quoteTotal: 0 },
+  spot: { equity: 0, quoteAsset: 'USDT', quoteFree: 0, quoteUsed: 0, quoteTotal: 0 },
   lastSyncTs: null,
 };
 
