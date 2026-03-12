@@ -160,6 +160,73 @@ def _adapt_symbol(symbol: str, market_type: str) -> str:
     return symbol
 
 
+def _pick_first_number(*values: Any) -> float:
+    for value in values:
+        if value is None:
+            continue
+        try:
+            f = float(value)
+            if f == f:
+                return f
+        except Exception:
+            continue
+    return 0.0
+
+
+def _extract_quote_metrics_from_balance(balance: dict[str, Any], quote_asset: str = "USDT") -> tuple[float, float, float]:
+    totals = balance.get("total") or {}
+    frees = balance.get("free") or {}
+    useds = balance.get("used") or {}
+
+    quote_total = _pick_first_number(
+        totals.get(quote_asset),
+        (balance.get(quote_asset) or {}).get("total"),
+        (balance.get(quote_asset) or {}).get("walletBalance"),
+    )
+    quote_free = _pick_first_number(
+        frees.get(quote_asset),
+        (balance.get(quote_asset) or {}).get("free"),
+        (balance.get(quote_asset) or {}).get("available"),
+        (balance.get(quote_asset) or {}).get("availableBalance"),
+    )
+    quote_used = _pick_first_number(
+        useds.get(quote_asset),
+        (balance.get(quote_asset) or {}).get("used"),
+        (balance.get(quote_asset) or {}).get("frozen"),
+        (balance.get(quote_asset) or {}).get("frozenBalance"),
+    )
+
+    info = balance.get("info") or {}
+    quote_total = quote_total or _pick_first_number(
+        info.get("equity"), info.get("totalMarginBalance"), info.get("walletBalance"), info.get("balance")
+    )
+    quote_free = quote_free or _pick_first_number(
+        info.get("availableBalance"), info.get("availableMargin"), info.get("free")
+    )
+    quote_used = quote_used or _pick_first_number(
+        info.get("usedMargin"), info.get("positionMargin"), info.get("frozenBalance"), info.get("locked")
+    )
+
+    if quote_used <= 0 and quote_total > 0 and quote_free >= 0:
+        quote_used = max(0.0, quote_total - quote_free)
+
+    return float(quote_total), float(quote_free), float(quote_used)
+
+
+def _estimate_used_margin_from_positions(positions: list[dict[str, Any]]) -> float:
+    estimated = 0.0
+    for pos in positions:
+        initial_margin = _pick_first_number(pos.get("initialMargin"), (pos.get("info") or {}).get("initialMargin"))
+        if initial_margin > 0:
+            estimated += initial_margin
+            continue
+        notional = abs(_pick_first_number(pos.get("notional"), (pos.get("info") or {}).get("notional")))
+        lev = _pick_first_number(pos.get("leverage"), (pos.get("info") or {}).get("leverage"))
+        if notional > 0 and lev > 0:
+            estimated += notional / max(lev, 1.0)
+    return float(estimated)
+
+
 async def fetch_exchange_snapshot(
     exchange: str,
     api_key: str,
@@ -189,7 +256,9 @@ async def fetch_exchange_snapshot(
         else:
             all_balance_map[asset] = b
 
-    equity = futures_data.get("equity", 0) + spot_data.get("equity", 0)
+    futures_equity = float(futures_data.get("equity") or 0)
+    spot_equity = float(spot_data.get("equity") or 0)
+    equity = futures_equity + spot_equity
     used_margin = futures_data.get("usedMargin", 0)
 
     return {
@@ -198,6 +267,20 @@ async def fetch_exchange_snapshot(
         "positions": positions,
         "usedMargin": used_margin,
         "maxLeverageBySymbol": futures_data.get("maxLeverageBySymbol", {}),
+        "futures": {
+            "equity": futures_equity,
+            "quoteAsset": futures_data.get("quoteAsset", "USDT"),
+            "quoteFree": float(futures_data.get("quoteFree") or 0),
+            "quoteUsed": float(futures_data.get("quoteUsed") or 0),
+            "quoteTotal": float(futures_data.get("quoteTotal") or 0),
+        },
+        "spot": {
+            "equity": spot_equity,
+            "quoteAsset": spot_data.get("quoteAsset", "USDT"),
+            "quoteFree": float(spot_data.get("quoteFree") or 0),
+            "quoteUsed": float(spot_data.get("quoteUsed") or 0),
+            "quoteTotal": float(spot_data.get("quoteTotal") or 0),
+        },
         "ts": time.time(),
     }
 
@@ -236,12 +319,25 @@ async def _fetch_snapshot_for_type(
                 "used": float(useds.get(asset) or 0),
             })
 
-        used_margin = float(useds.get("USDT") or bal.get("usedMargin") or 0)
+        quote_asset = "USDT"
+        quote_total, quote_free, quote_used = _extract_quote_metrics_from_balance(bal, quote_asset)
+
+        used_margin = float(
+            _pick_first_number(
+                useds.get(quote_asset),
+                bal.get("usedMargin"),
+                (bal.get("info") or {}).get("usedMargin"),
+                (bal.get("info") or {}).get("positionMargin"),
+            )
+        )
         equity = float(
-            totals.get("USDT")
-            or (bal.get("USDT") or {}).get("total")
-            or sum(b.get("total", 0) for b in balances)
-            or 0
+            _pick_first_number(
+                totals.get(quote_asset),
+                (bal.get(quote_asset) or {}).get("total"),
+                (bal.get("info") or {}).get("equity"),
+                (bal.get("info") or {}).get("totalMarginBalance"),
+                sum(b.get("total", 0) for b in balances),
+            )
         )
 
         normalized_positions = []
@@ -267,17 +363,33 @@ async def _fetch_snapshot_for_type(
             if leverage > (max_lev_by_symbol.get(symbol) or 0):
                 max_lev_by_symbol[symbol] = leverage
 
+        if market_type == "futures":
+            estimated_used_margin = _estimate_used_margin_from_positions(positions)
+            if estimated_used_margin > 0 and (used_margin <= 0 or abs(estimated_used_margin - used_margin) / max(estimated_used_margin, 1.0) > 0.4):
+                used_margin = estimated_used_margin
+            if equity <= 0 and quote_total > 0:
+                equity = quote_total
+            if quote_used <= 0 and used_margin > 0:
+                quote_used = used_margin
+            if quote_free <= 0 and equity > 0 and quote_used >= 0:
+                quote_free = max(0.0, equity - quote_used)
+
         return {
             "equity": equity,
             "balances": balances,
             "positions": normalized_positions,
             "usedMargin": used_margin,
             "maxLeverageBySymbol": max_lev_by_symbol,
+            "marketType": market_type,
+            "quoteAsset": quote_asset,
+            "quoteTotal": quote_total,
+            "quoteFree": quote_free,
+            "quoteUsed": quote_used,
             "ts": time.time(),
         }
     except Exception as e:
         log.warning("[connector] snapshot error for %s %s: %s", exchange, market_type, e)
-        return {"equity": 0, "balances": [], "positions": [], "usedMargin": 0, "maxLeverageBySymbol": {}, "ts": time.time()}
+        return {"equity": 0, "balances": [], "positions": [], "usedMargin": 0, "maxLeverageBySymbol": {}, "marketType": market_type, "quoteAsset": "USDT", "quoteTotal": 0, "quoteFree": 0, "quoteUsed": 0, "ts": time.time()}
     finally:
         await ex.close()
 
@@ -902,5 +1014,64 @@ async def get_funding_snapshot(
         }
     except Exception as e:
         return {"ok": False, "symbol": symbol, "error": str(e)}
+    finally:
+        await ex.close()
+
+
+async def create_spot_market_order(
+    exchange: str,
+    api_key: str,
+    api_secret: str,
+    symbol: str,
+    side: str,
+    amount: float,
+    passphrase: str | None = None,
+) -> dict[str, Any]:
+    """Place a market order on spot market. Returns order info."""
+    ex = _build_exchange(exchange, api_key, api_secret, passphrase, market_type="spot")
+    try:
+        spot_symbol = _adapt_symbol(symbol, "spot")
+        order = await ex.create_order(
+            symbol=spot_symbol,
+            type="market",
+            side=side,
+            amount=amount,
+        )
+        log.info("[exec] spot market %s %s %.6f on %s → %s", side, spot_symbol, amount, exchange, order.get("id"))
+        return {
+            "ok": True,
+            "id": order.get("id"),
+            "symbol": spot_symbol,
+            "side": side,
+            "amount": amount,
+            "price": float(order.get("average") or order.get("price") or 0),
+            "cost": float(order.get("cost") or 0),
+            "status": order.get("status"),
+            "timestamp": order.get("timestamp"),
+            "market_type": "spot",
+        }
+    except Exception as e:
+        err = str(e)
+        log.error("[exec] spot market order failed %s %s: %s", side, symbol, e)
+        return {"ok": False, "error": err, "market_type": "spot"}
+    finally:
+        await ex.close()
+
+
+async def get_spot_ticker_price(
+    exchange: str,
+    api_key: str,
+    api_secret: str,
+    symbol: str,
+    passphrase: str | None = None,
+) -> float:
+    """Fetch current spot price for a symbol."""
+    ex = _build_exchange(exchange, api_key, api_secret, passphrase, market_type="spot")
+    try:
+        spot_symbol = _adapt_symbol(symbol, "spot")
+        ticker = await ex.fetch_ticker(spot_symbol)
+        return float(ticker.get("last") or ticker.get("close") or 0)
+    except Exception:
+        return 0.0
     finally:
         await ex.close()

@@ -113,6 +113,10 @@ class TechnicalResult:
     # Williams %R
     williams_r: float | None = None
     williams_r_signal: str = "unknown"  # "overbought" | "oversold" | "neutral"
+    # Order-book depth (base-size bucketed)
+    orderbook_imbalance: float | None = None   # -1..+1 (bids stronger -> positive)
+    orderbook_score: float = 0.0               # 0..10 (higher = more one-sided stress)
+    orderbook_buckets: list[dict] = field(default_factory=list)
     error: str | None = None
 
 
@@ -354,6 +358,89 @@ def _fibonacci_levels(high: float, low: float, current: float) -> tuple[list[dic
     return levels, nearest
 
 
+def _bucket_label(low: float, high: float | None) -> str:
+    if high is None:
+        return f">={low:g}"
+    return f"{low:g}-{high:g}"
+
+
+def _orderbook_bucket_profile(orderbook: dict[str, list[list[float]]]) -> tuple[list[dict], float, float]:
+    """Aggregate bids/asks by base-asset size buckets (e.g., 0.001, 0.01, 0.1, 1, 10, 100)."""
+    buckets = [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]
+    edges: list[tuple[float, float | None]] = [(buckets[i], buckets[i + 1]) for i in range(len(buckets) - 1)]
+    edges.append((buckets[-1], None))
+
+    profile: list[dict] = []
+    total_bid_notional = 0.0
+    total_ask_notional = 0.0
+
+    for low, high in edges:
+        bid_notional = 0.0
+        ask_notional = 0.0
+        for price, amount, *_ in orderbook.get("bids", []) or []:
+            if amount is None or price is None:
+                continue
+            amt = float(amount)
+            if amt < low:
+                continue
+            if high is not None and amt >= high:
+                continue
+            bid_notional += float(price) * amt
+
+        for price, amount, *_ in orderbook.get("asks", []) or []:
+            if amount is None or price is None:
+                continue
+            amt = float(amount)
+            if amt < low:
+                continue
+            if high is not None and amt >= high:
+                continue
+            ask_notional += float(price) * amt
+
+        total_bid_notional += bid_notional
+        total_ask_notional += ask_notional
+        combined = bid_notional + ask_notional
+        imbalance = ((bid_notional - ask_notional) / combined) if combined > 0 else 0.0
+
+        profile.append({
+            "size_bucket": _bucket_label(low, high),
+            "bid_notional": round(bid_notional, 2),
+            "ask_notional": round(ask_notional, 2),
+            "imbalance": round(imbalance, 4),
+        })
+
+    total = total_bid_notional + total_ask_notional
+    overall_imbalance = ((total_bid_notional - total_ask_notional) / total) if total > 0 else 0.0
+    stress_score = min(10.0, abs(overall_imbalance) * 10.0)
+    return profile, overall_imbalance, stress_score
+
+
+async def _fetch_orderbook(symbol: str, exchange_id: str = "binance", limit: int = 200) -> dict[str, list[list[float]]]:
+    order = [exchange_id] + [e for e in _FALLBACK_EXCHANGES if e != exchange_id]
+    if _ccxt_module() is None:
+        return {"bids": [], "asks": []}
+
+    for ex_id in order:
+        blocked_until = _BLOCKED_EXCHANGES_UNTIL.get(ex_id, 0)
+        if blocked_until > time.time():
+            continue
+        try:
+            ex = _get_or_create_exchange(ex_id)
+            ob = await ex.fetch_order_book(symbol, limit=limit)
+            bids = ob.get("bids") or []
+            asks = ob.get("asks") or []
+            if bids or asks:
+                return {"bids": bids, "asks": asks}
+        except Exception as exc:
+            if _is_geo_block(exc):
+                _BLOCKED_EXCHANGES_UNTIL[ex_id] = time.time() + _BLOCK_SECONDS
+            log.warning("Orderbook fetch failed on %s for %s: %s", ex_id, symbol, exc)
+
+    return {"bids": [], "asks": []}
+
+
+
+
 # ── Main calculation ───────────────────────────────────────────────────────────
 
 async def calculate(symbol: str = "BTC/USDT") -> TechnicalResult:
@@ -364,6 +451,7 @@ async def calculate(symbol: str = "BTC/USDT") -> TechnicalResult:
             return cached
 
     candles = await _fetch_ohlcv(symbol, limit=60)
+    orderbook = await _fetch_orderbook(symbol, limit=200)
 
     if not candles or len(candles) < 20:
         log.error(
@@ -485,15 +573,19 @@ async def calculate(symbol: str = "BTC/USDT") -> TechnicalResult:
         williams_r_signal = "unknown"
         wr_score = 0.0
 
+    # ── Orderbook depth pressure (bucketed by base-size) ─────────────────────
+    ob_buckets, ob_imbalance, ob_score = _orderbook_bucket_profile(orderbook)
+
     # ── Composite Technical Score ─────────────────────────────────────────────
-    # Weights: RSI 30%, Volatility 22%, Fib 13%, MACD 15%, BB 10%, Williams %R 10%
+    # Weights: RSI 28%, Volatility 20%, Fib 12%, MACD 14%, BB 9%, Williams %R 9%, Orderbook 8%
     score = round(min(10.0, (
-        rsi_score        * 0.30
-        + volatility_score * 0.22
-        + fib_score        * 0.13
-        + macd_score       * 0.15
-        + bb_score         * 0.10
-        + wr_score         * 0.10
+        rsi_score         * 0.28
+        + volatility_score * 0.20
+        + fib_score         * 0.12
+        + macd_score        * 0.14
+        + bb_score          * 0.09
+        + wr_score          * 0.09
+        + ob_score          * 0.08
     )), 2)
 
     result = TechnicalResult(
@@ -520,6 +612,9 @@ async def calculate(symbol: str = "BTC/USDT") -> TechnicalResult:
         ema_cross=ema_cross,
         williams_r=wr,
         williams_r_signal=williams_r_signal,
+        orderbook_imbalance=round(ob_imbalance, 4),
+        orderbook_score=round(ob_score, 2),
+        orderbook_buckets=ob_buckets,
     )
     _CACHE[cache_key] = (time.time(), result)
     return result

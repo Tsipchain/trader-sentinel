@@ -49,6 +49,8 @@ const AVAILABLE_PAIRS = [
   'MATIC/USDT', 'LTC/USDT', 'UNI/USDT', 'NEAR/USDT', 'FIL/USDT',
   'ARB/USDT', 'OP/USDT', 'APT/USDT', 'SUI/USDT', 'PEPE/USDT',
   'WIF/USDT', 'SHIB/USDT', 'ATOM/USDT', 'TRX/USDT',
+  // Metals / commodities (symbol availability depends on venue)
+  'XAG/USDT', 'XAU/USDT', 'PAXG/USDT', 'XAUT/USDT', 'COPPER/USDT', 'XCU/USDT',
 ];
 
 

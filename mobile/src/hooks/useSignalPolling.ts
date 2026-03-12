@@ -38,6 +38,8 @@ const SENTINEL_SCAN_PAIRS = [
   'MATIC/USDT', 'ARB/USDT', 'OP/USDT', 'SUI/USDT', 'APT/USDT',
   'PEPE/USDT', 'WIF/USDT', 'FET/USDT', 'INJ/USDT', 'TIA/USDT',
   'RENDER/USDT', 'FIL/USDT', 'ATOM/USDT', 'LTC/USDT',
+  // Metals / commodities pairs (availability differs by exchange)
+  'XAG/USDT', 'XAU/USDT', 'PAXG/USDT', 'XAUT/USDT', 'COPPER/USDT', 'XCU/USDT',
 ];
 
 /** Tier-based pair access for directional signals: free=BTC only, starter=BTC+ETH, pro+=all */
