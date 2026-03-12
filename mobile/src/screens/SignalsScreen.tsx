@@ -27,6 +27,22 @@ type TierSignalPolicy = {
 };
 
 
+const SYMBOL_ALIAS_CANDIDATES: Record<string, string[]> = {
+  'SILVER/USDT': ['XAG/USDT', 'SILVER/USDT', 'XAGUSDT', 'SILVERUSDT'],
+  'SILVERUSDT': ['XAG/USDT', 'SILVER/USDT', 'XAGUSDT', 'SILVERUSDT'],
+  'XAG/USDT': ['XAG/USDT', 'SILVER/USDT', 'XAGUSDT', 'SILVERUSDT'],
+  'XAGUSDT': ['XAG/USDT', 'SILVER/USDT', 'XAGUSDT', 'SILVERUSDT'],
+  'GOLD/USDT': ['XAU/USDT', 'PAXG/USDT', 'XAUT/USDT', 'GOLD/USDT', 'XAUUSDT', 'PAXGUSDT', 'XAUTUSDT'],
+  'GOLDUSDT': ['XAU/USDT', 'PAXG/USDT', 'XAUT/USDT', 'GOLD/USDT', 'XAUUSDT', 'PAXGUSDT', 'XAUTUSDT'],
+  'XAU/USDT': ['XAU/USDT', 'PAXG/USDT', 'XAUT/USDT', 'GOLD/USDT', 'XAUUSDT', 'PAXGUSDT', 'XAUTUSDT'],
+  'XAUUSDT': ['XAU/USDT', 'PAXG/USDT', 'XAUT/USDT', 'GOLD/USDT', 'XAUUSDT', 'PAXGUSDT', 'XAUTUSDT'],
+  'COPPER/USDT': ['COPPER/USDT', 'XCU/USDT', 'HG/USDT', 'COPPERUSDT', 'XCUUSDT', 'HGUSDT'],
+  'COPPERUSDT': ['COPPER/USDT', 'XCU/USDT', 'HG/USDT', 'COPPERUSDT', 'XCUUSDT', 'HGUSDT'],
+  'XCU/USDT': ['XCU/USDT', 'COPPER/USDT', 'HG/USDT', 'XCUUSDT', 'COPPERUSDT', 'HGUSDT'],
+  'XCUUSDT': ['XCU/USDT', 'COPPER/USDT', 'HG/USDT', 'XCUUSDT', 'COPPERUSDT', 'HGUSDT'],
+};
+
+
 const resolveSignalSymbolKeys = (rawSymbol: string) => {
   const normalized = rawSymbol.trim().toUpperCase();
   if (!normalized) return [] as string[];
@@ -39,7 +55,12 @@ const resolveSignalSymbolKeys = (rawSymbol: string) => {
   const compact = withSlash.replace('/', '');
   const base = withSlash.replace('/USDT', '');
 
-  return Array.from(new Set([rawSymbol, normalized, withSlash, compact, base]));
+  const aliasCandidates = SYMBOL_ALIAS_CANDIDATES[normalized]
+    ?? SYMBOL_ALIAS_CANDIDATES[withSlash]
+    ?? SYMBOL_ALIAS_CANDIDATES[compact]
+    ?? [];
+
+  return Array.from(new Set([rawSymbol, normalized, withSlash, compact, base, ...aliasCandidates]));
 };
 
 const extractReferencePriceFromSignalMessage = (message: string): number | null => {
