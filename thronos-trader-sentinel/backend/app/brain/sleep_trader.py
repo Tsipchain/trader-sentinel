@@ -9,6 +9,7 @@ Target: 25–30% portfolio profit across multiple small, high-conviction trades.
 """
 import asyncio
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -23,12 +24,27 @@ log = logging.getLogger(__name__)
 # ── Active sleep sessions (in-memory) ────────────────────────────────────────
 _active_sessions: dict[str, asyncio.Task] = {}
 
-SLEEP_DURATION_S = 8 * 3600  # 8 hours
+SLEEP_EXECUTION_MODE = os.getenv("SLEEP_EXECUTION_MODE", "worker").strip().lower()
+# worker(default): API writes desired state, external worker executes loops
+# api: run loops in-process (legacy mode)
+
+DEFAULT_SLEEP_DURATION_H = 8
+MAX_SLEEP_DURATION_H = 48
+
 SCAN_INTERVAL_S = 60         # re-scan every 60s
 MAX_TRADES_PER_SESSION = 40  # cap total trades in one sleep
 ENTRY_COOLDOWN_S = 180       # min 3 min between entries on same symbol
 MIN_CONFIDENCE = 0.52        # lower threshold to increase trade frequency in 8h mode
 DEFAULT_ENTRY_MARGIN_PCT = 0.088  # default margin allocation per new sleep entry
+
+
+def _resolve_sleep_duration_hours(config: dict[str, Any], exchange: str, execution_market: str) -> int:
+    requested = float(config.get("sleep_duration_hours") or 0)
+    if requested > 0:
+        return max(1, min(int(round(requested)), MAX_SLEEP_DURATION_H))
+    if exchange.lower() == "mexc" and execution_market == "spot":
+        return MAX_SLEEP_DURATION_H
+    return DEFAULT_SLEEP_DURATION_H
 
 
 def _is_contract_activation_error(error_text: str) -> bool:
@@ -334,9 +350,60 @@ def _evaluate_entry(ta: dict[str, Any], brain_pred: dict | None = None) -> tuple
 async def _manage_open_positions(
     session: dict,
     creds: dict,
+    execution_market: str = "futures",
 ) -> list[dict]:
-    """Check open positions and close profitable ones / cut losses."""
+    """Check open trades and close by TP/SL rules for futures or spot."""
     closed: list[dict] = []
+    tp_pct = float(session.get("config", {}).get("take_profit_pct", 4.0))
+    sl_pct = float(session.get("config", {}).get("stop_loss_pct", 2.0))
+
+    if execution_market == "spot":
+        for trade in session.get("sleep_trades", []):
+            if trade.get("status") != "open":
+                continue
+            if trade.get("market_type") != "spot":
+                continue
+            symbol = str(trade.get("symbol") or "")
+            entry_price = float(trade.get("entry_price") or 0)
+            amount = float(trade.get("amount") or 0)
+            if not symbol or entry_price <= 0 or amount <= 0:
+                continue
+
+            current_price = await connector.get_spot_ticker_price(
+                exchange=creds["exchange"],
+                api_key=creds["api_key"],
+                api_secret=creds["api_secret"],
+                symbol=symbol,
+                passphrase=creds.get("passphrase"),
+            )
+            if current_price <= 0:
+                continue
+
+            pnl_pct = ((current_price - entry_price) / entry_price) * 100
+            should_close = pnl_pct >= tp_pct or pnl_pct <= -sl_pct
+            if not should_close:
+                continue
+
+            result = await connector.create_spot_market_order(
+                exchange=creds["exchange"],
+                api_key=creds["api_key"],
+                api_secret=creds["api_secret"],
+                symbol=symbol,
+                side="sell",
+                amount=amount,
+                passphrase=creds.get("passphrase"),
+            )
+            if result.get("ok"):
+                reason = f"Spot TP hit: {pnl_pct:.1f}%" if pnl_pct >= tp_pct else f"Spot SL hit: {pnl_pct:.1f}%"
+                closed.append({
+                    "symbol": symbol,
+                    "reason": reason,
+                    "pnl_pct": pnl_pct,
+                    "unrealized_pnl": (current_price - entry_price) * amount,
+                    "closed_at": time.time(),
+                })
+        return closed
+
     try:
         positions = await connector.fetch_open_positions(
             exchange=creds["exchange"],
@@ -348,27 +415,21 @@ async def _manage_open_positions(
         log.warning("[sleep] fetch positions failed: %s", e)
         return closed
 
-    tp_pct = session.get("config", {}).get("take_profit_pct", 4.0)
-    sl_pct = session.get("config", {}).get("stop_loss_pct", 2.0)
-
     sleep_trades = session.get("sleep_trades", [])
     sleep_trade_symbols = {t["symbol"] for t in sleep_trades if t.get("status") == "open"}
 
     for pos in positions:
         sym = _canonical_symbol(pos.get("symbol", ""))
         if sym not in sleep_trade_symbols:
-            continue  # not our trade
+            continue
 
         pnl_pct = pos.get("pnlPct", 0)
         leverage = pos.get("leverage", 1)
-
-        # Dynamic TP: leverage-adjusted
-        effective_tp = tp_pct * leverage * 0.7  # 70% of theoretical max
+        effective_tp = tp_pct * leverage * 0.7
         effective_sl = sl_pct * leverage * 0.5
 
         should_close = False
         reason = ""
-
         if pnl_pct >= effective_tp:
             should_close = True
             reason = f"TP hit: {pnl_pct:.1f}% (target {effective_tp:.1f}%)"
@@ -376,7 +437,6 @@ async def _manage_open_positions(
             should_close = True
             reason = f"SL hit: {pnl_pct:.1f}% (limit -{effective_sl:.1f}%)"
         elif pnl_pct >= 15:
-            # Always take 15%+ profit
             should_close = True
             reason = f"Profit lock: {pnl_pct:.1f}%"
 
@@ -384,7 +444,6 @@ async def _manage_open_positions(
             side = pos.get("side", "long")
             close_side = "sell" if side == "long" else "buy"
             contracts = pos.get("contracts", 0)
-
             try:
                 result = await connector.create_market_order(
                     exchange=creds["exchange"],
@@ -415,7 +474,7 @@ async def run_sleep_session(
     user_id: str,
     brain_engine: PredictionEngine,
 ):
-    """Main sleep trading loop. Runs for up to 8 hours."""
+    """Main sleep trading loop. Runs for configurable duration (max 48h)."""
     session = brain_store.load_autotrader(user_id)
     if not session:
         log.warning("[sleep] no session found for %s", user_id)
@@ -443,9 +502,12 @@ async def run_sleep_session(
     max_open = max(1, int(config.get("max_open_trades", 3)))
     max_exposure_pct = float(config.get("max_total_exposure_pct", 25.0))
     entry_margin_pct = float(config.get("entry_margin_pct", DEFAULT_ENTRY_MARGIN_PCT))
+    configured_market_mode = str(config.get("market_mode", "auto")).lower()
+    execution_market = configured_market_mode if configured_market_mode in ("futures", "spot") else ("spot" if creds["exchange"].lower() == "mexc" else "futures")
 
+    sleep_hours = _resolve_sleep_duration_hours(config, creds["exchange"], execution_market)
     start_time = time.time()
-    end_time = start_time + SLEEP_DURATION_S
+    end_time = start_time + (sleep_hours * 3600)
     trade_count = 0
     total_realized_pnl = 0.0
     last_entry_by_symbol: dict[str, float] = {}
@@ -459,45 +521,51 @@ async def run_sleep_session(
         "trade_count": 0,
         "realized_pnl": 0.0,
         "status": "running",
+        "desired_state": "running",
+        "execution_market": execution_market,
+        "duration_hours": sleep_hours,
     }
     session["sleep_trades"] = []
     session["blocked_symbols"] = []
     brain_store.save_autotrader(user_id, session)
-    _log_sleep(user_id, f"Sleep Mode started — {len(symbols)} symbols, {max_leverage}x max leverage, {margin_mode} margin, futures")
+    _log_sleep(user_id, f"Sleep Mode started — {len(symbols)} symbols, route={execution_market}, duration={sleep_hours}h, {max_leverage}x max leverage, {margin_mode} margin")
     _log_sleep(user_id, f"Entry sizing set to {entry_margin_pct:.3f}% margin allocation per new trade (target baseline).")
 
-    # Set margin mode for all symbols at start
-    for sym in symbols:
-        try:
-            await connector.set_margin_mode(
-                creds["exchange"], creds["api_key"], creds["api_secret"],
-                sym, margin_mode, creds.get("passphrase"), max_leverage,
-            )
-        except Exception:
-            pass  # often already set
+    if execution_market == "futures":
+        # Set margin mode for all symbols at start
+        for sym in symbols:
+            try:
+                ok_mm = await connector.set_margin_mode(
+                    creds["exchange"], creds["api_key"], creds["api_secret"],
+                    sym, margin_mode, creds.get("passphrase"), max_leverage,
+                )
+                if not ok_mm:
+                    _log_sleep(user_id, f"Margin mode update failed for {sym} ({margin_mode}) — continuing with exchange defaults.")
+            except Exception:
+                _log_sleep(user_id, f"Margin mode update raised for {sym} ({margin_mode}) — continuing with exchange defaults.")
 
-    # Visibility: confirm we are managing already-open positions too (via protection flow)
-    try:
-        existing_positions = await connector.fetch_open_positions(
-            exchange=creds["exchange"],
-            api_key=creds["api_key"],
-            api_secret=creds["api_secret"],
-            passphrase=creds.get("passphrase"),
-        )
-        if existing_positions:
-            _log_sleep(
-                user_id,
-                f"Detected {len(existing_positions)} existing open positions — Sleep Mode will manage protection/SL behavior while scanning for new entries (max open {max_open}).",
+        # Visibility: confirm we are managing already-open positions too (via protection flow)
+        try:
+            existing_positions = await connector.fetch_open_positions(
+                exchange=creds["exchange"],
+                api_key=creds["api_key"],
+                api_secret=creds["api_secret"],
+                passphrase=creds.get("passphrase"),
             )
-    except Exception:
-        pass
+            if existing_positions:
+                _log_sleep(
+                    user_id,
+                    f"Detected {len(existing_positions)} existing open positions — Sleep Mode will manage protection/SL behavior while scanning for new entries (max open {max_open}).",
+                )
+        except Exception:
+            pass
 
     try:
         while time.time() < end_time and trade_count < MAX_TRADES_PER_SESSION:
             await asyncio.sleep(2)  # small initial delay
 
             # 1. Manage existing positions
-            closed = await _manage_open_positions(session, creds)
+            closed = await _manage_open_positions(session, creds, execution_market)
             for c in closed:
                 total_realized_pnl += c.get("unrealized_pnl", 0)
                 trade_count += 1
@@ -578,22 +646,39 @@ async def run_sleep_session(
 
             if len(open_trades) < max_open:
                 # Get portfolio equity
+                snapshot: dict[str, Any] = {"equity": 0, "positions": []}
                 try:
                     snapshot = await connector.fetch_exchange_snapshot(
                         creds["exchange"], creds["api_key"], creds["api_secret"], creds.get("passphrase")
                     )
-                    equity = snapshot.get("equity", 0)
                 except Exception:
-                    equity = 0
+                    snapshot = {"equity": 0, "futures": {}, "spot": {}, "positions": []}
 
-                if equity < 50:
-                    _log_sleep(user_id, "Equity below $50 — pausing entries")
-                    await asyncio.sleep(SCAN_INTERVAL_S)
-                    continue
+                if execution_market == "futures":
+                    futures_quote_free = float((snapshot.get("futures") or {}).get("quoteFree") or 0)
+                    futures_equity = float((snapshot.get("futures") or {}).get("equity") or 0)
+                    equity = futures_quote_free if futures_quote_free > 0 else futures_equity
+                    min_equity_required = 5.0
+                    if equity < min_equity_required:
+                        _log_sleep(user_id, f"Futures available USDT too low (${equity:.2f}) — pausing entries")
+                        await asyncio.sleep(SCAN_INTERVAL_S)
+                        continue
+                    if futures_quote_free > 0 and not session.get("sleep_mode", {}).get("logged_futures_free_balance"):
+                        _log_sleep(user_id, f"Futures route sizing uses free USDT balance: ${futures_quote_free:.2f}")
+                        session.setdefault("sleep_mode", {})["logged_futures_free_balance"] = True
+                else:
+                    spot_quote_free = float((snapshot.get("spot") or {}).get("quoteFree") or 0)
+                    spot_equity = float((snapshot.get("spot") or {}).get("equity") or 0)
+                    equity = spot_quote_free if spot_quote_free > 0 else spot_equity
+                    min_equity_required = 5.0
+                    if equity < min_equity_required:
+                        _log_sleep(user_id, f"Spot available USDT too low (${equity:.2f}) — pausing entries")
+                        await asyncio.sleep(SCAN_INTERVAL_S)
+                        continue
 
-                # Cross-margin stress de-risking: if margin utilization is high, reduce riskiest positions first.
+                # Cross-margin stress de-risking only for futures route.
                 mm_util_pct = _margin_utilization_pct(snapshot, max_leverage)
-                if margin_mode == "cross" and mm_util_pct > 15 and snapshot.get("positions"):
+                if execution_market == "futures" and margin_mode == "cross" and mm_util_pct > 15 and snapshot.get("positions"):
                     positions_sorted = sorted(snapshot.get("positions", []), key=_position_risk_score, reverse=True)
                     de_risked = 0
                     for pos in positions_sorted:
@@ -648,14 +733,16 @@ async def run_sleep_session(
                         if _canonical_symbol(symbol) in blocked_symbols:
                             continue
 
-                        funding_data = funding_cache.get(symbol)
-                        if funding_data is None:
-                            funding_data = await connector.get_funding_snapshot(
-                                creds["exchange"], creds["api_key"], creds["api_secret"], symbol, creds.get("passphrase"),
-                            )
-                            funding_cache[symbol] = funding_data
-
-                        funding_profile = _funding_profile(funding_data)
+                        if execution_market == "futures":
+                            funding_data = funding_cache.get(symbol)
+                            if funding_data is None:
+                                funding_data = await connector.get_funding_snapshot(
+                                    creds["exchange"], creds["api_key"], creds["api_secret"], symbol, creds.get("passphrase"),
+                                )
+                                funding_cache[symbol] = funding_data
+                            funding_profile = _funding_profile(funding_data)
+                        else:
+                            funding_profile = {"entry_bonus": 0.0, "long_bonus": 0.0, "short_bonus": 0.0, "cooldown_mult": 1.0, "label": None}
                         funding_label = funding_profile.get("label")
                         funding_key = f"funding::{symbol}"
                         if funding_label and session.get("sleep_mode", {}).get(funding_key) != funding_label:
@@ -738,41 +825,69 @@ async def run_sleep_session(
                             continue
 
                         # Execute!
-                        try:
-                            # Set leverage
-                            await connector.set_leverage(
-                                creds["exchange"], creds["api_key"], creds["api_secret"],
-                                symbol, use_leverage, creds.get("passphrase"),
-                            )
+                        desired_notional = amount * price
+                        if execution_market == "futures" and desired_notional < 5.0:
+                            _log_sleep(user_id, f"Skip {symbol}: futures order notional too small (${desired_notional:.2f} < $5).")
+                            continue
+                        if execution_market == "spot" and desired_notional < 5.0:
+                            _log_sleep(user_id, f"Skip {symbol}: spot order cost too small (${desired_notional:.2f} < $5).")
+                            continue
 
-                            # Limit-first entry (maker-friendly), then fallback to market
-                            limit_price = price * (1.0008 if side == "buy" else 0.9992)
-                            order = await connector.create_limit_order(
-                                creds["exchange"], creds["api_key"], creds["api_secret"],
-                                symbol, side, amount, limit_price, creds.get("passphrase"),
-                            )
-                            if not order.get("ok"):
-                                order = await connector.create_market_order(
+                        try:
+                            order: dict[str, Any]
+                            if execution_market == "spot":
+                                if side != "buy":
+                                    continue
+                                spot_amount = _position_size(equity, price, risk_pct, max_position_pct, 1, entry_margin_pct)
+                                if spot_amount <= 0:
+                                    continue
+                                order = await connector.create_spot_market_order(
                                     creds["exchange"], creds["api_key"], creds["api_secret"],
-                                    symbol, side, amount, creds.get("passphrase"),
+                                    symbol, "buy", spot_amount, creds.get("passphrase"),
                                 )
+                                amount = spot_amount
+                                use_leverage = 1
+                            else:
+                                await connector.set_leverage(
+                                    creds["exchange"], creds["api_key"], creds["api_secret"],
+                                    symbol, use_leverage, creds.get("passphrase"),
+                                )
+                                limit_price = price * (1.0008 if side == "buy" else 0.9992)
+                                order = await connector.create_limit_order(
+                                    creds["exchange"], creds["api_key"], creds["api_secret"],
+                                    symbol, side, amount, limit_price, creds.get("passphrase"),
+                                )
+                                if not order.get("ok"):
+                                    order = await connector.create_market_order(
+                                        creds["exchange"], creds["api_key"], creds["api_secret"],
+                                        symbol, side, amount, creds.get("passphrase"),
+                                    )
+                                if not order.get("ok") and creds["exchange"].lower() == "mexc" and _is_contract_activation_error(str(order.get("error", ""))):
+                                    _log_sleep(user_id, f"{symbol}: futures blocked on MEXC, switching session route to spot.")
+                                    session.setdefault("sleep_mode", {})["execution_market"] = "spot"
+                                    execution_market = "spot"
+                                    if side == "buy":
+                                        order = await connector.create_spot_market_order(
+                                            creds["exchange"], creds["api_key"], creds["api_secret"],
+                                            symbol, "buy", _position_size(equity, price, risk_pct, max_position_pct, 1, entry_margin_pct), creds.get("passphrase"),
+                                        )
+                                        amount = float(order.get("amount") or amount)
+                                        use_leverage = 1
 
                             if order.get("ok"):
                                 fill_price = order.get("price", price)
                                 sl_price, tp_price = _sl_tp_for_leverage(use_leverage, side, fill_price, sl_pct, tp_pct)
 
-                                # Place SL
-                                sl_side = "sell" if side == "buy" else "buy"
-                                await connector.create_stop_loss(
-                                    creds["exchange"], creds["api_key"], creds["api_secret"],
-                                    symbol, sl_side, amount, sl_price, creds.get("passphrase"),
-                                )
-
-                                # Place TP
-                                await connector.create_take_profit(
-                                    creds["exchange"], creds["api_key"], creds["api_secret"],
-                                    symbol, sl_side, amount, tp_price, creds.get("passphrase"),
-                                )
+                                if execution_market == "futures":
+                                    sl_side = "sell" if side == "buy" else "buy"
+                                    await connector.create_stop_loss(
+                                        creds["exchange"], creds["api_key"], creds["api_secret"],
+                                        symbol, sl_side, amount, sl_price, creds.get("passphrase"),
+                                    )
+                                    await connector.create_take_profit(
+                                        creds["exchange"], creds["api_key"], creds["api_secret"],
+                                        symbol, sl_side, amount, tp_price, creds.get("passphrase"),
+                                    )
 
                                 trade_record = {
                                     "symbol": symbol,
@@ -791,6 +906,7 @@ async def run_sleep_session(
                                     "opened_at": time.time(),
                                     "status": "open",
                                     "order_id": order.get("id"),
+                                    "market_type": execution_market,
                                 }
                                 session.setdefault("sleep_trades", []).append(trade_record)
                                 last_entry_by_symbol[symbol] = time.time()
@@ -801,7 +917,7 @@ async def run_sleep_session(
                                 _log_sleep(
                                     user_id,
                                     f"Opened {direction} {symbol} @ ${fill_price:.2f} | "
-                                    f"{use_leverage}x {margin_mode} | SL ${sl_price:.2f} TP ${tp_price:.2f} | "
+                                    f"route={execution_market} {use_leverage}x {margin_mode} | SL ${sl_price:.2f} TP ${tp_price:.2f} | "
                                     f"Conf {confidence:.0%} | Vol: {vol_label}"
                                 )
                                 _save_sleep_snapshot(user_id, "sleep_trade_open", symbol, {
@@ -817,6 +933,8 @@ async def run_sleep_session(
                             else:
                                 err_msg = str(order.get("error", "unknown"))
                                 _log_sleep(user_id, f"Order failed for {symbol}: {err_msg}")
+                                _set_last_error(user_id, f"order_failed exchange={creds.get('exchange')} symbol={symbol} side={side} amount={amount:.6f} err={err_msg[:180]}")
+                                log.error("[sleep] order_failed exchange=%s symbol=%s side=%s amount=%.6f err=%s", creds.get("exchange"), symbol, side, amount, err_msg)
                                 if _is_contract_activation_error(err_msg):
                                     blocked_symbols.add(_canonical_symbol(symbol))
                                     session["blocked_symbols"] = sorted(blocked_symbols)
@@ -827,7 +945,10 @@ async def run_sleep_session(
                                     brain_store.save_autotrader(user_id, session)
 
                         except Exception as e:
-                            _log_sleep(user_id, f"Execution error on {symbol}: {str(e)[:100]}")
+                            err_txt = str(e)
+                            _log_sleep(user_id, f"Execution error on {symbol}: {err_txt[:100]}")
+                            _set_last_error(user_id, f"execution_error exchange={creds.get('exchange')} symbol={symbol} side={side} amount={amount:.6f} err={err_txt[:180]}")
+                            log.error("[sleep] order_failed exchange=%s symbol=%s side=%s amount=%.6f err=%s", creds.get("exchange"), symbol, side, amount, err_txt)
 
                         # Don't flood — small delay between entries
                         await asyncio.sleep(5)
@@ -845,7 +966,9 @@ async def run_sleep_session(
     except asyncio.CancelledError:
         _log_sleep(user_id, "Sleep Mode cancelled by user")
     except Exception as e:
-        _log_sleep(user_id, f"Sleep Mode error: {str(e)[:200]}")
+        err_txt = str(e)
+        _log_sleep(user_id, f"Sleep Mode error: {err_txt[:200]}")
+        _set_last_error(user_id, f"session_error err={err_txt[:240]}")
         log.exception("[sleep] session error for %s", user_id)
     finally:
         # Finalize session
@@ -855,6 +978,7 @@ async def run_sleep_session(
         session["sleep_mode"]["ended_at"] = time.time()
         session["sleep_mode"]["total_trades"] = trade_count
         session["sleep_mode"]["total_realized_pnl"] = round(total_realized_pnl, 4)
+        session["sleep_mode"]["desired_state"] = "stopped"
         brain_store.save_autotrader(user_id, session)
 
         elapsed_h = (time.time() - start_time) / 3600
@@ -895,26 +1019,90 @@ def _save_sleep_snapshot(user_id: str, kind: str, symbol: str, content: dict[str
 
 
 
-def start_sleep_mode(user_id: str, brain_engine: PredictionEngine) -> dict:
-    """Start a sleep trading session. Returns status."""
-    if user_id in _active_sessions:
-        task = _active_sessions[user_id]
-        if not task.done():
-            return {"ok": False, "error": "Sleep Mode already active", "active": True}
+def _set_last_error(user_id: str, message: str) -> None:
+    session = brain_store.load_autotrader(user_id) or {}
+    sleep = session.setdefault("sleep_mode", {})
+    sleep["last_error"] = message
+    sleep["last_error_at"] = time.time()
+    brain_store.save_autotrader(user_id, session)
 
-    task = asyncio.create_task(run_sleep_session(user_id, brain_engine))
-    _active_sessions[user_id] = task
-    return {"ok": True, "message": "Sleep Mode started", "duration_hours": 8}
+
+def _set_desired_sleep_state(user_id: str, desired: str) -> None:
+    session = brain_store.load_autotrader(user_id) or {}
+    sleep = session.setdefault("sleep_mode", {})
+    sleep["desired_state"] = desired
+    sleep["desired_state_at"] = time.time()
+    brain_store.save_autotrader(user_id, session)
+
+
+def _is_running(user_id: str) -> bool:
+    return user_id in _active_sessions and not _active_sessions[user_id].done()
+
+
+async def worker_tick(brain_engine: PredictionEngine) -> dict[str, int]:
+    """One reconciliation tick: align desired sleep state with running tasks."""
+    started = 0
+    stopped = 0
+    for user_id in brain_store.list_autotrader_user_ids():
+        session = brain_store.load_autotrader(user_id) or {}
+        if not session.get("enabled"):
+            continue
+        desired = str((session.get("sleep_mode") or {}).get("desired_state") or "stopped")
+        running = _is_running(user_id)
+
+        if desired == "running" and not running:
+            task = asyncio.create_task(run_sleep_session(user_id, brain_engine))
+            _active_sessions[user_id] = task
+            started += 1
+        elif desired != "running" and running:
+            _active_sessions[user_id].cancel()
+            _active_sessions.pop(user_id, None)
+            stopped += 1
+
+    return {"started": started, "stopped": stopped}
+
+
+async def run_worker_loop(brain_engine: PredictionEngine, interval_s: int = 5) -> None:
+    """Dedicated worker loop for Sleep Mode task orchestration."""
+    log.info("[sleep-worker] loop starting mode=%s interval=%ss", SLEEP_EXECUTION_MODE, interval_s)
+    while True:
+        try:
+            stats = await worker_tick(brain_engine)
+            if stats["started"] or stats["stopped"]:
+                log.info("[sleep-worker] reconciled started=%d stopped=%d", stats["started"], stats["stopped"])
+        except Exception as exc:
+            log.exception("[sleep-worker] reconciliation failed: %s", exc)
+        await asyncio.sleep(max(1, interval_s))
+
+
+
+def start_sleep_mode(user_id: str, brain_engine: PredictionEngine) -> dict:
+    """Request a sleep trading session. In worker mode this only sets desired state."""
+    if _is_running(user_id):
+        return {"ok": False, "error": "Sleep Mode already active", "active": True}
+
+    session = brain_store.load_autotrader(user_id) or {}
+    config = session.get("config", {})
+    exchange = str(config.get("exchange") or "mexc")
+    configured_market_mode = str(config.get("market_mode", "auto")).lower()
+    execution_market = configured_market_mode if configured_market_mode in ("futures", "spot") else ("spot" if exchange.lower() == "mexc" else "futures")
+    sleep_hours = _resolve_sleep_duration_hours(config, exchange, execution_market)
+
+    _set_desired_sleep_state(user_id, "running")
+    if SLEEP_EXECUTION_MODE != "worker":
+        task = asyncio.create_task(run_sleep_session(user_id, brain_engine))
+        _active_sessions[user_id] = task
+
+    return {"ok": True, "message": "Sleep Mode queued", "duration_hours": sleep_hours, "execution_mode": SLEEP_EXECUTION_MODE}
 
 
 def stop_sleep_mode(user_id: str) -> dict:
-    """Stop an active sleep session."""
+    """Stop an active sleep session (desired state + immediate cancel if local task exists)."""
+    _set_desired_sleep_state(user_id, "stopped")
     task = _active_sessions.get(user_id)
-    if not task or task.done():
-        return {"ok": True, "message": "No active sleep session"}
-
-    task.cancel()
-    _active_sessions.pop(user_id, None)
+    if task and not task.done():
+        task.cancel()
+        _active_sessions.pop(user_id, None)
 
     session = brain_store.load_autotrader(user_id)
     if session and session.get("sleep_mode"):
@@ -923,7 +1111,7 @@ def stop_sleep_mode(user_id: str) -> dict:
         session["sleep_mode"]["ended_at"] = time.time()
         brain_store.save_autotrader(user_id, session)
 
-    return {"ok": True, "message": "Sleep Mode stopped"}
+    return {"ok": True, "message": "Sleep Mode stop requested"}
 
 
 def get_sleep_status(user_id: str) -> dict:
@@ -933,7 +1121,7 @@ def get_sleep_status(user_id: str) -> dict:
         return {"active": False}
 
     sleep = session.get("sleep_mode", {})
-    is_active = user_id in _active_sessions and not _active_sessions[user_id].done()
+    is_active = _is_running(user_id)
 
     started_at = float(sleep.get("started_at") or 0)
     ends_at = float(sleep.get("ends_at") or 0)
@@ -958,6 +1146,9 @@ def get_sleep_status(user_id: str) -> dict:
         "trade_count": sleep.get("trade_count", 0),
         "realized_pnl": sleep.get("realized_pnl", 0),
         "status": sleep.get("status", "idle"),
+        "desired_state": sleep.get("desired_state", "stopped"),
+        "last_error": sleep.get("last_error"),
+        "last_error_at": sleep.get("last_error_at"),
         "trades": session.get("sleep_trades", []),
         "log": session.get("log", [])[-30:],
     }
