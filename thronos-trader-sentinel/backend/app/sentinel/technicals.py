@@ -117,6 +117,8 @@ class TechnicalResult:
     orderbook_imbalance: float | None = None   # -1..+1 (bids stronger -> positive)
     orderbook_score: float = 0.0               # 0..10 (higher = more one-sided stress)
     orderbook_buckets: list[dict] = field(default_factory=list)
+    # Raw candle data (retained for strategy modules to use)
+    candles_raw: list[list] = field(default_factory=list)
     error: str | None = None
 
 
@@ -441,6 +443,14 @@ async def _fetch_orderbook(symbol: str, exchange_id: str = "binance", limit: int
 
 
 
+# ── Public OHLCV access for strategy modules ─────────────────────────────────
+
+async def fetch_candles(symbol: str = "BTC/USDT", timeframe: str = "1d",
+                        limit: int = 60) -> list[list]:
+    """Public wrapper for OHLCV fetching — used by strategy modules."""
+    return await _fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+
+
 # ── Main calculation ───────────────────────────────────────────────────────────
 
 async def calculate(symbol: str = "BTC/USDT") -> TechnicalResult:
@@ -615,6 +625,7 @@ async def calculate(symbol: str = "BTC/USDT") -> TechnicalResult:
         orderbook_imbalance=round(ob_imbalance, 4),
         orderbook_score=round(ob_score, 2),
         orderbook_buckets=ob_buckets,
+        candles_raw=candles,
     )
     _CACHE[cache_key] = (time.time(), result)
     return result

@@ -18,6 +18,8 @@ from app.brain import connector, store as brain_store
 from app.brain.predictor import PredictionEngine
 from app.sentinel import technicals as tech_module
 from app.sentinel import sessions as sessions_module
+from app.sentinel.strategies.divergence import detect_divergences
+from app.sentinel.strategies.confluence import check_confluence
 
 log = logging.getLogger(__name__)
 
@@ -236,10 +238,10 @@ def _position_size(
 
 
 async def _get_ta_signals(symbol: str) -> dict[str, Any]:
-    """Get technical analysis for a symbol."""
+    """Get technical analysis + gift strategy signals for a symbol."""
     try:
         result = await tech_module.calculate(symbol)
-        return {
+        ta: dict[str, Any] = {
             "rsi": result.rsi_14,
             "rsi_signal": result.rsi_signal,
             "macd_trend": result.macd_trend,
@@ -253,15 +255,69 @@ async def _get_ta_signals(symbol: str) -> dict[str, Any]:
             "price": result.current_price,
             "error": result.error,
         }
+
+        # ── Gift Strategy #1: Smart Money Divergence ─────────────────
+        candles_1d = result.candles_raw
+        if candles_1d and len(candles_1d) >= 40:
+            try:
+                div_result = detect_divergences(candles_1d, lookback=30, swing_dist=5)
+                ta["divergence"] = {
+                    "has_divergence": div_result.has_divergence,
+                    "type": div_result.divergence_type,
+                    "rsi_div": div_result.rsi_divergence,
+                    "macd_div": div_result.macd_divergence,
+                    "double_confirmed": div_result.double_confirmation,
+                    "direction_vote": div_result.direction_vote,
+                    "confidence_bonus": div_result.confidence_bonus,
+                    "description": div_result.description,
+                }
+            except Exception as e:
+                log.debug("[sleep] divergence analysis failed for %s: %s", symbol, e)
+                ta["divergence"] = {"has_divergence": False}
+        else:
+            ta["divergence"] = {"has_divergence": False}
+
+        # ── Gift Strategy #2: Multi-Timeframe Confluence ─────────────
+        try:
+            candles_1h = await tech_module.fetch_candles(symbol, timeframe="1h", limit=60)
+            candles_4h = await tech_module.fetch_candles(symbol, timeframe="4h", limit=60)
+            conf_result = check_confluence(
+                candles_1h=candles_1h,
+                candles_4h=candles_4h,
+                candles_1d=candles_1d,
+            )
+            ta["confluence"] = {
+                "level": conf_result.confluence_level,
+                "agreeing": conf_result.agreeing_timeframes,
+                "direction": conf_result.direction,
+                "direction_vote": conf_result.direction_vote,
+                "confidence_bonus": conf_result.confidence_bonus,
+                "description": conf_result.description,
+                "timeframes": conf_result.timeframe_signals,
+            }
+        except Exception as e:
+            log.debug("[sleep] confluence analysis failed for %s: %s", symbol, e)
+            ta["confluence"] = {"level": "none", "direction_vote": 0.0, "confidence_bonus": 0.0}
+
+        return ta
     except Exception as e:
         log.warning("[sleep] TA failed for %s: %s", symbol, e)
         return {"error": str(e)}
 
 
 def _evaluate_entry(ta: dict[str, Any], brain_pred: dict | None = None) -> tuple[str | None, float]:
-    """Evaluate whether to enter a trade based on TA + Brain.
+    """Evaluate whether to enter a trade based on TA + Brain + Gift Strategies.
 
     Returns (side, confidence) where side is 'buy'/'sell'/None.
+    Uses 8 signal sources:
+      1. RSI (momentum)
+      2. MACD (trend + momentum)
+      3. Bollinger Bands (volatility position)
+      4. EMA cross (trend)
+      5. Williams %R (momentum)
+      6. Brain ML prediction
+      7. Smart Money Divergence (gift #1)
+      8. Multi-Timeframe Confluence (gift #2)
     """
     if ta.get("error"):
         return None, 0.0
@@ -330,6 +386,34 @@ def _evaluate_entry(ta: dict[str, Any], brain_pred: dict | None = None) -> tuple
             score += 0.15
         elif pred == "risky":
             score -= 0.1
+
+    # ── Gift Strategy #1: Smart Money Divergence ─────────────────────
+    div = ta.get("divergence", {})
+    if div.get("has_divergence"):
+        div_vote = float(div.get("direction_vote", 0))
+        div_conf = float(div.get("confidence_bonus", 0))
+        if div_vote > 0:
+            direction_votes["long"] += div_vote
+        elif div_vote < 0:
+            direction_votes["short"] += abs(div_vote)
+        score += div_conf
+        # Double-confirmed divergences get extra weight
+        if div.get("double_confirmed"):
+            score += 0.05
+
+    # ── Gift Strategy #2: Multi-Timeframe Confluence ─────────────────
+    conf = ta.get("confluence", {})
+    conf_vote = float(conf.get("direction_vote", 0))
+    conf_bonus = float(conf.get("confidence_bonus", 0))
+    if conf_vote > 0:
+        direction_votes["long"] += conf_vote
+    elif conf_vote < 0:
+        direction_votes["short"] += abs(conf_vote)
+    score += conf_bonus
+
+    # Strong confluence penalty: if confluence says "conflicting", penalize
+    if conf.get("level") == "conflicting":
+        score -= 0.08
 
     # Determine direction
     long_score = direction_votes["long"]
@@ -493,6 +577,48 @@ async def run_sleep_session(
         return
 
     symbols = config.get("symbols", ["BTC/USDT"])
+
+    # ── Capability Handshake (Phase 0) ───────────────────────────────
+    # Pre-flight check: verify exchange is reachable and symbols are tradeable
+    try:
+        handshake = await connector.capability_handshake(
+            exchange=creds["exchange"],
+            api_key=creds["api_key"],
+            api_secret=creds["api_secret"],
+            symbols=symbols,
+            passphrase=creds.get("passphrase"),
+            market_mode=config.get("market_mode", "auto"),
+        )
+        if not handshake.get("ok"):
+            warnings = handshake.get("warnings", [])
+            _log_sleep(user_id, f"Capability handshake FAILED: {'; '.join(warnings[:3])}")
+            session["sleep_mode"] = {
+                "active": False, "status": "handshake_failed",
+                "desired_state": "stopped",
+                "handshake_warnings": warnings,
+            }
+            brain_store.save_autotrader(user_id, session)
+            return
+
+        # Log handshake results
+        _log_sleep(user_id, f"Handshake OK — equity: ${handshake.get('equity', 0):.2f}, "
+                   f"route: {handshake.get('recommended_market', 'unknown')}")
+        for w in handshake.get("warnings", []):
+            _log_sleep(user_id, f"Handshake warning: {w}")
+
+        # Auto-select market based on handshake
+        recommended = handshake.get("recommended_market", "futures")
+        sym_caps = handshake.get("symbols", {})
+        blocked_from_handshake = []
+        for sym, cap in sym_caps.items():
+            if not cap.get("futures_ready") and not cap.get("spot_ready"):
+                blocked_from_handshake.append(sym)
+            elif not cap.get("contract_activated"):
+                blocked_from_handshake.append(sym)
+
+    except Exception as e:
+        _log_sleep(user_id, f"Handshake error (non-fatal, continuing): {str(e)[:100]}")
+        blocked_from_handshake = []
     max_leverage = int(config.get("max_leverage", 20))
     margin_mode = config.get("margin_mode", "cross")  # cross or isolated
     sl_pct = float(config.get("stop_loss_pct", 2.0))
@@ -526,7 +652,7 @@ async def run_sleep_session(
         "duration_hours": sleep_hours,
     }
     session["sleep_trades"] = []
-    session["blocked_symbols"] = []
+    session["blocked_symbols"] = sorted(set(blocked_from_handshake))
     brain_store.save_autotrader(user_id, session)
     _log_sleep(user_id, f"Sleep Mode started — {len(symbols)} symbols, route={execution_market}, duration={sleep_hours}h, {max_leverage}x max leverage, {margin_mode} margin")
     _log_sleep(user_id, f"Entry sizing set to {entry_margin_pct:.3f}% margin allocation per new trade (target baseline).")
@@ -889,6 +1015,23 @@ async def run_sleep_session(
                                         symbol, sl_side, amount, tp_price, creds.get("passphrase"),
                                     )
 
+                                # Build strategy summary for trade record
+                                strategy_signals = {}
+                                div_info = ta.get("divergence", {})
+                                if div_info.get("has_divergence"):
+                                    strategy_signals["divergence"] = {
+                                        "type": div_info.get("type"),
+                                        "double_confirmed": div_info.get("double_confirmed", False),
+                                        "description": div_info.get("description", ""),
+                                    }
+                                conf_info = ta.get("confluence", {})
+                                if conf_info.get("level") not in (None, "none"):
+                                    strategy_signals["confluence"] = {
+                                        "level": conf_info.get("level"),
+                                        "agreeing_tf": conf_info.get("agreeing", 0),
+                                        "direction": conf_info.get("direction"),
+                                    }
+
                                 trade_record = {
                                     "symbol": symbol,
                                     "side": side,
@@ -903,6 +1046,7 @@ async def run_sleep_session(
                                         "macd": ta.get("macd_trend"),
                                         "ema": ta.get("ema_cross"),
                                     },
+                                    "strategies": strategy_signals,
                                     "opened_at": time.time(),
                                     "status": "open",
                                     "order_id": order.get("id"),
@@ -914,11 +1058,23 @@ async def run_sleep_session(
 
                                 direction = "LONG" if side == "buy" else "SHORT"
                                 vol_label = session_bias.get("volume", "?")
+                                # Build strategy tag line
+                                strat_tags = []
+                                if strategy_signals.get("divergence"):
+                                    d = strategy_signals["divergence"]
+                                    tag = f"DIV:{d.get('type', '?')}"
+                                    if d.get("double_confirmed"):
+                                        tag += "(2x)"
+                                    strat_tags.append(tag)
+                                if strategy_signals.get("confluence"):
+                                    c = strategy_signals["confluence"]
+                                    strat_tags.append(f"MTF:{c.get('level', '?')}({c.get('agreeing_tf', 0)}TF)")
+                                strat_label = " | ".join(strat_tags) if strat_tags else "base"
                                 _log_sleep(
                                     user_id,
                                     f"Opened {direction} {symbol} @ ${fill_price:.2f} | "
                                     f"route={execution_market} {use_leverage}x {margin_mode} | SL ${sl_price:.2f} TP ${tp_price:.2f} | "
-                                    f"Conf {confidence:.0%} | Vol: {vol_label}"
+                                    f"Conf {confidence:.0%} | Vol: {vol_label} | Strat: {strat_label}"
                                 )
                                 _save_sleep_snapshot(user_id, "sleep_trade_open", symbol, {
                                     "side": side,

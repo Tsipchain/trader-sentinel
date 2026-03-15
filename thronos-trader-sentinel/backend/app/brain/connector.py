@@ -1058,6 +1058,133 @@ async def create_spot_market_order(
         await ex.close()
 
 
+async def capability_handshake(
+    exchange: str,
+    api_key: str,
+    api_secret: str,
+    symbols: list[str],
+    passphrase: str | None = None,
+    market_mode: str = "auto",
+) -> dict[str, Any]:
+    """Pre-flight check: verify exchange connectivity and trading capabilities.
+
+    Probes:
+      1. API key validity (fetch balance)
+      2. Futures/spot market availability per symbol
+      3. Contract activation status for each symbol
+      4. Available balance for trading
+
+    Returns a capabilities report with per-symbol readiness.
+    """
+    result: dict[str, Any] = {
+        "ok": True,
+        "exchange": exchange,
+        "api_valid": False,
+        "futures_available": False,
+        "spot_available": False,
+        "equity": 0.0,
+        "symbols": {},
+        "recommended_market": "futures",
+        "warnings": [],
+    }
+
+    # 1. Test futures connectivity
+    if market_mode in ("auto", "futures"):
+        try:
+            snapshot = await _fetch_snapshot_for_type(
+                exchange, api_key, api_secret, passphrase, "futures"
+            )
+            futures_equity = float(snapshot.get("equity") or 0)
+            if futures_equity > 0 or snapshot.get("balances"):
+                result["api_valid"] = True
+                result["futures_available"] = True
+                result["equity"] = futures_equity
+        except Exception as e:
+            msg = str(e).lower()
+            if "key" in msg or "auth" in msg or "signature" in msg:
+                result["ok"] = False
+                result["warnings"].append(f"API key invalid or permissions missing: {str(e)[:100]}")
+                return result
+            result["warnings"].append(f"Futures unavailable: {str(e)[:100]}")
+
+    # 2. Test spot connectivity
+    if market_mode in ("auto", "spot") or not result["futures_available"]:
+        try:
+            snapshot = await _fetch_snapshot_for_type(
+                exchange, api_key, api_secret, passphrase, "spot"
+            )
+            spot_equity = float(snapshot.get("equity") or 0)
+            if spot_equity > 0 or snapshot.get("balances"):
+                result["api_valid"] = True
+                result["spot_available"] = True
+                if result["equity"] <= 0:
+                    result["equity"] = spot_equity
+        except Exception as e:
+            result["warnings"].append(f"Spot unavailable: {str(e)[:100]}")
+
+    if not result["api_valid"]:
+        result["ok"] = False
+        result["warnings"].append("Could not connect to exchange — check API keys and permissions")
+        return result
+
+    # 3. Test each symbol
+    for symbol in symbols:
+        sym_result: dict[str, Any] = {
+            "futures_ready": False,
+            "spot_ready": False,
+            "contract_activated": True,
+            "ticker_ok": False,
+            "price": 0.0,
+        }
+
+        # Check futures ticker
+        if result["futures_available"]:
+            try:
+                price = await get_ticker_price(exchange, api_key, api_secret, symbol, passphrase)
+                if price > 0:
+                    sym_result["futures_ready"] = True
+                    sym_result["ticker_ok"] = True
+                    sym_result["price"] = price
+            except Exception as e:
+                err = str(e)
+                if _is_contract_activation_error(err):
+                    sym_result["contract_activated"] = False
+                    result["warnings"].append(f"{symbol}: contract not activated on exchange — activate manually")
+
+        # Check spot ticker
+        if result["spot_available"]:
+            try:
+                price = await get_spot_ticker_price(exchange, api_key, api_secret, symbol, passphrase)
+                if price > 0:
+                    sym_result["spot_ready"] = True
+                    if not sym_result["ticker_ok"]:
+                        sym_result["ticker_ok"] = True
+                        sym_result["price"] = price
+            except Exception:
+                pass
+
+        result["symbols"][symbol] = sym_result
+
+    # 4. Determine recommended market
+    any_futures = any(s.get("futures_ready") for s in result["symbols"].values())
+    any_spot = any(s.get("spot_ready") for s in result["symbols"].values())
+
+    if any_futures:
+        result["recommended_market"] = "futures"
+    elif any_spot:
+        result["recommended_market"] = "spot"
+        result["warnings"].append("No futures symbols available — will use spot market")
+    else:
+        result["ok"] = False
+        result["warnings"].append("No tradeable symbols found on this exchange")
+
+    # Balance warning
+    if result["equity"] < 10:
+        result["warnings"].append(f"Low balance: ${result['equity']:.2f} — minimum $10 recommended")
+
+    return result
+
+
 async def get_spot_ticker_price(
     exchange: str,
     api_key: str,
