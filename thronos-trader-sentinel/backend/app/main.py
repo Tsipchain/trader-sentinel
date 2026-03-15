@@ -825,6 +825,34 @@ def brain_autotrader_enable(payload: dict = Body(default_factory=dict), _: str =
     return {"ok": True}
 
 
+@app.post("/api/brain/autotrader/handshake")
+async def brain_autotrader_handshake(payload: dict = Body(default_factory=dict), _: str = Security(verify_api_key)):
+    """Pre-flight capability check: verify exchange API keys and symbol readiness before trading.
+
+    Probes connectivity, balance, and per-symbol contract activation status.
+    Call this before enabling AutoTrader or starting Sleep Mode.
+    """
+    exchange = payload.get("exchange", "")
+    api_key = payload.get("api_key") or payload.get("apiKey") or ""
+    api_secret = payload.get("api_secret") or payload.get("apiSecret") or ""
+    passphrase = payload.get("passphrase") or ""
+    symbols = payload.get("symbols") or ["BTC/USDT"]
+    market_mode = payload.get("market_mode") or payload.get("marketMode") or "auto"
+
+    if not exchange or not api_key or not api_secret:
+        return {"ok": False, "error": "exchange, api_key, and api_secret required"}
+
+    result = await connector.capability_handshake(
+        exchange=exchange,
+        api_key=api_key,
+        api_secret=api_secret,
+        symbols=symbols,
+        passphrase=passphrase if passphrase else None,
+        market_mode=market_mode,
+    )
+    return result
+
+
 @app.post("/api/brain/autotrader/disable")
 def brain_autotrader_disable(payload: dict = Body(default_factory=dict), _: str = Security(verify_api_key)):
     user_id = payload.get("user_id") or payload.get("userId")
