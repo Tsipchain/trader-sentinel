@@ -23,6 +23,7 @@ import { COLORS, SPACING, FONT_SIZES, BORDER_RADIUS } from '../constants/theme';
 import { useStore } from '../store/useStore';
 import { CONFIG } from '../config';
 import api from '../services/api';
+import { thronosService } from '../services/thronos';
 import {
   fetchETHBalance,
   fetchTokenPrices,
@@ -93,6 +94,7 @@ export default function WalletScreen() {
   const [alertsLoading, setAlertsLoading] = useState(false);
   const [walletError, setWalletError] = useState<string | null>(null);
   const [paymentReceipts, setPaymentReceipts] = useState<PaymentReceipt[]>([]);
+  const [chainActivity, setChainActivity] = useState<PaymentReceipt[]>([]);
 
   // Fetch Sentinel observations for watchlist pairs
   const fetchWatchlistAlerts = useCallback(async () => {
@@ -159,6 +161,61 @@ export default function WalletScreen() {
   useEffect(() => {
     loadPaymentReceipts();
   }, [loadPaymentReceipts]);
+
+  // Fetch on-chain sentinel subscription transactions so nothing is lost
+  const loadChainActivity = useCallback(async () => {
+    if (!wallet.address) { setChainActivity([]); return; }
+    try {
+      const res = await thronosService.getWalletHistory(wallet.address, {
+        category: 'sentinel',
+        limit: 50,
+      });
+      if (res.ok && res.transactions?.length) {
+        const mapped: PaymentReceipt[] = res.transactions.map((tx: any) => ({
+          packageId: tx.meta?.package_id || tx.meta?.tier || '',
+          tier: tx.meta?.tier || tx.meta?.package_id || tx.note || 'Sentinel',
+          amount: String(tx.amount ?? ''),
+          token: tx.symbol || tx.token_symbol || 'THR',
+          chain: tx.meta?.payment_chain || 'thronos',
+          txHash: tx.tx_id || '',
+          blockchainRef: tx.meta?.blockchain_ref || tx.block_hash || '',
+          walletAddress: wallet.address,
+          savedAt: tx.timestamp || '',
+          verificationStatus: tx.status === 'confirmed' ? 'confirmed' as const : 'pending' as const,
+        }));
+        setChainActivity(mapped);
+      } else {
+        setChainActivity([]);
+      }
+    } catch {
+      setChainActivity([]);
+    }
+  }, [wallet.address]);
+
+  useEffect(() => {
+    loadChainActivity();
+  }, [loadChainActivity]);
+
+  // Merge local receipts + chain activity, deduplicate by txHash
+  const mergedActivity = React.useMemo(() => {
+    const seenHashes = new Set<string>();
+    const combined: PaymentReceipt[] = [];
+    // Prefer local receipts first (may have richer local data)
+    for (const r of paymentReceipts) {
+      if (r.txHash && seenHashes.has(r.txHash)) continue;
+      if (r.txHash) seenHashes.add(r.txHash);
+      combined.push(r);
+    }
+    // Add chain-only transactions (ones not in local storage)
+    for (const c of chainActivity) {
+      if (c.txHash && seenHashes.has(c.txHash)) continue;
+      if (c.txHash) seenHashes.add(c.txHash);
+      combined.push(c);
+    }
+    // Sort newest first
+    combined.sort((a, b) => Date.parse(b.savedAt || '') - Date.parse(a.savedAt || ''));
+    return combined;
+  }, [paymentReceipts, chainActivity]);
 
   const handleAddPair = (pair: string) => {
     const formatted = pair.toUpperCase().trim();
@@ -337,12 +394,13 @@ export default function WalletScreen() {
       await loadBalances();
       await fetchWatchlistAlerts();
       await loadPaymentReceipts();
+      await loadChainActivity();
     } catch {
       // errors handled inside loadBalances
     } finally {
       setRefreshing(false);
     }
-  }, [loadBalances, fetchWatchlistAlerts, loadPaymentReceipts]);
+  }, [loadBalances, fetchWatchlistAlerts, loadPaymentReceipts, loadChainActivity]);
 
   const copyAddress = async () => {
     if (wallet.address) {
@@ -737,8 +795,8 @@ export default function WalletScreen() {
             </TouchableOpacity>
           </View>
 
-          {paymentReceipts.length > 0 ? (
-            paymentReceipts.slice(0, 6).map((receipt, idx) => (
+          {mergedActivity.length > 0 ? (
+            mergedActivity.slice(0, 6).map((receipt, idx) => (
               <View key={`${receipt.txHash ?? receipt.savedAt ?? 'receipt'}-${idx}`} style={styles.activityItem}>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.activityTitle}>

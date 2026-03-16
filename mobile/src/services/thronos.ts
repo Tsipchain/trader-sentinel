@@ -433,6 +433,36 @@ class ThronosService {
     }
   }
 
+  // ─── WALLET HISTORY (on-chain transactions including sentinel subscriptions) ─
+
+  async getWalletHistory(
+    userAddress: string,
+    options?: { category?: string; limit?: number; cursor?: number },
+  ): Promise<{
+    ok: boolean;
+    transactions: any[];
+    total_transactions: number;
+    summary: Record<string, any>;
+    next_cursor: number | null;
+  }> {
+    try {
+      const params = new URLSearchParams({ address: userAddress });
+      if (options?.category) params.set('category', options.category);
+      if (options?.limit) params.set('limit', String(options.limit));
+      if (options?.cursor) params.set('cursor', String(options.cursor));
+
+      const response = await fetch(
+        `${CONFIG.THRONOS_CHAIN_URL}/api/wallet/history?${params.toString()}`,
+      );
+      if (!response.ok) {
+        return { ok: false, transactions: [], total_transactions: 0, summary: {}, next_cursor: null };
+      }
+      return await response.json();
+    } catch {
+      return { ok: false, transactions: [], total_transactions: 0, summary: {}, next_cursor: null };
+    }
+  }
+
   // ─── TREASURY INFO ─────────────────────────────────────────────────────────
 
   async getTreasuryBalances(): Promise<Record<string, { address: string; balance: number }>> {
