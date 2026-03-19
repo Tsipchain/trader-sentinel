@@ -504,13 +504,50 @@ async def _manage_open_positions(
 
     for pos in positions:
         sym = _canonical_symbol(pos.get("symbol", ""))
-        if sym not in sleep_trade_symbols:
-            continue
-
+        is_sleep_trade = sym in sleep_trade_symbols
         pnl_pct = pos.get("pnlPct", 0)
         leverage = pos.get("leverage", 1)
+        side = pos.get("side", "long")
+        contracts = pos.get("contracts", 0)
         effective_tp = tp_pct * leverage * 0.7
         effective_sl = sl_pct * leverage * 0.5
+
+        # ── Protection for ALL positions (including pre-existing) ────────
+        # DCA safe order when loss is moderate
+        if pnl_pct <= -(sl_pct * 0.5) and pnl_pct > -sl_pct and not is_sleep_trade:
+            safe_amount = contracts * 0.25
+            safe_side = "buy" if side == "long" else "sell"
+            try:
+                result = await connector.create_market_order(
+                    exchange=creds["exchange"], api_key=creds["api_key"],
+                    api_secret=creds["api_secret"],
+                    symbol=sym.replace(":USDT", ""), side=safe_side,
+                    amount=safe_amount, passphrase=creds.get("passphrase"),
+                )
+                if result.get("ok"):
+                    log.info("[sleep] DCA safe order for pre-existing %s: PnL %.1f%%", sym, pnl_pct)
+            except Exception as e:
+                log.warning("[sleep] DCA safe order failed %s: %s", sym, e)
+
+        # Hedge when loss approaches SL on pre-existing positions
+        if pnl_pct <= -(sl_pct * 0.7) and leverage >= 5 and not is_sleep_trade:
+            hedge_side = "sell" if side == "long" else "buy"
+            hedge_amount = contracts * 0.3
+            try:
+                result = await connector.create_market_order(
+                    exchange=creds["exchange"], api_key=creds["api_key"],
+                    api_secret=creds["api_secret"],
+                    symbol=sym.replace(":USDT", ""), side=hedge_side,
+                    amount=hedge_amount, passphrase=creds.get("passphrase"),
+                )
+                if result.get("ok"):
+                    log.info("[sleep] hedge for pre-existing %s: PnL %.1f%%", sym, pnl_pct)
+            except Exception as e:
+                log.warning("[sleep] hedge failed %s: %s", sym, e)
+
+        # ── TP/SL close logic for sleep-opened trades only ───────────────
+        if not is_sleep_trade:
+            continue
 
         should_close = False
         reason = ""
@@ -525,9 +562,7 @@ async def _manage_open_positions(
             reason = f"Profit lock: {pnl_pct:.1f}%"
 
         if should_close:
-            side = pos.get("side", "long")
             close_side = "sell" if side == "long" else "buy"
-            contracts = pos.get("contracts", 0)
             try:
                 result = await connector.create_market_order(
                     exchange=creds["exchange"],
@@ -784,9 +819,9 @@ async def run_sleep_session(
                     futures_quote_free = float((snapshot.get("futures") or {}).get("quoteFree") or 0)
                     futures_equity = float((snapshot.get("futures") or {}).get("equity") or 0)
                     equity = futures_quote_free if futures_quote_free > 0 else futures_equity
-                    min_equity_required = 5.0
+                    min_equity_required = 50.0  # Futures requires $50+ for subscriber multi-trade capacity
                     if equity < min_equity_required:
-                        _log_sleep(user_id, f"Futures available USDT too low (${equity:.2f}) — pausing entries")
+                        _log_sleep(user_id, f"Futures available USDT too low (${equity:.2f}) — need $50+ for futures trading")
                         await asyncio.sleep(SCAN_INTERVAL_S)
                         continue
                     if futures_quote_free > 0 and not session.get("sleep_mode", {}).get("logged_futures_free_balance"):
