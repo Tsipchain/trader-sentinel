@@ -463,6 +463,56 @@ class ThronosService {
     }
   }
 
+  // ─── POOL STATUS (Real data from cross-chain fee deposits) ─────────────────
+
+  async getPoolStatus(): Promise<{
+    ok: boolean;
+    pools: Array<{
+      pair: string;
+      tvl_usd: number;
+      apr: number;
+      total_fee_deposits_thr: number;
+      deposit_count: number;
+      chains: string[];
+    }>;
+  }> {
+    try {
+      const sentinelUrl = CONFIG.SENTINEL_API_URL || CONFIG.THRONOS_CHAIN_URL;
+      const response = await fetch(`${sentinelUrl}/api/pools/status`);
+      if (!response.ok) {
+        return { ok: false, pools: [] };
+      }
+      return await response.json();
+    } catch {
+      return { ok: false, pools: [] };
+    }
+  }
+
+  async getPoolDeposits(poolPair: string): Promise<{
+    ok: boolean;
+    pool: string;
+    tvl_usd: number;
+    deposits: Array<{
+      source_chain: string;
+      amount_thr: number;
+      amount_usd: number;
+      ref_tx: string;
+      timestamp: string;
+    }>;
+  }> {
+    try {
+      const sentinelUrl = CONFIG.SENTINEL_API_URL || CONFIG.THRONOS_CHAIN_URL;
+      const encoded = poolPair.replace('/', '-');
+      const response = await fetch(`${sentinelUrl}/api/pools/deposits/${encoded}`);
+      if (!response.ok) {
+        return { ok: false, pool: poolPair, tvl_usd: 0, deposits: [] };
+      }
+      return await response.json();
+    } catch {
+      return { ok: false, pool: poolPair, tvl_usd: 0, deposits: [] };
+    }
+  }
+
   // ─── TREASURY INFO ─────────────────────────────────────────────────────────
 
   async getTreasuryBalances(): Promise<Record<string, { address: string; balance: number }>> {

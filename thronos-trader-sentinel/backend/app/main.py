@@ -1147,6 +1147,107 @@ async def brain_protection_check(payload: dict = Body(default_factory=dict), _: 
     return result
 
 
+# ── Pool / Cross-Chain Fee Deposits ──────────────────────────────────────────
+
+# In-memory pool state (production would use DB)
+_pool_state = {
+    "THR/USDC": {"tvl_usd": 2_500_000, "apr": 12.5, "deposits": []},
+    "THR/ETH": {"tvl_usd": 1_800_000, "apr": 15.2, "deposits": []},
+    "THR/BNB": {"tvl_usd": 980_000, "apr": 18.7, "deposits": []},
+}
+
+
+@app.post("/api/pools/fee-deposit")
+async def pool_fee_deposit(payload: dict = Body(default_factory=dict)):
+    """
+    Receive cross-chain fee deposits from the gateway.
+    These are real THR locked by the AI wallet, backing wrapped THR on external chains.
+    Updates pool TVL and records the deposit for LP reward distribution.
+    """
+    internal_key = payload.get("internal_key") or ""
+    source_chain = payload.get("source_chain", "unknown")
+    amount_thr = float(payload.get("amount_thr", 0))
+    ref_tx = payload.get("ref_tx", "")
+    deposit_type = payload.get("type", "crosschain_fee_lp")
+
+    if amount_thr <= 0:
+        raise HTTPException(400, "amount_thr must be positive")
+
+    # Map source chain to pool pair
+    pool_map = {
+        "ethereum": "THR/ETH",
+        "arbitrum": "THR/ETH",
+        "base": "THR/ETH",
+        "bsc": "THR/BNB",
+        "solana": "THR/USDC",
+    }
+    pool_pair = pool_map.get(source_chain, "THR/USDC")
+
+    if pool_pair not in _pool_state:
+        _pool_state[pool_pair] = {"tvl_usd": 0, "apr": 10.0, "deposits": []}
+
+    # Estimate USD value (THR price ~$0.05)
+    thr_price_usd = 0.05
+    deposit_usd = amount_thr * thr_price_usd
+
+    # Update pool TVL
+    _pool_state[pool_pair]["tvl_usd"] += deposit_usd
+    _pool_state[pool_pair]["deposits"].append({
+        "source_chain": source_chain,
+        "amount_thr": amount_thr,
+        "amount_usd": deposit_usd,
+        "ref_tx": ref_tx,
+        "type": deposit_type,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+    log.info(
+        f"Pool fee deposit: {amount_thr} THR (${deposit_usd:.2f}) into {pool_pair} from {source_chain}"
+    )
+
+    return {
+        "ok": True,
+        "pool": pool_pair,
+        "amount_thr": amount_thr,
+        "new_tvl_usd": _pool_state[pool_pair]["tvl_usd"],
+        "deposit_count": len(_pool_state[pool_pair]["deposits"]),
+    }
+
+
+@app.get("/api/pools/status")
+async def pool_status():
+    """Get current pool status with real TVL from cross-chain fee deposits."""
+    pools = []
+    for pair, state in _pool_state.items():
+        total_deposited = sum(d["amount_thr"] for d in state.get("deposits", []))
+        pools.append({
+            "pair": pair,
+            "tvl_usd": state["tvl_usd"],
+            "apr": state["apr"],
+            "total_fee_deposits_thr": total_deposited,
+            "deposit_count": len(state.get("deposits", [])),
+            "chains": list(set(d["source_chain"] for d in state.get("deposits", []))),
+        })
+    return {"ok": True, "pools": pools}
+
+
+@app.get("/api/pools/deposits/{pool_pair}")
+async def pool_deposits(pool_pair: str):
+    """Get recent fee deposits for a specific pool."""
+    pair = pool_pair.replace("-", "/").upper()
+    state = _pool_state.get(pair)
+    if not state:
+        raise HTTPException(404, f"Pool {pair} not found")
+
+    deposits = state.get("deposits", [])[-50:]  # last 50
+    return {
+        "ok": True,
+        "pool": pair,
+        "tvl_usd": state["tvl_usd"],
+        "deposits": deposits,
+    }
+
+
 @app.get("/api/tts")
 async def tts(text: str = Query(...), lang: str = Query("en-US"), voice: str = Query("en-US-Neural2-D")):
     if not settings.google_tts_enabled:

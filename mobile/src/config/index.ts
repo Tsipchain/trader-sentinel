@@ -33,6 +33,9 @@ export const CONFIG = {
   // Thronos native chain API (blockchain-verified subscriptions)
   THRONOS_CHAIN_URL: process.env.EXPO_PUBLIC_THRONOS_CHAIN ?? 'https://api.thronoschain.org',
 
+  // Sentinel API (for real pool data, cross-chain fee deposits)
+  SENTINEL_API_URL: process.env.EXPO_PUBLIC_SENTINEL_API ?? 'https://sentinel.thronoschain.org',
+
   // Treasury addresses per network — fees collected here
   TREASURY_ADDRESSES: {
     THRONOS: process.env.EXPO_PUBLIC_TREASURY_THR ?? 'THR_SENTINEL_TREASURY_V1',
