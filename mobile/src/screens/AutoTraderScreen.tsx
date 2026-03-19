@@ -423,13 +423,16 @@ export default function AutoTraderScreen() {
 
               const futuresFree = portfolio.futures?.quoteFree ?? 0;
               const spotFree = portfolio.spot?.quoteFree ?? 0;
-              const effectiveTradable = cfg.exchange.toLowerCase() === 'mexc'
+              const marketMode = cfg.marketMode ?? 'auto';
+              const isSpotRoute = marketMode === 'spot' || (marketMode === 'auto' && cfg.exchange.toLowerCase() === 'mexc');
+              const minRequired = isSpotRoute ? 50 : 5;
+              const effectiveTradable = isSpotRoute
                 ? Math.max(spotFree, futuresFree)
                 : Math.max(futuresFree, spotFree);
-              if (effectiveTradable < 5) {
+              if (effectiveTradable < minRequired) {
                 Alert.alert(
                   'Minimum Tradable Balance Required',
-                  `AutoTrader needs available ${portfolio.futures?.quoteAsset ?? 'USDT'} in the target wallet. Futures free: ${futuresFree.toFixed(2)}, Spot free: ${spotFree.toFixed(2)}.`,
+                  `AutoTrader needs at least $${minRequired} available ${portfolio.futures?.quoteAsset ?? 'USDT'}. Futures free: $${futuresFree.toFixed(2)}, Spot free: $${spotFree.toFixed(2)}.`,
                 );
                 return;
               }
@@ -447,6 +450,7 @@ export default function AutoTraderScreen() {
                 max_position_pct: cfg.maxPositionPct,
                 max_open_trades: effectiveMaxOpenTrades,
                 margin_mode: cfg.marginMode,
+                market_mode: cfg.marketMode,
                 max_leverage: requestedLeverage,
                 leverage: requestedLeverage,
                 risk_per_trade_pct: cfg.riskPerTradePct,
@@ -482,6 +486,7 @@ export default function AutoTraderScreen() {
                 max_position_pct: cfg.maxPositionPct,
                 max_open_trades: cfg.maxOpenTrades,
                 margin_mode: cfg.marginMode,
+                market_mode: cfg.marketMode,
                 max_leverage: cfg.maxLeverage,
                 risk_per_trade_pct: cfg.riskPerTradePct,
                 max_total_exposure_pct: cfg.maxTotalExposurePct,
@@ -970,6 +975,23 @@ export default function AutoTraderScreen() {
               </TouchableOpacity>
             ))}
           </View>
+
+          <Text style={[styles.fieldLabel, { marginTop: SPACING.md }]}>Market Mode</Text>
+          <View style={styles.chips}>
+            {(['auto', 'spot', 'futures'] as const).map((mode) => (
+              <TouchableOpacity
+                key={mode}
+                style={[styles.chip, cfg.marketMode === mode && styles.chipActive]}
+                onPress={() => !isEnabled && updateCfg({ marketMode: mode })}
+                disabled={isEnabled}
+              >
+                <Text style={[styles.chipText, cfg.marketMode === mode && styles.chipTextActive]}>{mode.toUpperCase()}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          <Text style={{ color: COLORS.textMuted, fontSize: FONT_SIZES.xs, marginTop: 4 }}>
+            {cfg.marketMode === 'spot' ? 'Spot: buy-only, no leverage, requires $50+ USDT' : cfg.marketMode === 'futures' ? 'Futures: long/short with leverage, requires $5+ USDT' : 'Auto: exchange decides (MEXC→spot, others→futures)'}
+          </Text>
 
           <Text style={[styles.fieldLabel, { marginTop: SPACING.md }]}>Margin Mode</Text>
           <View style={styles.chips}>
