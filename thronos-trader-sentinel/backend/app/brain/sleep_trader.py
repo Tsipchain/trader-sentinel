@@ -796,9 +796,9 @@ async def run_sleep_session(
                     spot_quote_free = float((snapshot.get("spot") or {}).get("quoteFree") or 0)
                     spot_equity = float((snapshot.get("spot") or {}).get("equity") or 0)
                     equity = spot_quote_free if spot_quote_free > 0 else spot_equity
-                    min_equity_required = 50.0  # Spot requires $50+ available
+                    min_equity_required = 10.0  # Spot requires $10+ available
                     if equity < min_equity_required:
-                        _log_sleep(user_id, f"Spot available USDT too low (${equity:.2f}) — need $50+ for spot trading")
+                        _log_sleep(user_id, f"Spot available USDT too low (${equity:.2f}) — need $10+ for spot trading")
                         await asyncio.sleep(SCAN_INTERVAL_S)
                         continue
 

@@ -425,7 +425,7 @@ export default function AutoTraderScreen() {
               const spotFree = portfolio.spot?.quoteFree ?? 0;
               const marketMode = cfg.marketMode ?? 'auto';
               const isSpotRoute = marketMode === 'spot' || (marketMode === 'auto' && cfg.exchange.toLowerCase() === 'mexc');
-              const minRequired = isSpotRoute ? 50 : 5;
+              const minRequired = isSpotRoute ? 10 : 5;
               const effectiveTradable = isSpotRoute
                 ? Math.max(spotFree, futuresFree)
                 : Math.max(futuresFree, spotFree);
