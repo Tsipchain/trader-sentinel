@@ -796,9 +796,9 @@ async def run_sleep_session(
                     spot_quote_free = float((snapshot.get("spot") or {}).get("quoteFree") or 0)
                     spot_equity = float((snapshot.get("spot") or {}).get("equity") or 0)
                     equity = spot_quote_free if spot_quote_free > 0 else spot_equity
-                    min_equity_required = 5.0
+                    min_equity_required = 50.0  # Spot requires $50+ available
                     if equity < min_equity_required:
-                        _log_sleep(user_id, f"Spot available USDT too low (${equity:.2f}) — pausing entries")
+                        _log_sleep(user_id, f"Spot available USDT too low (${equity:.2f}) — need $50+ for spot trading")
                         await asyncio.sleep(SCAN_INTERVAL_S)
                         continue
 
@@ -1455,8 +1455,8 @@ async def check_trade_protection(
                 "status": "executed",
             })
 
-        # 4. Large loss — DCA safe order in sleep mode
-        if mode == "sleep" and pnl_pct <= -(sl_pct * 0.5) and pnl_pct > -sl_pct:
+        # 4. Large loss — DCA safe order (both active and sleep modes)
+        if pnl_pct <= -(sl_pct * 0.5) and pnl_pct > -sl_pct:
             actions.append({
                 "id": f"{action_id_base}-safe",
                 "type": "safe_order",
@@ -1480,6 +1480,33 @@ async def check_trade_protection(
             except Exception as e:
                 actions[-1]["status"] = "failed"
                 log.warning("[protection] safe order failed: %s", e)
+
+        # 5. Significant loss hedge — open opposite position when PnL approaches SL
+        if pnl_pct <= -(sl_pct * 0.7) and leverage >= 5:
+            risk_level = _max_risk(risk_level, "HIGH")
+            actions.append({
+                "id": f"{action_id_base}-loss-hedge",
+                "type": "hedge",
+                "symbol": sym,
+                "description": f"PnL {pnl_pct:.1f}% near SL — hedging 30% to protect capital",
+                "timestamp": time.time(),
+                "status": "pending",
+            })
+            try:
+                hedge_side = "sell" if side == "long" else "buy"
+                hedge_amount = pos.get("contracts", 0) * 0.3
+                result = await connector.create_market_order(
+                    exchange, api_key, api_secret,
+                    sym.replace(":USDT", ""), hedge_side,
+                    hedge_amount, passphrase,
+                )
+                actions[-1]["status"] = "executed" if result.get("ok") else "failed"
+                if not result.get("ok") and _is_contract_activation_error(str(result.get("error", ""))):
+                    blocked_symbols.add(sym)
+                    blocked_updated = True
+            except Exception as e:
+                actions[-1]["status"] = "failed"
+                log.warning("[protection] loss hedge failed: %s", e)
 
     if blocked_updated:
         session["blocked_symbols"] = sorted(blocked_symbols)

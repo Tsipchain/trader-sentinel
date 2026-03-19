@@ -68,6 +68,7 @@ export interface AutoTraderConfig {
   maxPositionPct: number;
   maxOpenTrades: number;
   marginMode: 'isolated' | 'cross';
+  marketMode: 'auto' | 'spot' | 'futures';
   maxLeverage: number;
   riskPerTradePct: number;
   maxTotalExposurePct: number;
@@ -116,6 +117,7 @@ const DEFAULT_AUTOTRADER_CONFIG: AutoTraderConfig = {
   maxPositionPct: 10,
   maxOpenTrades: 3,
   marginMode: 'isolated',
+  marketMode: 'auto',
   maxLeverage: 125,
   riskPerTradePct: 1,
   maxTotalExposurePct: 25,
