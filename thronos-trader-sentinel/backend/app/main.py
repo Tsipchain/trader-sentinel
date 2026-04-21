@@ -54,10 +54,20 @@ async def verify_api_key(key: str = Security(_api_key_header)):
         raise _HTTPException(status_code=HTTP_403_FORBIDDEN, detail="Invalid or missing API key")
     return key
 
+# SECURITY: CORS restricted — Phase 0 hardening
+ALLOWED_ORIGINS = [
+    "https://thronoschain.org",
+    "https://sentinel.thronoschain.org",
+    "https://api.thronoschain.org",
+    "https://app.thronoschain.org",
+]
+if os.getenv("CORS_ORIGINS"):
+    ALLOWED_ORIGINS = os.getenv("CORS_ORIGINS").split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -1158,7 +1168,8 @@ _pool_state = {
 
 
 @app.post("/api/pools/fee-deposit")
-async def pool_fee_deposit(payload: dict = Body(default_factory=dict)):
+# SECURITY: Auth added — Phase 0 hardening
+async def pool_fee_deposit(payload: dict = Body(default_factory=dict), _: str = Security(verify_api_key)):
     """
     Receive cross-chain fee deposits from the gateway.
     These are real THR locked by the AI wallet, backing wrapped THR on external chains.
@@ -1215,7 +1226,8 @@ async def pool_fee_deposit(payload: dict = Body(default_factory=dict)):
 
 
 @app.get("/api/pools/status")
-async def pool_status():
+# SECURITY: Auth added — Phase 0 hardening
+async def pool_status(_: str = Security(verify_api_key)):
     """Get current pool status with real TVL from cross-chain fee deposits."""
     pools = []
     for pair, state in _pool_state.items():
@@ -1232,7 +1244,8 @@ async def pool_status():
 
 
 @app.get("/api/pools/deposits/{pool_pair}")
-async def pool_deposits(pool_pair: str):
+# SECURITY: Auth added — Phase 0 hardening
+async def pool_deposits(pool_pair: str, _: str = Security(verify_api_key)):
     """Get recent fee deposits for a specific pool."""
     pair = pool_pair.replace("-", "/").upper()
     state = _pool_state.get(pair)
@@ -1249,7 +1262,8 @@ async def pool_deposits(pool_pair: str):
 
 
 @app.get("/api/tts")
-async def tts(text: str = Query(...), lang: str = Query("en-US"), voice: str = Query("en-US-Neural2-D")):
+# SECURITY: Auth added — Phase 0 hardening
+async def tts(text: str = Query(...), lang: str = Query("en-US"), voice: str = Query("en-US-Neural2-D"), _: str = Security(verify_api_key)):
     if not settings.google_tts_enabled:
         return {"ok": False, "error": "GOOGLE_TTS_ENABLED=false"}
     audio = g_tts(text=text, language=lang, voice=voice)

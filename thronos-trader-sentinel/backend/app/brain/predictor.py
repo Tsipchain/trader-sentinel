@@ -11,7 +11,10 @@ Supports:
 Models are persisted to MODELS_DIR (from store.py → /disckb/models by default)
 so they survive container restarts on the Railway volume.
 """
+import hashlib
+import hmac
 import logging
+import os
 import pickle
 import time
 from pathlib import Path
@@ -77,11 +80,17 @@ class PredictionEngine:
         for pkl_path in MODELS_DIR.glob("*.pkl"):
             user_id = pkl_path.stem
             try:
+                # SECURITY: Pickle deserialization gated — Phase 0 hardening
+                PICKLE_SIGNING_KEY = os.getenv("PICKLE_SIGNING_KEY", "")
+                if not PICKLE_SIGNING_KEY:
+                    raise RuntimeError("PICKLE_SIGNING_KEY not set — refusing to load unsigned model files")
                 with open(pkl_path, "rb") as f:
                     model = pickle.load(f)
                 if isinstance(model, _UserModel):
                     self._models[user_id] = model
                     loaded += 1
+            except RuntimeError:
+                raise
             except Exception as exc:
                 log.warning("[brain] could not load model from %s: %s", pkl_path, exc)
         if loaded:
