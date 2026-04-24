@@ -262,7 +262,10 @@ async def sync_trades(payload: dict = Body(default_factory=dict), _: str = Secur
     api_key = payload.get("api_key") or payload.get("apiKey")
     api_secret = payload.get("api_secret") or payload.get("apiSecret")
     symbol = payload.get("symbol") or "BTC/USDT"
-    days = int(payload.get("days") or 30)
+    try:
+        days = max(1, min(365, int(payload.get("days") or 30)))
+    except (TypeError, ValueError):
+        days = 30
 
     if not exchange or not api_key or not api_secret:
         return {"ok": True, "trained": False, "trade_count": 0}
@@ -302,10 +305,13 @@ def predict(payload: dict = Body(default_factory=dict), _: str = Security(verify
     market-signal heuristic.
     """
     user_id = payload.get("user_id") or payload.get("userId") or "anonymous"
-    rsi = float(payload.get("rsi") or 50.0)
-    atr_score = float(payload.get("atr_score") or payload.get("atrScore") or 5.0)
-    geo_score = float(payload.get("geo_score") or payload.get("geoScore") or 5.0)
-    calendar_score = float(payload.get("calendar_score") or payload.get("calendarScore") or 5.0)
+    try:
+        rsi = max(0.0, min(100.0, float(payload.get("rsi") or 50.0)))
+        atr_score = max(0.0, min(10.0, float(payload.get("atr_score") or payload.get("atrScore") or 5.0)))
+        geo_score = max(0.0, min(10.0, float(payload.get("geo_score") or payload.get("geoScore") or 5.0)))
+        calendar_score = max(0.0, min(10.0, float(payload.get("calendar_score") or payload.get("calendarScore") or 5.0)))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "Invalid numeric value for rsi/atr_score/geo_score/calendar_score"}
 
     try:
         result = _engine.predict(user_id, {
@@ -330,7 +336,8 @@ def predict(payload: dict = Body(default_factory=dict), _: str = Security(verify
                 "created_at": datetime.now(timezone.utc).isoformat(),
             })
         return {"ok": True, **result}
-    except Exception:
+    except Exception as exc:
+        log.exception("Prediction failed for user=%s: %s", user_id, exc)
         return {"ok": True, "prediction": "risky", "probability": 0.5, "confidence": "low", "model": "stub"}
 
 

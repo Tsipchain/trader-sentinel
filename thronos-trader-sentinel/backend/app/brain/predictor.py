@@ -63,38 +63,56 @@ class PredictionEngine:
         safe_id = "".join(c if c.isalnum() or c in "-_." else "_" for c in user_id)
         return MODELS_DIR / f"{safe_id}.pkl"
 
+    @staticmethod
+    def _get_signing_key() -> bytes:
+        key = os.getenv("PICKLE_SIGNING_KEY", "")
+        if not key:
+            raise RuntimeError("PICKLE_SIGNING_KEY not set — refusing to handle model files")
+        return key.encode()
+
     def _save_model(self, user_id: str) -> None:
         try:
+            key = self._get_signing_key()
             MODELS_DIR.mkdir(parents=True, exist_ok=True)
             path = self._model_path(user_id)
+            data = pickle.dumps(self._models[user_id], protocol=pickle.HIGHEST_PROTOCOL)
+            sig = hmac.new(key, data, hashlib.sha256).digest()
             with open(path, "wb") as f:
-                pickle.dump(self._models[user_id], f, protocol=pickle.HIGHEST_PROTOCOL)
-            log.info("[brain] saved model for user=%s → %s", user_id, path)
+                f.write(sig)
+                f.write(data)
+            log.info("[brain] saved signed model for user=%s → %s", user_id, path)
         except Exception as exc:
             log.warning("[brain] could not save model for user=%s: %s", user_id, exc)
 
     def _load_persisted_models(self) -> None:
         if not MODELS_DIR.exists():
             return
+        try:
+            key = self._get_signing_key()
+        except RuntimeError:
+            log.warning("[brain] PICKLE_SIGNING_KEY not set — skipping model load")
+            return
         loaded = 0
         for pkl_path in MODELS_DIR.glob("*.pkl"):
             user_id = pkl_path.stem
             try:
-                # SECURITY: Pickle deserialization gated — Phase 0 hardening
-                PICKLE_SIGNING_KEY = os.getenv("PICKLE_SIGNING_KEY", "")
-                if not PICKLE_SIGNING_KEY:
-                    raise RuntimeError("PICKLE_SIGNING_KEY not set — refusing to load unsigned model files")
-                with open(pkl_path, "rb") as f:
-                    model = pickle.load(f)
+                raw = pkl_path.read_bytes()
+                if len(raw) < 32:
+                    log.warning("[brain] model file too small (unsigned?): %s", pkl_path)
+                    continue
+                stored_sig, data = raw[:32], raw[32:]
+                expected_sig = hmac.new(key, data, hashlib.sha256).digest()
+                if not hmac.compare_digest(stored_sig, expected_sig):
+                    log.warning("[brain] HMAC mismatch — refusing to load %s", pkl_path)
+                    continue
+                model = pickle.loads(data)
                 if isinstance(model, _UserModel):
                     self._models[user_id] = model
                     loaded += 1
-            except RuntimeError:
-                raise
             except Exception as exc:
                 log.warning("[brain] could not load model from %s: %s", pkl_path, exc)
         if loaded:
-            log.info("[brain] loaded %d persisted model(s) from %s", loaded, MODELS_DIR)
+            log.info("[brain] loaded %d verified model(s) from %s", loaded, MODELS_DIR)
 
     def user_count(self) -> int:
         return len(self._models)
@@ -135,7 +153,8 @@ class PredictionEngine:
                 scoring="accuracy",
             )
             model.accuracy = float(cv_scores.mean())
-        except Exception:
+        except Exception as exc:
+            log.warning("[brain] cross-validation failed for user=%s: %s", user_id, exc)
             model.accuracy = 0.0
 
         model.clf.fit(X_scaled, y)
