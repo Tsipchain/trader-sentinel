@@ -34,6 +34,7 @@ from app.brain.connector import fetch_exchange_snapshot, fetch_user_trades, fetc
 from app.brain.predictor import PredictionEngine
 from app.brain import store as brain_store
 from app.brain import sleep_trader
+from app.brain import sigbalbot_publisher
 
 logging.basicConfig(level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO))
 log = logging.getLogger(__name__)
@@ -791,6 +792,16 @@ def _send_telegram_paid_signal(payload: TelegramSignalRequest) -> tuple[bool, st
 def brain_telegram_signal(req: TelegramSignalRequest, _: str = Security(verify_api_key)):
     ok, detail = _send_telegram_paid_signal(req)
     return {"ok": ok, "detail": detail}
+
+
+# ── SigBalBot integration ────────────────────────────────────────────────────
+
+@app.get("/api/sigbalbot/status")
+async def sigbalbot_status(_: str = Security(verify_api_key)):
+    if not sigbalbot_publisher.is_configured():
+        return {"ok": False, "error": "not_configured", "hint": "Set SIGBALBOT_WEBHOOK_URL and SIGBALBOT_API_KEY"}
+    result = await sigbalbot_publisher.check_status()
+    return result
 
 
 # ── AutoTrader endpoints ──────────────────────────────────────────────────────
