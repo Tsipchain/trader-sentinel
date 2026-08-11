@@ -1,9 +1,14 @@
 """
 SigBalBot Webhook Publisher — Sends finalized signals to the SigBalBot Telegram bot.
 
-Integration contract: POST signal payloads to SIGBALBOT_WEBHOOK_URL after
-the Sleep Mode AutoTrader finalizes and saves a trade. SigBalBot deduplicates
-on ``id``, so retries with the same id are safe.
+Integration contract v1.0:
+  - 202 = delivered, telegram_sent
+  - 200 + duplicate=true = already delivered (dedup on id)
+  - 503 + retryable=true = temporary Telegram failure, retry with backoff
+  - 401/403 = permanent auth error, do NOT retry
+  - 400 = payload/contract error, do NOT retry, log response body
+
+The same ``id`` is sent on every retry so SigBalBot deduplicates.
 """
 import asyncio
 import logging
@@ -14,10 +19,12 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-_WEBHOOK_URL = None
-_API_KEY = None
+_WEBHOOK_URL: str | None = None
+_API_KEY: str | None = None
 _TIMEOUT = 10
 _MAX_RETRIES = 3
+
+_VALID_SIGNALS = {"LONG", "SHORT", "BUY", "SELL", "HOLD", "ACCUMULATION", "DISTRIBUTION"}
 
 
 def _load_config() -> tuple[str, str]:
@@ -33,6 +40,17 @@ def is_configured() -> bool:
     return bool(url and key)
 
 
+def _normalize_symbol(symbol: str) -> str:
+    s = (symbol or "").strip()
+    s = s.replace(":USDT", "")
+    if "/" not in s and len(s) > 3:
+        for quote in ("USDT", "BUSD", "USDC"):
+            if s.endswith(quote):
+                s = s[: -len(quote)] + "/" + quote
+                break
+    return s
+
+
 def build_signal_payload(trade: dict[str, Any], ta: dict[str, Any]) -> dict[str, Any]:
     """Build the SigBalBot signal payload from a finalized sleep trade + TA data."""
     side = trade.get("side", "")
@@ -44,7 +62,10 @@ def build_signal_payload(trade: dict[str, Any], ta: dict[str, Any]) -> dict[str,
     tp2 = None
     if entry_price and tp_price:
         tp_distance = abs(tp_price - entry_price)
-        tp2 = round(entry_price + tp_distance * 1.618, 6) if side == "buy" else round(entry_price - tp_distance * 1.618, 6)
+        tp2 = round(
+            entry_price + tp_distance * 1.618 if side == "buy" else entry_price - tp_distance * 1.618,
+            6,
+        )
 
     strategies = trade.get("strategies", {})
     strat_parts = []
@@ -61,14 +82,14 @@ def build_signal_payload(trade: dict[str, Any], ta: dict[str, Any]) -> dict[str,
 
     ta_summary = trade.get("ta_summary", {})
     confirmations = []
-    if ta_summary.get("rsi"):
+    if ta_summary.get("rsi") is not None:
         confirmations.append(f"RSI {ta_summary['rsi']:.0f}")
     if ta_summary.get("macd"):
         confirmations.append(f"MACD {ta_summary['macd']}")
     if ta_summary.get("ema"):
         confirmations.append(f"EMA {ta_summary['ema']}")
 
-    symbol = trade.get("symbol", "")
+    symbol = _normalize_symbol(trade.get("symbol", ""))
     signal_id = f"sentinel-{symbol.replace('/', '-')}-{direction}-{int(trade.get('opened_at', 0))}"
 
     risk = "LOW"
@@ -84,6 +105,8 @@ def build_signal_payload(trade: dict[str, Any], ta: dict[str, Any]) -> dict[str,
     confluence_score = float(confluence_info.get("confidence_bonus", 0))
     if confluence_info.get("level") == "strong":
         confluence_score = max(confluence_score, 0.15)
+
+    assert direction in _VALID_SIGNALS, f"signal '{direction}' not in {_VALID_SIGNALS}"
 
     return {
         "id": signal_id,
@@ -107,7 +130,7 @@ def build_signal_payload(trade: dict[str, Any], ta: dict[str, Any]) -> dict[str,
 
 
 async def publish_signal(payload: dict[str, Any]) -> dict[str, Any] | None:
-    """POST a signal to SigBalBot with exponential-backoff retry.
+    """POST a signal to SigBalBot with contract-aware retry.
 
     Returns the response JSON on success, None on failure.
     The same ``id`` is sent on every retry so SigBalBot deduplicates.
@@ -117,7 +140,6 @@ async def publish_signal(payload: dict[str, Any]) -> dict[str, Any] | None:
         log.debug("sigbalbot: not configured, skipping publish")
         return None
 
-    masked_key = key[:4] + "***" if len(key) > 4 else "***"
     signal_id = payload.get("id", "?")
 
     for attempt in range(_MAX_RETRIES):
@@ -128,37 +150,119 @@ async def publish_signal(payload: dict[str, Any]) -> dict[str, Any] | None:
                     json=payload,
                     headers={"Authorization": f"Bearer {key}"},
                 )
-                resp.raise_for_status()
-                result = resp.json()
-                log.info("sigbalbot: published signal %s → HTTP %d", signal_id, resp.status_code)
-                return result
-        except httpx.HTTPStatusError as exc:
+
+            status = resp.status_code
+            body = _safe_response_json(resp)
+
+            # 202 — delivered successfully
+            if status == 202:
+                log.info(
+                    "sigbalbot: signal %s delivered → HTTP 202 event_id=%s telegram_sent=%s outcomes=%s",
+                    signal_id,
+                    body.get("event_id", "?"),
+                    body.get("telegram_sent"),
+                    body.get("outcomes_scheduled"),
+                )
+                return body
+
+            # 200 — duplicate (already delivered, dedup on id)
+            if status == 200 and body.get("duplicate"):
+                log.info(
+                    "sigbalbot: signal %s duplicate → HTTP 200 event_id=%s",
+                    signal_id,
+                    body.get("event_id", "?"),
+                )
+                return body
+
+            # 200 — other success
+            if status == 200:
+                log.info("sigbalbot: signal %s → HTTP 200 body=%s", signal_id, body)
+                return body
+
+            # 401/403 — permanent auth/config error, do NOT retry
+            if status in (401, 403):
+                log.error(
+                    "sigbalbot: PERMANENT AUTH ERROR for signal %s → HTTP %d. "
+                    "Check SIGBALBOT_WEBHOOK_URL and SIGBALBOT_API_KEY configuration.",
+                    signal_id,
+                    status,
+                )
+                return None
+
+            # 400 — payload/contract error, do NOT retry, log body
+            if status == 400:
+                log.error(
+                    "sigbalbot: PAYLOAD CONTRACT ERROR for signal %s → HTTP 400 body=%s",
+                    signal_id,
+                    body,
+                )
+                return None
+
+            # 503 — retryable (temporary Telegram failure)
+            if status == 503 and body.get("retryable"):
+                log.warning(
+                    "sigbalbot: retryable 503 for signal %s (attempt %d/%d) event_id=%s",
+                    signal_id,
+                    attempt + 1,
+                    _MAX_RETRIES,
+                    body.get("event_id", "?"),
+                )
+                if attempt < _MAX_RETRIES - 1:
+                    await asyncio.sleep(2 ** (attempt + 1))
+                continue
+
+            # Any other HTTP error
             log.warning(
-                "sigbalbot: HTTP %d for signal %s (attempt %d/%d)",
-                exc.response.status_code, signal_id, attempt + 1, _MAX_RETRIES,
+                "sigbalbot: HTTP %d for signal %s (attempt %d/%d) body=%s",
+                status,
+                signal_id,
+                attempt + 1,
+                _MAX_RETRIES,
+                body,
             )
+            if status >= 500 and attempt < _MAX_RETRIES - 1:
+                await asyncio.sleep(2 ** (attempt + 1))
+                continue
+            return None
+
         except Exception as exc:
             log.warning(
                 "sigbalbot: network error for signal %s (attempt %d/%d): %s",
-                signal_id, attempt + 1, _MAX_RETRIES, str(exc)[:120],
+                signal_id,
+                attempt + 1,
+                _MAX_RETRIES,
+                str(exc)[:120],
             )
+            if attempt < _MAX_RETRIES - 1:
+                await asyncio.sleep(2 ** (attempt + 1))
 
-        if attempt < _MAX_RETRIES - 1:
-            backoff = 2 ** (attempt + 1)
-            await asyncio.sleep(backoff)
-
-    log.error("sigbalbot: gave up publishing signal %s after %d attempts", signal_id, _MAX_RETRIES)
+    log.error(
+        "sigbalbot: gave up publishing signal %s after %d attempts",
+        signal_id,
+        _MAX_RETRIES,
+    )
     return None
 
 
+def _safe_response_json(resp: httpx.Response) -> dict[str, Any]:
+    try:
+        return resp.json()
+    except Exception:
+        return {"_raw": resp.text[:500]}
+
+
 async def check_status() -> dict[str, Any]:
-    """Check connectivity to SigBalBot's status endpoint."""
+    """Check connectivity to SigBalBot's status endpoint.
+
+    Makes a real authenticated GET to:
+      {SIGBALBOT_WEBHOOK_URL}/status
+    e.g. https://sigbalbot.up.railway.app/api/v1/signals/trader-sentinel/status
+    """
     url, key = _load_config()
     if not url or not key:
         return {"ok": False, "error": "not_configured"}
 
-    base = url.rsplit("/", 2)[0] if "/signals" in url else url.rstrip("/")
-    status_url = f"{base}/signals/trader-sentinel/status"
+    status_url = url.rstrip("/") + "/status"
 
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
