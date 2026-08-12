@@ -17,6 +17,7 @@ from typing import Any
 from app.brain import connector, store as brain_store
 from app.brain.predictor import PredictionEngine
 from app.brain import sigbalbot_publisher
+from app.brain import platinum_signal_enricher
 from app.sentinel import technicals as tech_module
 from app.sentinel import sessions as sessions_module
 from app.sentinel.strategies.divergence import detect_divergences
@@ -1127,6 +1128,7 @@ async def run_sleep_session(
                                 if sigbalbot_publisher.is_configured():
                                     try:
                                         sig_payload = sigbalbot_publisher.build_signal_payload(trade_record, ta)
+                                        sig_payload = platinum_signal_enricher.enrich_signal(sig_payload, ta)
                                         asyncio.create_task(sigbalbot_publisher.publish_signal(sig_payload))
                                     except Exception:
                                         log.debug("sigbalbot: failed to build/dispatch signal for %s", symbol)
