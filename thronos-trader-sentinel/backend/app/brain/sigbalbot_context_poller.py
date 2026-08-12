@@ -33,6 +33,7 @@ import httpx
 
 from app.brain import store as brain_store
 from app.brain import sigbalbot_publisher
+from app.brain import platinum_signal_enricher
 
 log = logging.getLogger(__name__)
 
@@ -515,6 +516,7 @@ async def poll_and_evaluate() -> dict[str, Any]:
     for sig in actionable_signals:
         if sigbalbot_publisher.is_configured():
             try:
+                sig = platinum_signal_enricher.enrich_signal(sig, sig)
                 await sigbalbot_publisher.publish_signal(sig)
                 summary["signals_posted"] += 1
                 log.info(
