@@ -8,7 +8,8 @@ Polling contract v1.0:
   Authorization: Bearer <SIGBALBOT_API_KEY>
 
 Response:
-  { ok, contract_version, generated_at, watchlist[], native_signals[] }
+  { ok, contract_version, generated_at, watchlist[], native_signals[],
+    wallet_snapshots[], wallet_snapshot_status }
 
 Protocol (codex integration):
   1. Call GET /api/v1/signals/trader-sentinel/status first.
