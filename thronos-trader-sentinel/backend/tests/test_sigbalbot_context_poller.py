@@ -502,9 +502,11 @@ def test_get_status_url():
 @pytest.mark.asyncio
 async def test_check_context_capability_success():
     poller._context_capability_confirmed = False
+    poller._contract_version = None
     mock_client = AsyncMock()
     mock_client.get = AsyncMock(return_value=_mock_response(200, {
         "status": "ok",
+        "contract_version": "1.0",
         "capabilities": {
             "context_feed": "/api/v1/context/trader-sentinel",
         },
@@ -520,6 +522,31 @@ async def test_check_context_capability_success():
 
     assert result is True
     assert poller._context_capability_confirmed is True
+    assert poller._contract_version == "1.0"
+
+
+@pytest.mark.asyncio
+async def test_check_context_capability_unsupported_version():
+    poller._context_capability_confirmed = False
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=_mock_response(200, {
+        "status": "ok",
+        "contract_version": "99.0",
+        "capabilities": {
+            "context_feed": "/api/v1/context/trader-sentinel",
+        },
+    }))
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_client)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_cls.return_value = ctx
+
+        result = await poller.check_context_capability()
+
+    assert result is False
+    assert poller._context_capability_confirmed is False
 
 
 @pytest.mark.asyncio
@@ -528,6 +555,7 @@ async def test_check_context_capability_not_present():
     mock_client = AsyncMock()
     mock_client.get = AsyncMock(return_value=_mock_response(200, {
         "status": "ok",
+        "contract_version": "1.0",
         "capabilities": {},
     }))
 
@@ -642,7 +670,58 @@ def test_poller_status_includes_capability():
     assert status["context_capability_confirmed"] is True
 
 
-# ── 11. Fetch sends since parameter ────────────────────────────────────────
+# ── 11. Contract version validation ───────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_fetch_context_rejects_unsupported_contract_version():
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=_mock_response(200, {
+        "ok": True,
+        "contract_version": "99.0",
+        "generated_at": "2025-01-15T12:00:00Z",
+        "watchlist": [], "native_signals": [],
+    }))
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_client)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_cls.return_value = ctx
+
+        result = await poller.fetch_context()
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_context_accepts_supported_contract_version():
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=_mock_response(200, {
+        **SAMPLE_CONTEXT_RESPONSE,
+        "contract_version": "1.0",
+    }))
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_client)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_cls.return_value = ctx
+
+        result = await poller.fetch_context()
+
+    assert result is not None
+    assert result["ok"] is True
+
+
+def test_poller_status_includes_contract_version():
+    poller._contract_version = "1.0"
+    with patch("app.brain.store.load_sigbalbot_cursor") as mock_load:
+        mock_load.return_value = {"last_cursor": None, "processed_signal_ids": []}
+        status = poller.get_poller_status()
+    assert status["contract_version"] == "1.0"
+
+
+# ── 12. Fetch sends since parameter ────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_fetch_context_sends_since_param():
@@ -683,6 +762,120 @@ async def test_fetch_context_503_retries():
 
 
 # ── 12. Processed IDs bounded ──────────────────────────────────────────────
+
+# ── 15. End-to-end verification ────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_e2e_status_context_post_cycle():
+    """Controlled end-to-end: status → context → evaluate → post → verify."""
+
+    STATUS_RESPONSE = {
+        "status": "ok",
+        "contract_version": "1.0",
+        "capabilities": {
+            "context_feed": "/api/v1/context/trader-sentinel",
+        },
+    }
+
+    CONTEXT_RESPONSE = {
+        "ok": True,
+        "contract_version": "1.0",
+        "generated_at": "2025-01-15T12:00:00Z",
+        "watchlist": [
+            {
+                "symbol": "BTC/USDT", "label": "BTC", "mode": "sniper",
+                "market_cap_usd": 1_200_000_000_000,
+                "volume_24h": 45_000_000_000,
+                "liquidity_usd": 500_000_000,
+                "last_scan_at": "2025-01-15T11:55:00Z",
+                "last_scan_signal": "HOLD",
+            },
+        ],
+        "native_signals": [
+            {
+                "id": 42,
+                "symbol": "ETH/USDT",
+                "signal": "AGG_LONG",
+                "timeframe": "15m",
+                "price": 3200,
+                "confidence": 85,
+                "risk": "STANDARD",
+                "reason": "Bullish divergence",
+                "created_at": "2025-01-15T11:58:00Z",
+            },
+        ],
+    }
+
+    POST_RESPONSE = {
+        "event_id": "evt-e2e-test-001",
+        "duplicate": False,
+        "telegram_sent": True,
+        "outcomes_scheduled": True,
+        "admin_source": "trader-sentinel",
+    }
+
+    # Phase 1: capability check
+    poller._context_capability_confirmed = False
+    poller._contract_version = None
+    mock_status_client = AsyncMock()
+    mock_status_client.get = AsyncMock(return_value=_mock_response(200, STATUS_RESPONSE))
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_status_client)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_cls.return_value = ctx
+
+        cap_result = await poller.check_context_capability()
+
+    assert cap_result is True, "Phase 1 FAIL: capability check"
+    assert poller._contract_version == "1.0", "Phase 1 FAIL: contract_version"
+
+    # Phase 2: full poll cycle
+    with (
+        patch.object(poller, "fetch_context", new_callable=AsyncMock) as mock_fetch,
+        patch("app.brain.store.load_sigbalbot_cursor") as mock_load,
+        patch("app.brain.store.save_sigbalbot_cursor") as mock_save,
+        patch("app.sentinel.technicals.calculate", new_callable=AsyncMock) as mock_ta,
+        patch("app.brain.sleep_trader._evaluate_entry") as mock_eval,
+        patch("app.sentinel.risk.generate_report", new_callable=AsyncMock) as mock_risk,
+        patch.object(poller.sigbalbot_publisher, "is_configured", return_value=True),
+        patch.object(poller.sigbalbot_publisher, "publish_signal", new_callable=AsyncMock) as mock_publish,
+    ):
+        mock_fetch.return_value = CONTEXT_RESPONSE
+        mock_load.return_value = {"last_cursor": None, "processed_signal_ids": []}
+        mock_ta.return_value = MockTAResult(price=3200, rsi=28)
+        mock_eval.return_value = ("buy", 0.72)
+        mock_risk_report = MagicMock()
+        mock_risk_report.composite_score = 3.5
+        mock_risk.return_value = mock_risk_report
+        mock_publish.return_value = POST_RESPONSE
+
+        summary = await poller.poll_and_evaluate()
+
+    # Verify Phase 2 results
+    assert "error" not in summary, f"Phase 2 FAIL: {summary.get('error')}"
+    assert summary["context_items"] == 2, f"Phase 2: expected 2 context items, got {summary['context_items']}"
+    assert summary["watchlist_evaluated"] == 1
+    assert summary["native_signals_evaluated"] == 1
+
+    # Verify cursor saved
+    mock_save.assert_called_once()
+    saved = mock_save.call_args[0][0]
+    assert saved["last_cursor"] is not None
+
+    # Verify signal was posted (not on every cycle — only actionable)
+    if mock_publish.called:
+        posted_payload = mock_publish.call_args[0][0]
+        assert posted_payload["id"].startswith("sentinel-ctx-"), "Finalized event ID prefix wrong"
+        assert posted_payload["signal"] in ("LONG", "SHORT")
+        assert summary["signals_posted"] >= 1
+
+    # Verify no feedback loop signals were evaluated
+    assert summary["skipped_feedback_loop"] == 0
+
+
+# ── 16. Processed IDs bounded ─────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_processed_ids_bounded():
