@@ -36,6 +36,7 @@ from app.brain import store as brain_store
 from app.brain import sleep_trader
 from app.brain import sigbalbot_publisher
 from app.brain import market_review_publisher
+from app.brain import sigbalbot_context_poller
 
 logging.basicConfig(level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO))
 log = logging.getLogger(__name__)
@@ -157,6 +158,11 @@ async def _startup_market_review_scheduler():
     market_review_publisher.start_scheduler()
 
 
+@app.on_event("startup")
+async def _startup_sigbalbot_context_poller():
+    sigbalbot_context_poller.start_poller()
+
+
 @app.on_event("shutdown")
 async def _shutdown():
     global _sleep_worker_task
@@ -165,6 +171,7 @@ async def _shutdown():
         with contextlib.suppress(Exception):
             await _sleep_worker_task
     market_review_publisher.stop_scheduler()
+    sigbalbot_context_poller.stop_poller()
     await _cex.close()
     await _dex.close()
     await tech_module.close_exchange_pool()
@@ -829,6 +836,8 @@ async def sigbalbot_status(_: str = Security(verify_api_key)):
         }
     else:
         result["market_review"] = {"configured": False}
+
+    result["context_poller"] = sigbalbot_context_poller.get_poller_status()
 
     return result
 

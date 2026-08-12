@@ -25,6 +25,7 @@ AUTOTRADER_DIR = DISK_BASE / "autotrader"
 ANALYSIS_DIR = DISK_BASE / "analysis"
 SUBSCRIPTIONS_DIR = DISK_BASE / "subscriptions"
 SECURITY_DIR = DISK_BASE / "security"
+SIGBALBOT_CONTEXT_DIR = DISK_BASE / "sigbalbot_context"
 
 
 def _safe(user_id: str) -> str:
@@ -207,6 +208,34 @@ def list_autotrader_user_ids() -> list[str]:
         user_ids.append(path.stem)
     return sorted(set(user_ids))
 
+# ── SigBalBot Context Polling Cursor ─────────────────────────────────────────
+
+def save_sigbalbot_cursor(cursor_data: dict) -> None:
+    SIGBALBOT_CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
+    path = SIGBALBOT_CONTEXT_DIR / "cursor.json"
+    try:
+        with open(path, "w") as f:
+            json.dump(cursor_data, f)
+        log.info("[store] saved sigbalbot context cursor ts=%s", cursor_data.get("last_cursor"))
+    except Exception as exc:
+        log.warning("[store] could not save sigbalbot cursor: %s", exc)
+
+
+def load_sigbalbot_cursor() -> dict:
+    path = SIGBALBOT_CONTEXT_DIR / "cursor.json"
+    if not path.exists():
+        return {"last_cursor": None, "processed_signal_ids": []}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        if "processed_signal_ids" not in data:
+            data["processed_signal_ids"] = []
+        return data
+    except Exception as exc:
+        log.warning("[store] could not load sigbalbot cursor: %s", exc)
+        return {"last_cursor": None, "processed_signal_ids": []}
+
+
 def storage_status() -> dict:
     def _count_files(path: Path, suffix: str = "") -> int:
         if not path.exists():
@@ -245,5 +274,10 @@ def storage_status() -> dict:
             "path": str(SECURITY_DIR),
             "files": _count_files(SECURITY_DIR, ".json"),
             "exists": SECURITY_DIR.exists(),
+        },
+        "sigbalbot_context": {
+            "path": str(SIGBALBOT_CONTEXT_DIR),
+            "files": _count_files(SIGBALBOT_CONTEXT_DIR, ".json"),
+            "exists": SIGBALBOT_CONTEXT_DIR.exists(),
         },
     }
