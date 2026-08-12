@@ -10,16 +10,17 @@ Polling contract v1.0:
 Response:
   { ok, contract_version, generated_at, watchlist[], native_signals[] }
 
-Requirements:
-  1. Server-side worker, not frontend.
-  2. Persistent cursor (generated_at / created_at).
-  3. Evaluate watchlist symbols through Sentinel TA/risk.
-  4. Evaluate native signals as external confirmation candidates.
-  5. Only POST actionable signals — not every polling cycle.
-  6. Stable id across retries.
-  7. No feedback loops — never reprocess already-evaluated items.
-  8. Record source SigBalBot signal id in metadata.
-  9. Comprehensive logging.
+Protocol (codex integration):
+  1. Call GET /api/v1/signals/trader-sentinel/status first.
+  2. Verify capabilities.context_feed == "/api/v1/context/trader-sentinel".
+  3. Only start context polling when that capability is present.
+  4. Treat event types separately:
+     - technical/risk polling: internal context only
+     - market review: editorial context/news (handled by market_review_publisher)
+     - finalized trade signal: inbound signal and ML outcome source
+  5. Log pulled watchlist count and native signal IDs, but do not POST every poll.
+  6. Only POST to /api/v1/signals/trader-sentinel after a finalized actionable assessment.
+  7. 200 duplicate market-review response is success, not failure.
 """
 import asyncio
 import logging
@@ -45,6 +46,7 @@ POLL_INTERVAL_S = int(os.getenv("SIGBALBOT_POLL_INTERVAL_S", "120"))
 CONTEXT_LIMIT = 25
 
 _scheduler_task: asyncio.Task | None = None
+_context_capability_confirmed: bool = False
 
 # Signals Sentinel itself has emitted — never re-evaluate these.
 _SENTINEL_ID_PREFIX = "sentinel-"
@@ -63,9 +65,55 @@ def _load_config() -> tuple[str, str]:
     return _CONTEXT_BASE_URL, _API_KEY
 
 
+def _get_status_url() -> str:
+    webhook_url = os.getenv("SIGBALBOT_WEBHOOK_URL", "").strip()
+    if webhook_url:
+        return webhook_url.rstrip("/") + "/status"
+    return ""
+
+
 def is_configured() -> bool:
     url, key = _load_config()
     return bool(url and key)
+
+
+async def check_context_capability() -> bool:
+    """Verify SigBalBot exposes the context_feed capability.
+
+    Calls GET /api/v1/signals/trader-sentinel/status and checks
+    capabilities.context_feed == "/api/v1/context/trader-sentinel".
+    """
+    global _context_capability_confirmed
+    status_url = _get_status_url()
+    _, key = _load_config()
+    if not status_url or not key:
+        return False
+
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.get(
+                status_url,
+                headers={"Authorization": f"Bearer {key}"},
+            )
+        if resp.status_code != 200:
+            log.warning("sigbalbot-poller: status endpoint HTTP %d — context feed not yet available", resp.status_code)
+            return False
+
+        body = resp.json()
+        capabilities = body.get("capabilities", {})
+        context_feed = capabilities.get("context_feed", "")
+
+        if "/context/trader-sentinel" in context_feed:
+            _context_capability_confirmed = True
+            log.info("sigbalbot-poller: context_feed capability confirmed: %s", context_feed)
+            return True
+
+        log.info("sigbalbot-poller: context_feed capability not present yet (capabilities=%s)", capabilities)
+        return False
+
+    except Exception as exc:
+        log.warning("sigbalbot-poller: could not check status endpoint: %s", str(exc)[:120])
+        return False
 
 
 def _is_sentinel_signal(signal_id: str | int) -> bool:
@@ -483,14 +531,25 @@ async def poll_and_evaluate() -> dict[str, Any]:
 
 
 async def _poll_loop():
-    """Background loop: poll SigBalBot context endpoint at regular intervals."""
+    """Background loop: poll SigBalBot context endpoint at regular intervals.
+
+    Protocol: checks capabilities.context_feed from the status endpoint before
+    starting to poll. If not yet available, retries each interval until confirmed.
+    """
+    global _context_capability_confirmed
     log.info("sigbalbot-poller: scheduler started (interval=%ds)", POLL_INTERVAL_S)
 
-    # Small startup delay for modules to initialize
     await asyncio.sleep(15)
 
     while True:
         try:
+            if not _context_capability_confirmed:
+                available = await check_context_capability()
+                if not available:
+                    log.info("sigbalbot-poller: context_feed not available yet, will retry in %ds", POLL_INTERVAL_S)
+                    await asyncio.sleep(POLL_INTERVAL_S)
+                    continue
+
             await poll_and_evaluate()
         except Exception as exc:
             log.error("sigbalbot-poller: unexpected error in poll loop: %s", str(exc)[:200])
@@ -527,6 +586,7 @@ def get_poller_status() -> dict[str, Any]:
     return {
         "configured": is_configured(),
         "scheduler_running": _scheduler_task is not None and not _scheduler_task.done(),
+        "context_capability_confirmed": _context_capability_confirmed,
         "poll_interval_s": POLL_INTERVAL_S,
         "last_cursor": cursor_data.get("last_cursor"),
         "last_poll_at": cursor_data.get("last_poll_at"),

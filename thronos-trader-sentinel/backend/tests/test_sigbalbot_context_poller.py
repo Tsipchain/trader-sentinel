@@ -492,7 +492,157 @@ def test_context_url_derived_from_webhook_url():
     assert key == "test-poller-key-456"
 
 
-# ── 10. Fetch sends since parameter ────────────────────────────────────────
+# ── 10. Context capability check ──────────────────────────────────────────
+
+def test_get_status_url():
+    url = poller._get_status_url()
+    assert url == "https://sigbalbot.up.railway.app/api/v1/signals/trader-sentinel/status"
+
+
+@pytest.mark.asyncio
+async def test_check_context_capability_success():
+    poller._context_capability_confirmed = False
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=_mock_response(200, {
+        "status": "ok",
+        "capabilities": {
+            "context_feed": "/api/v1/context/trader-sentinel",
+        },
+    }))
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_client)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_cls.return_value = ctx
+
+        result = await poller.check_context_capability()
+
+    assert result is True
+    assert poller._context_capability_confirmed is True
+
+
+@pytest.mark.asyncio
+async def test_check_context_capability_not_present():
+    poller._context_capability_confirmed = False
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=_mock_response(200, {
+        "status": "ok",
+        "capabilities": {},
+    }))
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_client)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_cls.return_value = ctx
+
+        result = await poller.check_context_capability()
+
+    assert result is False
+    assert poller._context_capability_confirmed is False
+
+
+@pytest.mark.asyncio
+async def test_check_context_capability_non_200():
+    poller._context_capability_confirmed = False
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=_mock_response(404, {}))
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_client)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_cls.return_value = ctx
+
+        result = await poller.check_context_capability()
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_check_context_capability_network_error():
+    poller._context_capability_confirmed = False
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(side_effect=Exception("connection refused"))
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_client)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_cls.return_value = ctx
+
+        result = await poller.check_context_capability()
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_poll_loop_waits_for_capability():
+    """Poll loop should skip polling when capability is not confirmed."""
+    poller._context_capability_confirmed = False
+    calls = []
+
+    async def fake_check():
+        calls.append("check")
+        return False
+
+    iteration = 0
+
+    async def fake_sleep(seconds):
+        nonlocal iteration
+        iteration += 1
+        if iteration >= 2:
+            raise asyncio.CancelledError()
+
+    with (
+        patch.object(poller, "check_context_capability", side_effect=fake_check),
+        patch.object(poller, "poll_and_evaluate", new_callable=AsyncMock) as mock_poll,
+        patch("asyncio.sleep", side_effect=fake_sleep),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await poller._poll_loop()
+
+    assert len(calls) >= 1
+    mock_poll.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_poll_loop_proceeds_after_capability_confirmed():
+    """Poll loop should poll once capability is confirmed."""
+    poller._context_capability_confirmed = False
+    iteration = 0
+
+    async def fake_check():
+        poller._context_capability_confirmed = True
+        return True
+
+    async def fake_sleep(seconds):
+        nonlocal iteration
+        iteration += 1
+        if iteration >= 2:
+            raise asyncio.CancelledError()
+
+    with (
+        patch.object(poller, "check_context_capability", side_effect=fake_check),
+        patch.object(poller, "poll_and_evaluate", new_callable=AsyncMock) as mock_poll,
+        patch("asyncio.sleep", side_effect=fake_sleep),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await poller._poll_loop()
+
+    mock_poll.assert_called()
+
+
+def test_poller_status_includes_capability():
+    poller._context_capability_confirmed = True
+    with patch("app.brain.store.load_sigbalbot_cursor") as mock_load:
+        mock_load.return_value = {"last_cursor": None, "processed_signal_ids": []}
+        status = poller.get_poller_status()
+    assert status["context_capability_confirmed"] is True
+
+
+# ── 11. Fetch sends since parameter ────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_fetch_context_sends_since_param():
