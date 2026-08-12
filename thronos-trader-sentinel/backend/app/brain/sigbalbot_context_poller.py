@@ -47,6 +47,9 @@ CONTEXT_LIMIT = 25
 
 _scheduler_task: asyncio.Task | None = None
 _context_capability_confirmed: bool = False
+_contract_version: str | None = None
+
+_SUPPORTED_CONTRACT_VERSIONS = {"1.0"}
 
 # Signals Sentinel itself has emitted — never re-evaluate these.
 _SENTINEL_ID_PREFIX = "sentinel-"
@@ -80,10 +83,11 @@ def is_configured() -> bool:
 async def check_context_capability() -> bool:
     """Verify SigBalBot exposes the context_feed capability.
 
-    Calls GET /api/v1/signals/trader-sentinel/status and checks
-    capabilities.context_feed == "/api/v1/context/trader-sentinel".
+    Calls GET /api/v1/signals/trader-sentinel/status and checks:
+      1. contract_version is in _SUPPORTED_CONTRACT_VERSIONS
+      2. capabilities.context_feed contains "/context/trader-sentinel"
     """
-    global _context_capability_confirmed
+    global _context_capability_confirmed, _contract_version
     status_url = _get_status_url()
     _, key = _load_config()
     if not status_url or not key:
@@ -100,12 +104,25 @@ async def check_context_capability() -> bool:
             return False
 
         body = resp.json()
+
+        version = body.get("contract_version", "")
+        if version and version not in _SUPPORTED_CONTRACT_VERSIONS:
+            log.warning(
+                "sigbalbot-poller: unsupported contract_version=%s (supported=%s)",
+                version, _SUPPORTED_CONTRACT_VERSIONS,
+            )
+            return False
+
         capabilities = body.get("capabilities", {})
         context_feed = capabilities.get("context_feed", "")
 
         if "/context/trader-sentinel" in context_feed:
             _context_capability_confirmed = True
-            log.info("sigbalbot-poller: context_feed capability confirmed: %s", context_feed)
+            _contract_version = version or "unknown"
+            log.info(
+                "sigbalbot-poller: context_feed capability confirmed: %s (contract_version=%s)",
+                context_feed, _contract_version,
+            )
             return True
 
         log.info("sigbalbot-poller: context_feed capability not present yet (capabilities=%s)", capabilities)
@@ -152,10 +169,17 @@ async def fetch_context(since: str | None = None) -> dict[str, Any] | None:
 
             if resp.status_code == 200:
                 body = resp.json()
-                if body.get("ok"):
-                    return body
-                log.warning("sigbalbot-poller: ok=false in response: %s", str(body)[:200])
-                return None
+                if not body.get("ok"):
+                    log.warning("sigbalbot-poller: ok=false in response: %s", str(body)[:200])
+                    return None
+                cv = body.get("contract_version", "")
+                if cv and cv not in _SUPPORTED_CONTRACT_VERSIONS:
+                    log.error(
+                        "sigbalbot-poller: context response contract_version=%s unsupported (supported=%s)",
+                        cv, _SUPPORTED_CONTRACT_VERSIONS,
+                    )
+                    return None
+                return body
 
             if resp.status_code >= 500 and attempt < _MAX_RETRIES - 1:
                 log.warning(
@@ -504,7 +528,6 @@ async def poll_and_evaluate() -> dict[str, Any]:
                 "sigbalbot-poller: actionable signal %s → %s %s (publisher not configured, logged only)",
                 sig["id"], sig["symbol"], sig["signal"],
             )
-            summary["signals_posted"] += 1
 
     # Persist cursor and processed IDs (bounded to prevent unbounded growth)
     if len(new_processed) > _MAX_PROCESSED_IDS:
@@ -587,6 +610,7 @@ def get_poller_status() -> dict[str, Any]:
         "configured": is_configured(),
         "scheduler_running": _scheduler_task is not None and not _scheduler_task.done(),
         "context_capability_confirmed": _context_capability_confirmed,
+        "contract_version": _contract_version,
         "poll_interval_s": POLL_INTERVAL_S,
         "last_cursor": cursor_data.get("last_cursor"),
         "last_poll_at": cursor_data.get("last_poll_at"),
