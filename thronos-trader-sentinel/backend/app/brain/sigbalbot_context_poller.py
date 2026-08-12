@@ -34,6 +34,7 @@ import httpx
 from app.brain import store as brain_store
 from app.brain import sigbalbot_publisher
 from app.brain import platinum_signal_enricher
+from app.brain import wallet_snapshot_consumer
 
 log = logging.getLogger(__name__)
 
@@ -445,6 +446,11 @@ async def poll_and_evaluate() -> dict[str, Any]:
     native_signals = context.get("native_signals", [])
     generated_at = context.get("generated_at")
 
+    snap_count = wallet_snapshot_consumer.ingest_wallet_snapshots(context)
+    if snap_count:
+        log.info("sigbalbot-poller: ingested %d wallet snapshots", snap_count)
+    summary["wallet_snapshots_ingested"] = snap_count
+
     summary["context_items"] = len(watchlist) + len(native_signals)
     log.info(
         "sigbalbot-poller: pulled %d watchlist + %d native signals (cursor=%s)",
@@ -618,4 +624,5 @@ def get_poller_status() -> dict[str, Any]:
         "last_poll_at": cursor_data.get("last_poll_at"),
         "processed_ids_count": len(cursor_data.get("processed_signal_ids", [])),
         "last_summary": cursor_data.get("last_summary"),
+        "wallet_snapshot": wallet_snapshot_consumer.get_snapshot_status(),
     }
