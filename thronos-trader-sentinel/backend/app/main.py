@@ -35,6 +35,7 @@ from app.brain.predictor import PredictionEngine
 from app.brain import store as brain_store
 from app.brain import sleep_trader
 from app.brain import sigbalbot_publisher
+from app.brain import market_review_publisher
 
 logging.basicConfig(level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO))
 log = logging.getLogger(__name__)
@@ -151,6 +152,11 @@ async def _startup_sleep_worker():
     log.info("[sleep-worker] embedded worker started in API process")
 
 
+@app.on_event("startup")
+async def _startup_market_review_scheduler():
+    market_review_publisher.start_scheduler()
+
+
 @app.on_event("shutdown")
 async def _shutdown():
     global _sleep_worker_task
@@ -158,6 +164,7 @@ async def _shutdown():
         _sleep_worker_task.cancel()
         with contextlib.suppress(Exception):
             await _sleep_worker_task
+    market_review_publisher.stop_scheduler()
     await _cex.close()
     await _dex.close()
     await tech_module.close_exchange_pool()
@@ -798,10 +805,42 @@ def brain_telegram_signal(req: TelegramSignalRequest, _: str = Security(verify_a
 
 @app.get("/api/sigbalbot/status")
 async def sigbalbot_status(_: str = Security(verify_api_key)):
-    if not sigbalbot_publisher.is_configured():
+    configured = sigbalbot_publisher.is_configured()
+    review_configured = market_review_publisher.is_configured()
+    if not configured and not review_configured:
         return {"ok": False, "error": "not_configured", "hint": "Set SIGBALBOT_WEBHOOK_URL and SIGBALBOT_API_KEY"}
-    result = await sigbalbot_publisher.check_status()
+
+    result: dict[str, Any] = {"ok": True}
+
+    if configured:
+        signal_status = await sigbalbot_publisher.check_status()
+        result["signals"] = signal_status
+        result["last_event"] = signal_status.get("last_event")
+    else:
+        result["signals"] = {"configured": False}
+
+    if review_configured:
+        result["market_review"] = {
+            "configured": True,
+            "scheduler_running": market_review_publisher._scheduler_task is not None
+                and not market_review_publisher._scheduler_task.done(),
+            "last_published_id": market_review_publisher._last_published_id,
+            "current_window": market_review_publisher.current_review_id(),
+        }
+    else:
+        result["market_review"] = {"configured": False}
+
     return result
+
+
+@app.post("/api/sigbalbot/market-review")
+async def sigbalbot_trigger_review(_: str = Security(verify_api_key)):
+    if not market_review_publisher.is_configured():
+        raise HTTPException(status_code=503, detail="Market review publisher not configured")
+    result = await market_review_publisher.run_single_review()
+    if result is None:
+        raise HTTPException(status_code=503, detail="Sentinel context unavailable — review skipped")
+    return {"ok": True, "result": result}
 
 
 # ── AutoTrader endpoints ──────────────────────────────────────────────────────
