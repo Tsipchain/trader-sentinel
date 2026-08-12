@@ -37,6 +37,7 @@ from app.brain import sleep_trader
 from app.brain import sigbalbot_publisher
 from app.brain import market_review_publisher
 from app.brain import sigbalbot_context_poller
+from app.brain import lesson_knowledge_base as lesson_kb
 
 logging.basicConfig(level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO))
 log = logging.getLogger(__name__)
@@ -134,6 +135,15 @@ class TelegramSignalRequest(BaseModel):
     symbol: str
     message: str
     timestamp: int
+
+
+class LessonRegisterRequest(BaseModel):
+    title: str
+    description: str = ""
+    patterns: list[str] = Field(default_factory=list)
+    asset_class: str = "crypto"
+    timeframe: str = "1h"
+    image_filename: str = ""
 
 
 
@@ -850,6 +860,36 @@ async def sigbalbot_trigger_review(_: str = Security(verify_api_key)):
     if result is None:
         raise HTTPException(status_code=503, detail="Sentinel context unavailable — review skipped")
     return {"ok": True, "result": result}
+
+
+# ── Admin Lesson Knowledge Base ──────────────────────────────────────────────
+
+@app.post("/api/admin/lessons")
+def admin_register_lesson(req: LessonRegisterRequest, _: str = Security(verify_api_key)):
+    """Register or update a trading lesson in the knowledge base."""
+    lesson = lesson_kb.register_lesson(
+        title=req.title,
+        description=req.description,
+        patterns=req.patterns,
+        asset_class=req.asset_class,
+        timeframe=req.timeframe,
+        image_filename=req.image_filename,
+    )
+    return {"ok": True, "lesson": lesson}
+
+
+@app.get("/api/admin/lessons")
+def admin_list_lessons(_: str = Security(verify_api_key)):
+    """List all registered trading lessons."""
+    lessons = lesson_kb.list_all_lessons()
+    return {"ok": True, "lessons": lessons, "count": len(lessons)}
+
+
+@app.get("/api/admin/lessons/search")
+def admin_search_lessons(q: str = Query(""), _: str = Security(verify_api_key)):
+    """Search lessons by keyword across title, description, and patterns."""
+    results = lesson_kb.search_lessons(q)
+    return {"ok": True, "results": results, "count": len(results)}
 
 
 # ── AutoTrader endpoints ──────────────────────────────────────────────────────
