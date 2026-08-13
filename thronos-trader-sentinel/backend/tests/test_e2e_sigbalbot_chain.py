@@ -25,9 +25,13 @@ from app.brain.sigbalbot_context_poller import (
     _verify_hunter_exchanges,
     _assess_sniper_risk,
     _evaluate_watchlist_symbol,
+    _evaluate_native_signal,
+    _VALID_ASSET_CLASSES,
     fetch_context,
     poll_and_evaluate,
 )
+from app.brain.market_review_publisher import current_review_id, build_review_payload
+import app.brain.store as brain_store
 
 wsc.SNAPSHOT_DIR = Path(_tmp_dir)
 
@@ -699,3 +703,178 @@ def test_feedback_loop_guard_sentinel_ctx():
     """sentinel-ctx- prefixed signals are also caught by the feedback loop guard."""
     assert _is_sentinel_signal("sentinel-ctx-TOKEN-USDT-LONG-9999") is True
     assert _is_sentinel_signal("sigbal-sniper-TOKEN-LONG-123") is False
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Asset-class routing alignment tests
+# ════════════════════════════════════════════════════════════════════════════
+
+# ── 23. Crypto fallback when asset_class absent ────────────────────────────
+
+@pytest.mark.asyncio
+async def test_asset_class_crypto_fallback():
+    """Watchlist item without asset_class defaults to crypto."""
+    item = _sniper_watchlist_item()
+    assert "asset_class" not in item
+    ta = _mock_ta_result()
+
+    with patch("app.sentinel.technicals.calculate", return_value=ta):
+        with patch("app.brain.sleep_trader._evaluate_entry", return_value=("buy", 0.75)):
+            with patch("app.sentinel.risk.generate_report", new_callable=AsyncMock) as risk_mock:
+                risk_mock.return_value = MagicMock(composite_score=3.0)
+                result = await _evaluate_watchlist_symbol(item)
+
+    assert result is not None
+    assert result["asset_class"] == "crypto"
+    assert result["metadata"]["asset_class"] == "crypto"
+
+
+# ── 24. Equities signal preserves asset_class ─────────────────────────────
+
+@pytest.mark.asyncio
+async def test_asset_class_equities_signal():
+    """Watchlist item with asset_class=equities produces a signal with equities tag."""
+    item = _sniper_watchlist_item(asset_class="equities", symbol="AAPL/USD")
+    ta = _mock_ta_result(price=185.0)
+
+    with patch("app.sentinel.technicals.calculate", return_value=ta):
+        with patch("app.brain.sleep_trader._evaluate_entry", return_value=("buy", 0.70)):
+            with patch("app.sentinel.risk.generate_report", new_callable=AsyncMock) as risk_mock:
+                risk_mock.return_value = MagicMock(composite_score=2.5)
+                result = await _evaluate_watchlist_symbol(item)
+
+    assert result is not None
+    assert result["asset_class"] == "equities"
+    assert result["metadata"]["asset_class"] == "equities"
+
+
+# ── 25. Metals signal preserves asset_class ───────────────────────────────
+
+@pytest.mark.asyncio
+async def test_asset_class_metals_signal():
+    """Watchlist item with asset_class=metals produces a signal with metals tag."""
+    item = _sniper_watchlist_item(asset_class="metals", symbol="XAU/USD")
+    ta = _mock_ta_result(price=2450.0)
+
+    with patch("app.sentinel.technicals.calculate", return_value=ta):
+        with patch("app.brain.sleep_trader._evaluate_entry", return_value=("buy", 0.68)):
+            with patch("app.sentinel.risk.generate_report", new_callable=AsyncMock) as risk_mock:
+                risk_mock.return_value = MagicMock(composite_score=3.5)
+                result = await _evaluate_watchlist_symbol(item)
+
+    assert result is not None
+    assert result["asset_class"] == "metals"
+    assert result["metadata"]["asset_class"] == "metals"
+
+
+# ── 26. Equities review stable ID and dedup ───────────────────────────────
+
+def test_equities_review_stable_id_dedup():
+    """Equities review ID is distinct from crypto and stable across calls."""
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 8, 13, 14, 30, tzinfo=timezone.utc)
+    crypto_id = current_review_id(now=now, asset_class="crypto")
+    equities_id = current_review_id(now=now, asset_class="equities")
+
+    assert crypto_id != equities_id
+    assert "crypto" in crypto_id
+    assert "equities" in equities_id
+    assert equities_id == current_review_id(now=now, asset_class="equities")
+
+
+# ── 27. Metals review stable ID and dedup ─────────────────────────────────
+
+def test_metals_review_stable_id_dedup():
+    """Metals review ID is distinct from crypto/equities and stable."""
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 8, 13, 9, 0, tzinfo=timezone.utc)
+    crypto_id = current_review_id(now=now, asset_class="crypto")
+    metals_id = current_review_id(now=now, asset_class="metals")
+
+    assert crypto_id != metals_id
+    assert "metals" in metals_id
+    assert metals_id == current_review_id(now=now, asset_class="metals")
+
+    payload = build_review_payload(
+        {"risk": {"composite_score": 4.0, "recommendation": {}, "alerts": []},
+         "assets": {}, "sessions": {}, "bias": {}},
+        metals_id,
+        asset_class="metals",
+    )
+    assert payload["asset_class"] == "metals"
+    assert payload["id"] == metals_id
+
+
+# ── 28. Identical ticker across asset classes not conflated ───────────────
+
+@pytest.mark.asyncio
+async def test_identical_ticker_not_conflated():
+    """Same ticker in different asset classes produces distinct signal IDs."""
+    item_crypto = _sniper_watchlist_item(asset_class="crypto", symbol="GOLD/USDT")
+    item_metals = _sniper_watchlist_item(asset_class="metals", symbol="GOLD/USDT")
+    ta = _mock_ta_result(price=1.50)
+
+    results = []
+    for item in (item_crypto, item_metals):
+        with patch("app.sentinel.technicals.calculate", return_value=ta):
+            with patch("app.brain.sleep_trader._evaluate_entry", return_value=("buy", 0.72)):
+                with patch("app.sentinel.risk.generate_report", new_callable=AsyncMock) as risk_mock:
+                    risk_mock.return_value = MagicMock(composite_score=3.0)
+                    r = await _evaluate_watchlist_symbol(item)
+        if r:
+            results.append(r)
+
+    assert len(results) == 2
+    assert results[0]["asset_class"] == "crypto"
+    assert results[1]["asset_class"] == "metals"
+    assert results[0]["asset_class"] != results[1]["asset_class"]
+    assert results[0]["metadata"]["asset_class"] != results[1]["metadata"]["asset_class"]
+
+
+# ── 29. Missing exact instrument produces no signal ───────────────────────
+
+@pytest.mark.asyncio
+async def test_missing_instrument_no_signal():
+    """Watchlist item with empty symbol produces no signal regardless of asset_class."""
+    item = _sniper_watchlist_item(asset_class="equities", symbol="")
+    ta = _mock_ta_result()
+
+    with patch("app.sentinel.technicals.calculate", return_value=ta):
+        with patch("app.brain.sleep_trader._evaluate_entry", return_value=("buy", 0.80)):
+            with patch("app.sentinel.risk.generate_report", new_callable=AsyncMock) as risk_mock:
+                risk_mock.return_value = MagicMock(composite_score=2.0)
+                result = await _evaluate_watchlist_symbol(item)
+
+    assert result is None
+
+
+# ── 30. Learning journal groups outcomes by asset_class ───────────────────
+
+def test_learning_journal_groups_by_asset_class():
+    """Learning journal entries are stored and retrieved per asset_class."""
+    import tempfile
+    from pathlib import Path
+
+    tmp = tempfile.mkdtemp(prefix="journal_test_")
+    original_dir = brain_store.LEARNING_JOURNAL_DIR
+    brain_store.LEARNING_JOURNAL_DIR = Path(tmp)
+
+    try:
+        brain_store.append_learning_entry("crypto", {"signal_id": "s1", "outcome": "win", "ts": "2026-08-13T10:00:00Z"})
+        brain_store.append_learning_entry("equities", {"signal_id": "s2", "outcome": "loss", "ts": "2026-08-13T10:01:00Z"})
+        brain_store.append_learning_entry("crypto", {"signal_id": "s3", "outcome": "win", "ts": "2026-08-13T10:02:00Z"})
+
+        crypto_entries = brain_store.load_learning_journal("crypto")
+        equities_entries = brain_store.load_learning_journal("equities")
+        metals_entries = brain_store.load_learning_journal("metals")
+
+        assert len(crypto_entries) == 2
+        assert len(equities_entries) == 1
+        assert len(metals_entries) == 0
+        assert crypto_entries[0]["signal_id"] == "s1"
+        assert crypto_entries[1]["signal_id"] == "s3"
+        assert equities_entries[0]["signal_id"] == "s2"
+    finally:
+        brain_store.LEARNING_JOURNAL_DIR = original_dir
