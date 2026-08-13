@@ -206,11 +206,95 @@ async def fetch_context(since: str | None = None) -> dict[str, Any] | None:
     return None
 
 
+_HUNTER_EXCHANGES: set[str] = {"mexc", "bybit"}
+
+
+def _parse_exchanges(raw: str | None) -> list[str]:
+    """Parse comma-separated exchange list, normalised to lowercase."""
+    if not raw:
+        return []
+    return [e.strip().lower() for e in str(raw).split(",") if e.strip()]
+
+
+def _verify_hunter_exchanges(exchanges: list[str]) -> tuple[bool, bool, list[str]]:
+    """Check mandatory hunter exchange coverage.
+
+    Returns (hunter_verified, has_binance, risk_reasons).
+    hunter_verified is True only when both MEXC and Bybit are present.
+    """
+    ex_set = set(exchanges)
+    has_mexc = "mexc" in ex_set
+    has_bybit = "bybit" in ex_set
+    has_binance = "binance" in ex_set
+
+    hunter_verified = has_mexc and has_bybit
+    reasons: list[str] = []
+    if not has_mexc:
+        reasons.append("missing MEXC verification")
+    if not has_bybit:
+        reasons.append("missing Bybit verification")
+
+    return hunter_verified, has_binance, reasons
+
+
+def _assess_sniper_risk(
+    item: dict[str, Any],
+    exchanges: list[str],
+    hunter_verified: bool,
+    has_binance: bool,
+    risk_label: str,
+) -> tuple[str, bool, bool, list[str]]:
+    """Produce sentinel verdict and risk reasons for a sniper candidate.
+
+    Returns (verdict, market_cap_known, has_liquidity, risk_reasons).
+    verdict is CONFIRM / CAUTION / REJECT.
+    """
+    reasons: list[str] = []
+
+    market_cap = item.get("market_cap_usd")
+    market_cap_known = market_cap is not None
+    if not market_cap_known:
+        reasons.append("market cap unknown")
+    elif market_cap < 1_000_000:
+        reasons.append("micro cap (<$1M)")
+
+    liquidity = item.get("liquidity_usd")
+    has_liquidity = liquidity is not None and liquidity > 0
+    if not has_liquidity:
+        reasons.append("liquidity missing or zero")
+    elif liquidity < 50_000:
+        reasons.append("low liquidity")
+
+    volume = item.get("volume_24h")
+    if volume is not None and has_liquidity and liquidity and liquidity > 0:
+        vol_liq_ratio = volume / liquidity
+        if vol_liq_ratio > 50:
+            reasons.append("volume/liquidity ratio anomalous")
+
+    if not hunter_verified:
+        reasons.append("hunter exchanges incomplete")
+
+    if risk_label in ("HIGH", "EXTREME"):
+        reasons.append("elevated composite risk")
+
+    if not hunter_verified:
+        verdict = "REJECT"
+    elif len(reasons) >= 3:
+        verdict = "REJECT"
+    elif reasons:
+        verdict = "CAUTION"
+    else:
+        verdict = "CONFIRM"
+
+    return verdict, market_cap_known, has_liquidity, reasons
+
+
 async def _evaluate_watchlist_symbol(item: dict[str, Any]) -> dict[str, Any] | None:
     """Run a watchlist symbol through Sentinel TA + risk logic.
 
     Returns an actionable signal dict if Sentinel produces a recommendation,
-    None otherwise.
+    None otherwise. Admin watchlist acceptance is candidate selection only —
+    technical, risk, and liquidity confirmation are still required.
     """
     from app.sentinel import technicals as tech_module
     from app.sentinel import risk as risk_module
@@ -219,6 +303,17 @@ async def _evaluate_watchlist_symbol(item: dict[str, Any]) -> dict[str, Any] | N
     symbol = item.get("symbol", "")
     if not symbol:
         return None
+
+    mode = item.get("mode", "watch")
+    label = item.get("label", symbol.split("/")[0])
+    exchanges = _parse_exchanges(item.get("exchanges"))
+    hunter_verified, has_binance, exchange_risks = _verify_hunter_exchanges(exchanges)
+
+    if mode == "sniper" and not hunter_verified:
+        log.info(
+            "sigbalbot-poller: sniper %s missing hunter exchanges (%s), lowering to CAUTION",
+            symbol, ",".join(exchanges) or "none",
+        )
 
     try:
         ta_result = await tech_module.calculate(symbol)
@@ -258,10 +353,18 @@ async def _evaluate_watchlist_symbol(item: dict[str, Any]) -> dict[str, Any] | N
     except Exception:
         pass
 
-    direction = "LONG" if side == "buy" else "SHORT"
-    mode = item.get("mode", "watch")
-    label = item.get("label", symbol.split("/")[0])
+    verdict, market_cap_known, has_liquidity, risk_reasons = _assess_sniper_risk(
+        item, exchanges, hunter_verified, has_binance, risk_label,
+    )
 
+    if mode == "sniper" and verdict == "REJECT":
+        log.info(
+            "sigbalbot-poller: sniper %s REJECTED — reasons=%s",
+            symbol, risk_reasons,
+        )
+        return None
+
+    direction = "LONG" if side == "buy" else "SHORT"
     signal_id = f"sentinel-ctx-{symbol.replace('/', '-')}-{direction}-{int(time.time())}"
 
     confirmations = []
@@ -271,6 +374,8 @@ async def _evaluate_watchlist_symbol(item: dict[str, Any]) -> dict[str, Any] | N
         confirmations.append(f"MACD {ta['macd_trend']}")
     if ta.get("ema_cross") and ta["ema_cross"] != "none":
         confirmations.append(f"EMA {ta['ema_cross']}")
+    if has_binance:
+        confirmations.append("Binance listing confirmed")
 
     return {
         "id": signal_id,
@@ -294,9 +399,14 @@ async def _evaluate_watchlist_symbol(item: dict[str, Any]) -> dict[str, Any] | N
             "source": "sigbalbot_context",
             "watchlist_mode": mode,
             "watchlist_label": label,
-            "sigbalbot_market_cap": item.get("market_cap_usd"),
-            "sigbalbot_volume_24h": item.get("volume_24h"),
-            "sigbalbot_liquidity": item.get("liquidity_usd"),
+            "source_exchanges": exchanges,
+            "market_cap_usd": item.get("market_cap_usd"),
+            "market_cap_known": market_cap_known,
+            "volume_24h": item.get("volume_24h"),
+            "liquidity_usd": item.get("liquidity_usd"),
+            "liquidity_definition": "visible_order_book_depth_2pct",
+            "sentinel_verdict": verdict,
+            "sentinel_risk_reasons": risk_reasons,
             "sigbalbot_last_scan_signal": item.get("last_scan_signal"),
         },
     }

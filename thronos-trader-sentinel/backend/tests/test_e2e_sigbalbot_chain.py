@@ -21,6 +21,10 @@ import app.brain.wallet_snapshot_consumer as wsc
 import app.brain.sigbalbot_publisher as publisher
 from app.brain.sigbalbot_context_poller import (
     _is_sentinel_signal,
+    _parse_exchanges,
+    _verify_hunter_exchanges,
+    _assess_sniper_risk,
+    _evaluate_watchlist_symbol,
     fetch_context,
     poll_and_evaluate,
 )
@@ -413,3 +417,285 @@ def test_snapshot_freshness_after_ingestion():
     snap["fetched_at"] = time.time() - 10000
     wsc._save_snapshot(snap)
     assert wsc.is_snapshot_fresh() is False
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Sniper contract-alignment tests
+# ════════════════════════════════════════════════════════════════════════════
+
+def _sniper_watchlist_item(**overrides):
+    """Base sniper watchlist item matching the SigBalBot v1 sniper schema."""
+    item = {
+        "symbol": "TOKEN/USDT",
+        "label": "TOKEN",
+        "mode": "sniper",
+        "market_cap_usd": 9_000_000,
+        "volume_24h": 1_250_000,
+        "liquidity_usd": 340_000,
+        "exchanges": "mexc,bybit,binance",
+        "last_scan_at": "2026-08-13T10:00:00Z",
+        "last_scan_signal": "HOLD",
+        "last_scan_reason": "Awaiting confirmation",
+    }
+    item.update(overrides)
+    return item
+
+
+def _mock_ta_result(price=0.045):
+    ta = MagicMock()
+    ta.rsi_14 = 38.0
+    ta.rsi_signal = "oversold"
+    ta.macd_trend = "bullish"
+    ta.macd_histogram = 0.5
+    ta.bb_signal = "neutral"
+    ta.bb_pct = 0.4
+    ta.ema_cross = "golden_cross"
+    ta.williams_r = -70.0
+    ta.williams_r_signal = "neutral"
+    ta.score = 7.5
+    ta.current_price = price
+    ta.error = None
+    return ta
+
+
+# ── 11. MEXC + Bybit candidate accepted ──────────────────────────────────
+
+def test_sniper_mexc_bybit_accepted():
+    """Candidate with both MEXC and Bybit passes hunter verification."""
+    exchanges = _parse_exchanges("mexc,bybit")
+    verified, has_binance, reasons = _verify_hunter_exchanges(exchanges)
+    assert verified is True
+    assert has_binance is False
+    assert reasons == []
+
+
+# ── 12. MEXC + Bybit + Binance gets extra confirmation ──────────────────
+
+def test_sniper_binance_extra_confirmation():
+    """Binance presence gives additional listing confirmation but is not mandatory."""
+    exchanges = _parse_exchanges("mexc,bybit,binance")
+    verified, has_binance, reasons = _verify_hunter_exchanges(exchanges)
+    assert verified is True
+    assert has_binance is True
+
+
+# ── 13. Binance missing does not reject ─────────────────────────────────
+
+def test_sniper_binance_missing_does_not_reject():
+    """Candidate with MEXC+Bybit but no Binance is still valid."""
+    item = _sniper_watchlist_item(exchanges="mexc,bybit")
+    exchanges = _parse_exchanges(item["exchanges"])
+    verified, has_binance, reasons = _verify_hunter_exchanges(exchanges)
+    assert verified is True
+    assert has_binance is False
+
+    verdict, _, _, risk_reasons = _assess_sniper_risk(
+        item, exchanges, verified, has_binance, "STANDARD",
+    )
+    assert verdict != "REJECT"
+
+
+# ── 14. MEXC or Bybit missing lowers/rejects ────────────────────────────
+
+def test_sniper_missing_hunter_exchange_rejected():
+    """Candidate missing MEXC or Bybit gets REJECT verdict."""
+    for ex_str in ("bybit", "mexc", "binance", ""):
+        exchanges = _parse_exchanges(ex_str)
+        verified, has_binance, reasons = _verify_hunter_exchanges(exchanges)
+        assert verified is False, f"exchanges={ex_str} should not be hunter-verified"
+
+    item = _sniper_watchlist_item(exchanges="bybit")
+    exchanges = _parse_exchanges(item["exchanges"])
+    verified, _, _ = _verify_hunter_exchanges(exchanges)
+    verdict, _, _, risk_reasons = _assess_sniper_risk(
+        item, exchanges, verified, False, "STANDARD",
+    )
+    assert verdict == "REJECT"
+    assert any("hunter" in r or "MEXC" in r for r in risk_reasons)
+
+
+# ── 15. null market_cap_usd treated as unknown, not zero ─────────────────
+
+def test_sniper_null_market_cap_is_unknown():
+    """null market_cap_usd means unknown; it should not block evaluation but increase risk."""
+    item = _sniper_watchlist_item(market_cap_usd=None)
+    exchanges = _parse_exchanges(item["exchanges"])
+    verified, has_binance, _ = _verify_hunter_exchanges(exchanges)
+    verdict, cap_known, _, risk_reasons = _assess_sniper_risk(
+        item, exchanges, verified, has_binance, "STANDARD",
+    )
+    assert cap_known is False
+    assert "market cap unknown" in risk_reasons
+    assert verdict != "REJECT", "unknown market cap alone must not REJECT"
+
+
+# ── 16. Missing market cap does not fabricate a value ────────────────────
+
+@pytest.mark.asyncio
+async def test_sniper_no_fabricated_market_cap():
+    """Sentinel must not invent a market cap when the value is null."""
+    item = _sniper_watchlist_item(market_cap_usd=None)
+    ta = _mock_ta_result()
+
+    with patch("app.sentinel.technicals.calculate", return_value=ta):
+        with patch("app.brain.sleep_trader._evaluate_entry", return_value=("buy", 0.75)):
+            with patch("app.sentinel.risk.generate_report", new_callable=AsyncMock) as risk_mock:
+                risk_mock.return_value = MagicMock(composite_score=3.0)
+                result = await _evaluate_watchlist_symbol(item)
+
+    if result:
+        meta = result.get("metadata", {})
+        assert meta.get("market_cap_usd") is None
+        assert meta.get("market_cap_known") is False
+
+
+# ── 17. Low liquidity produces CAUTION or REJECT ────────────────────────
+
+def test_sniper_low_liquidity_caution():
+    """Low liquidity should produce CAUTION verdict."""
+    item = _sniper_watchlist_item(liquidity_usd=25_000)
+    exchanges = _parse_exchanges(item["exchanges"])
+    verified, has_binance, _ = _verify_hunter_exchanges(exchanges)
+    verdict, _, _, risk_reasons = _assess_sniper_risk(
+        item, exchanges, verified, has_binance, "STANDARD",
+    )
+    assert verdict in ("CAUTION", "REJECT")
+    assert "low liquidity" in risk_reasons
+
+
+# ── 18. Admin acceptance alone does not create a signal ──────────────────
+
+@pytest.mark.asyncio
+async def test_admin_acceptance_alone_no_signal():
+    """Watchlist acceptance without TA confirmation must not produce a signal."""
+    item = _sniper_watchlist_item()
+    ta = _mock_ta_result()
+
+    with patch("app.sentinel.technicals.calculate", return_value=ta):
+        with patch("app.brain.sleep_trader._evaluate_entry", return_value=(None, 0.30)):
+            with patch("app.sentinel.risk.generate_report", new_callable=AsyncMock) as risk_mock:
+                risk_mock.return_value = MagicMock(composite_score=3.0)
+                result = await _evaluate_watchlist_symbol(item)
+
+    assert result is None, "admin acceptance without TA confirmation must not produce a signal"
+
+
+# ── 19. Lesson evidence alone does not create a signal ──────────────────
+
+@pytest.mark.asyncio
+async def test_lesson_evidence_alone_no_signal():
+    """Lesson match without TA/risk confirmation must not produce a finalized signal."""
+    import app.brain.platinum_signal_enricher as enricher
+
+    payload = {
+        "id": "sentinel-ctx-TOKEN-USDT-LONG-999",
+        "symbol": "TOKEN/USDT",
+        "signal": "LONG",
+        "confidence": 30,
+        "risk": "STANDARD",
+    }
+    ta = {"rsi": 50, "macd_trend": "neutral", "bb_position": "neutral"}
+    enriched = enricher.enrich_signal(dict(payload), ta)
+    assert enriched["confidence"] == 30, "lesson evidence must not boost confidence"
+
+
+# ── 20. Actionable confirmation posts once with stable ID ────────────────
+
+@pytest.mark.asyncio
+async def test_sniper_actionable_posts_once_stable_id():
+    """An actionable sniper signal posts exactly once; same item retried uses cursor dedup."""
+    item = _sniper_watchlist_item()
+    ctx = _sigbalbot_context_response()
+    ctx["watchlist"] = [item]
+    ctx["native_signals"] = []
+    mock_ctx_resp = _make_mock_response(200, ctx)
+    mock_post_resp = _make_mock_response(202, {"event_id": "evt_sniper", "telegram_sent": True})
+
+    post_calls = []
+
+    async def capture_post(url, json=None, headers=None):
+        post_calls.append(json)
+        return mock_post_resp
+
+    ta = _mock_ta_result()
+
+    with patch.dict(os.environ, {
+        "SIGBALBOT_WEBHOOK_URL": "https://fake.sigbalbot.test/api/v1/signals/trader-sentinel",
+        "SIGBALBOT_API_KEY": "test-key-e2e",
+    }):
+        import app.brain.sigbalbot_context_poller as poller
+        poller._CONTEXT_BASE_URL = None
+        poller._API_KEY = None
+        publisher._WEBHOOK_URL = None
+        publisher._API_KEY = None
+
+        with patch("app.brain.store.load_sigbalbot_cursor", return_value={"processed_signal_ids": []}):
+            with patch("app.brain.store.save_sigbalbot_cursor"):
+                with patch("httpx.AsyncClient") as mock_client_cls:
+                    mock_client = AsyncMock()
+                    mock_client.get = AsyncMock(return_value=mock_ctx_resp)
+                    mock_client.post = capture_post
+                    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                    mock_client.__aexit__ = AsyncMock(return_value=False)
+                    mock_client_cls.return_value = mock_client
+
+                    with patch("app.sentinel.technicals.calculate", return_value=ta):
+                        with patch("app.brain.sleep_trader._evaluate_entry", return_value=("buy", 0.72)):
+                            with patch("app.sentinel.risk.generate_report", new_callable=AsyncMock) as risk_mock:
+                                risk_mock.return_value = MagicMock(composite_score=3.0)
+                                summary = await poll_and_evaluate()
+
+    assert summary["signals_posted"] == 1
+    assert len(post_calls) == 1
+    posted = post_calls[0]
+    assert posted["id"].startswith("sentinel-ctx-")
+    meta = posted.get("metadata", {})
+    assert meta.get("sentinel_verdict") == "CONFIRM"
+    assert meta.get("source_exchanges") == ["mexc", "bybit", "binance"]
+    assert meta.get("liquidity_definition") == "visible_order_book_depth_2pct"
+
+
+# ── 21. Duplicate retry does not publish twice ───────────────────────────
+
+@pytest.mark.asyncio
+async def test_sniper_duplicate_retry_no_double_post():
+    """Second poll with same watchlist item (already in cursor) does not re-evaluate."""
+    item = _sniper_watchlist_item()
+    ctx = _sigbalbot_context_response()
+    ctx["watchlist"] = [item]
+    ctx["native_signals"] = []
+    mock_resp = _make_mock_response(200, ctx)
+
+    wl_key = f"wl:{item['symbol']}:{item['last_scan_at']}"
+
+    with patch.dict(os.environ, {
+        "SIGBALBOT_WEBHOOK_URL": "https://fake.sigbalbot.test/api/v1/signals/trader-sentinel",
+        "SIGBALBOT_API_KEY": "test-key-e2e",
+    }):
+        import app.brain.sigbalbot_context_poller as poller
+        poller._CONTEXT_BASE_URL = None
+        poller._API_KEY = None
+
+        already = {"processed_signal_ids": [wl_key]}
+        with patch("app.brain.store.load_sigbalbot_cursor", return_value=already):
+            with patch("app.brain.store.save_sigbalbot_cursor"):
+                with patch("httpx.AsyncClient") as mock_client_cls:
+                    mock_client = AsyncMock()
+                    mock_client.get = AsyncMock(return_value=mock_resp)
+                    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                    mock_client.__aexit__ = AsyncMock(return_value=False)
+                    mock_client_cls.return_value = mock_client
+
+                    summary = await poll_and_evaluate()
+
+    assert summary["skipped_duplicates"] >= 1
+    assert summary["watchlist_evaluated"] == 0
+    assert summary["signals_posted"] == 0
+
+
+# ── 22. Feedback loop guard for sentinel-origin signals ──────────────────
+
+def test_feedback_loop_guard_sentinel_ctx():
+    """sentinel-ctx- prefixed signals are also caught by the feedback loop guard."""
+    assert _is_sentinel_signal("sentinel-ctx-TOKEN-USDT-LONG-9999") is True
+    assert _is_sentinel_signal("sigbal-sniper-TOKEN-LONG-123") is False
