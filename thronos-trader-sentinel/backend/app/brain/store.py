@@ -26,6 +26,7 @@ ANALYSIS_DIR = DISK_BASE / "analysis"
 SUBSCRIPTIONS_DIR = DISK_BASE / "subscriptions"
 SECURITY_DIR = DISK_BASE / "security"
 SIGBALBOT_CONTEXT_DIR = DISK_BASE / "sigbalbot_context"
+LEARNING_JOURNAL_DIR = DISK_BASE / "learning_journal"
 
 
 def _safe(user_id: str) -> str:
@@ -236,6 +237,48 @@ def load_sigbalbot_cursor() -> dict:
         return {"last_cursor": None, "processed_signal_ids": []}
 
 
+# ── Learning Journal (grouped by asset_class) ────────────────────────────────
+
+def append_learning_entry(asset_class: str, entry: dict) -> None:
+    LEARNING_JOURNAL_DIR.mkdir(parents=True, exist_ok=True)
+    safe_ac = _safe(asset_class or "crypto")
+    path = LEARNING_JOURNAL_DIR / f"{safe_ac}.json"
+
+    existing: dict = {"entries": [], "asset_class": asset_class}
+    if path.exists():
+        try:
+            with open(path) as f:
+                existing = json.load(f)
+        except Exception as exc:
+            log.warning("[store] could not read learning journal for %s: %s", asset_class, exc)
+
+    entries = existing.get("entries", [])
+    entries.append(entry)
+    existing["entries"] = entries[-500:]
+    existing["updated_at"] = entry.get("created_at") or entry.get("ts")
+
+    try:
+        with open(path, "w") as f:
+            json.dump(existing, f)
+        log.info("[store] appended learning entry asset_class=%s total=%d", asset_class, len(existing["entries"]))
+    except Exception as exc:
+        log.warning("[store] could not save learning journal for %s: %s", asset_class, exc)
+
+
+def load_learning_journal(asset_class: str) -> list[dict]:
+    safe_ac = _safe(asset_class or "crypto")
+    path = LEARNING_JOURNAL_DIR / f"{safe_ac}.json"
+    if not path.exists():
+        return []
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data.get("entries", [])
+    except Exception as exc:
+        log.warning("[store] could not load learning journal for %s: %s", asset_class, exc)
+        return []
+
+
 def storage_status() -> dict:
     def _count_files(path: Path, suffix: str = "") -> int:
         if not path.exists():
@@ -279,5 +322,10 @@ def storage_status() -> dict:
             "path": str(SIGBALBOT_CONTEXT_DIR),
             "files": _count_files(SIGBALBOT_CONTEXT_DIR, ".json"),
             "exists": SIGBALBOT_CONTEXT_DIR.exists(),
+        },
+        "learning_journal": {
+            "path": str(LEARNING_JOURNAL_DIR),
+            "files": _count_files(LEARNING_JOURNAL_DIR, ".json"),
+            "exists": LEARNING_JOURNAL_DIR.exists(),
         },
     }

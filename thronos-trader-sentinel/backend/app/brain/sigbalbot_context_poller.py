@@ -54,6 +54,8 @@ _contract_version: str | None = None
 
 _SUPPORTED_CONTRACT_VERSIONS = {"1.0"}
 
+_VALID_ASSET_CLASSES: set[str] = {"crypto", "equities", "metals"}
+
 # Signals Sentinel itself has emitted — never re-evaluate these.
 _SENTINEL_ID_PREFIX = "sentinel-"
 
@@ -304,6 +306,11 @@ async def _evaluate_watchlist_symbol(item: dict[str, Any]) -> dict[str, Any] | N
     if not symbol:
         return None
 
+    asset_class = (item.get("asset_class") or "crypto").strip().lower()
+    if asset_class not in _VALID_ASSET_CLASSES:
+        log.warning("sigbalbot-poller: invalid asset_class=%s for %s, defaulting to crypto", asset_class, symbol)
+        asset_class = "crypto"
+
     mode = item.get("mode", "watch")
     label = item.get("label", symbol.split("/")[0])
     exchanges = _parse_exchanges(item.get("exchanges"))
@@ -381,6 +388,7 @@ async def _evaluate_watchlist_symbol(item: dict[str, Any]) -> dict[str, Any] | N
         "id": signal_id,
         "symbol": symbol,
         "signal": direction,
+        "asset_class": asset_class,
         "timeframe": "1h",
         "price": ta["price"],
         "confidence": round(confidence * 100),
@@ -397,6 +405,7 @@ async def _evaluate_watchlist_symbol(item: dict[str, Any]) -> dict[str, Any] | N
         "sl": None,
         "metadata": {
             "source": "sigbalbot_context",
+            "asset_class": asset_class,
             "watchlist_mode": mode,
             "watchlist_label": label,
             "source_exchanges": exchanges,
@@ -425,6 +434,10 @@ async def _evaluate_native_signal(signal: dict[str, Any]) -> dict[str, Any] | No
     sigbal_signal = signal.get("signal", "")
     sigbal_confidence = int(signal.get("confidence", 0))
     sigbal_timeframe = signal.get("timeframe", "15m")
+
+    asset_class = (signal.get("asset_class") or "crypto").strip().lower()
+    if asset_class not in _VALID_ASSET_CLASSES:
+        asset_class = "crypto"
 
     if not symbol or not sigbal_signal:
         return None
@@ -503,6 +516,7 @@ async def _evaluate_native_signal(signal: dict[str, Any]) -> dict[str, Any] | No
         "id": signal_id,
         "symbol": symbol,
         "signal": sigbal_direction,
+        "asset_class": asset_class,
         "timeframe": sigbal_timeframe,
         "price": ta["price"],
         "confidence": round(combined_confidence * 100),
@@ -519,6 +533,7 @@ async def _evaluate_native_signal(signal: dict[str, Any]) -> dict[str, Any] | No
         "sl": None,
         "metadata": {
             "source": "sigbalbot_context_native",
+            "asset_class": asset_class,
             "sigbalbot_signal_id": sig_id,
             "sigbalbot_signal": sigbal_signal,
             "sigbalbot_confidence": sigbal_confidence,

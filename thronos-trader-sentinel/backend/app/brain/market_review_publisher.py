@@ -33,9 +33,15 @@ _MAX_RETRIES = 3
 _REVIEW_INTERVAL_S = 12 * 3600
 
 _scheduler_task: asyncio.Task | None = None
-_last_published_id: str | None = None
+_last_published_ids: dict[str, str] = {}
 
-REVIEW_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+_VALID_ASSET_CLASSES: set[str] = {"crypto", "equities", "metals"}
+
+REVIEW_SYMBOLS: dict[str, list[str]] = {
+    "crypto": ["BTC/USDT", "ETH/USDT", "SOL/USDT"],
+    "equities": [],
+    "metals": [],
+}
 
 
 def _load_review_url() -> str:
@@ -56,11 +62,11 @@ def is_configured() -> bool:
     return bool(_load_review_url() and _get_api_key())
 
 
-def current_review_id(now: datetime | None = None) -> str:
+def current_review_id(now: datetime | None = None, asset_class: str = "crypto") -> str:
     if now is None:
         now = datetime.now(timezone.utc)
     window = "am" if now.hour < 12 else "pm"
-    return f"sentinel-review-{now.strftime('%Y%m%d')}-{window}"
+    return f"sentinel-review-{asset_class}-{now.strftime('%Y%m%d')}-{window}"
 
 
 def _market_regime_from_score(composite_score: float) -> str:
@@ -94,10 +100,11 @@ def _confidence_1_10(composite_score: float) -> int:
     return max(1, min(10, 10 - int(composite_score)))
 
 
-async def gather_sentinel_context() -> dict[str, Any] | None:
+async def gather_sentinel_context(asset_class: str = "crypto") -> dict[str, Any] | None:
     """Collect real market data from Sentinel modules.
 
-    Returns None if critical context is unavailable.
+    Returns None if critical context is unavailable or no symbols are
+    configured for the given asset_class.
     """
     from app.sentinel import risk as risk_module
     from app.sentinel import technicals as tech_module
@@ -105,10 +112,15 @@ async def gather_sentinel_context() -> dict[str, Any] | None:
     from app.sentinel import calendar as cal_module
     from app.sentinel import geo as geo_module
 
-    context: dict[str, Any] = {}
+    symbols = REVIEW_SYMBOLS.get(asset_class, [])
+    if not symbols:
+        log.debug("market-review: no symbols configured for asset_class=%s, skipping", asset_class)
+        return None
+
+    context: dict[str, Any] = {"asset_class": asset_class}
 
     try:
-        risk_report = await risk_module.generate_report(symbol="BTC/USDT")
+        risk_report = await risk_module.generate_report(symbol=symbols[0])
         context["risk"] = {
             "composite_score": risk_report.composite_score,
             "recommendation": risk_report.recommendation,
@@ -118,11 +130,11 @@ async def gather_sentinel_context() -> dict[str, Any] | None:
             "technical_score": risk_report.technical_score,
         }
     except Exception as exc:
-        log.warning("market-review: risk module unavailable: %s", str(exc)[:100])
+        log.warning("market-review: risk module unavailable for %s: %s", asset_class, str(exc)[:100])
         return None
 
     asset_context: dict[str, Any] = {}
-    for symbol in REVIEW_SYMBOLS:
+    for symbol in symbols:
         try:
             ta = await tech_module.calculate(symbol)
             asset_context[symbol] = {
@@ -142,8 +154,9 @@ async def gather_sentinel_context() -> dict[str, Any] | None:
             log.debug("market-review: TA unavailable for %s: %s", symbol, str(exc)[:80])
     context["assets"] = asset_context
 
-    if not asset_context.get("BTC/USDT"):
-        log.warning("market-review: BTC/USDT TA unavailable, skipping review cycle")
+    primary = symbols[0]
+    if not asset_context.get(primary):
+        log.warning("market-review: %s TA unavailable for %s, skipping review cycle", primary, asset_class)
         return None
 
     try:
@@ -170,7 +183,7 @@ async def gather_sentinel_context() -> dict[str, Any] | None:
     return context
 
 
-def build_review_payload(context: dict[str, Any], review_id: str) -> dict[str, Any]:
+def build_review_payload(context: dict[str, Any], review_id: str, asset_class: str = "crypto") -> dict[str, Any]:
     """Build the market review payload from gathered Sentinel context."""
     risk_data = context.get("risk", {})
     composite = risk_data.get("composite_score", 5.0)
@@ -249,6 +262,7 @@ def build_review_payload(context: dict[str, Any], review_id: str) -> dict[str, A
 
     return {
         "id": review_id,
+        "asset_class": asset_class,
         "market_regime": _market_regime_from_score(composite),
         "risk": _risk_label(composite),
         "confidence": _confidence_1_10(composite),
@@ -341,40 +355,36 @@ def _safe_response_json(resp: httpx.Response) -> dict[str, Any]:
 
 
 async def _review_loop():
-    """Background loop: publish a market review every 12 hours."""
-    global _last_published_id
+    """Background loop: publish a market review every 12 hours per asset class."""
     log.info("market-review: scheduler started (interval=%ds)", _REVIEW_INTERVAL_S)
 
-    # Small startup delay to let modules initialize
     await asyncio.sleep(30)
 
     while True:
-        review_id = current_review_id()
+        for ac in _VALID_ASSET_CLASSES:
+            review_id = current_review_id(asset_class=ac)
 
-        if review_id == _last_published_id:
-            log.debug("market-review: %s already published this window, sleeping", review_id)
-            await asyncio.sleep(_REVIEW_INTERVAL_S // 2)
-            continue
-
-        try:
-            log.info("market-review: gathering context for %s", review_id)
-            context = await gather_sentinel_context()
-            if context is None:
-                log.warning("market-review: skipping %s — Sentinel context unavailable", review_id)
-                await asyncio.sleep(300)
+            if _last_published_ids.get(ac) == review_id:
+                log.debug("market-review: %s already published this window, skipping", review_id)
                 continue
 
-            payload = build_review_payload(context, review_id)
-            result = await publish_review(payload)
+            try:
+                log.info("market-review: gathering context for %s", review_id)
+                context = await gather_sentinel_context(asset_class=ac)
+                if context is None:
+                    continue
 
-            if result is not None:
-                _last_published_id = review_id
-                log.info("market-review: %s completed successfully", review_id)
-            else:
-                log.warning("market-review: %s publish failed, will retry next cycle", review_id)
+                payload = build_review_payload(context, review_id, asset_class=ac)
+                result = await publish_review(payload)
 
-        except Exception as exc:
-            log.error("market-review: unexpected error in review loop: %s", str(exc)[:200])
+                if result is not None:
+                    _last_published_ids[ac] = review_id
+                    log.info("market-review: %s completed successfully", review_id)
+                else:
+                    log.warning("market-review: %s publish failed, will retry next cycle", review_id)
+
+            except Exception as exc:
+                log.error("market-review: unexpected error for %s: %s", review_id, str(exc)[:200])
 
         await asyncio.sleep(_REVIEW_INTERVAL_S)
 
@@ -403,11 +413,11 @@ def stop_scheduler():
         _scheduler_task = None
 
 
-async def run_single_review() -> dict[str, Any] | None:
+async def run_single_review(asset_class: str = "crypto") -> dict[str, Any] | None:
     """Run one review cycle on demand (for testing / manual trigger)."""
-    review_id = current_review_id()
-    context = await gather_sentinel_context()
+    review_id = current_review_id(asset_class=asset_class)
+    context = await gather_sentinel_context(asset_class=asset_class)
     if context is None:
         return None
-    payload = build_review_payload(context, review_id)
+    payload = build_review_payload(context, review_id, asset_class=asset_class)
     return await publish_review(payload)
