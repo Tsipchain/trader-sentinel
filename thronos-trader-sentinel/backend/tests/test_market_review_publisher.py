@@ -74,22 +74,22 @@ SAMPLE_CONTEXT = {
 
 def test_review_id_am():
     morning = datetime(2026, 8, 12, 9, 30, tzinfo=timezone.utc)
-    assert mrp.current_review_id(morning) == "sentinel-review-20260812-am"
+    assert mrp.current_review_id(morning) == "sentinel-review-crypto-20260812-am"
 
 
 def test_review_id_pm():
     afternoon = datetime(2026, 8, 12, 15, 0, tzinfo=timezone.utc)
-    assert mrp.current_review_id(afternoon) == "sentinel-review-20260812-pm"
+    assert mrp.current_review_id(afternoon) == "sentinel-review-crypto-20260812-pm"
 
 
 def test_review_id_midnight():
     midnight = datetime(2026, 8, 13, 0, 0, tzinfo=timezone.utc)
-    assert mrp.current_review_id(midnight) == "sentinel-review-20260813-am"
+    assert mrp.current_review_id(midnight) == "sentinel-review-crypto-20260813-am"
 
 
 def test_review_id_noon_boundary():
     noon = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
-    assert mrp.current_review_id(noon) == "sentinel-review-20260812-pm"
+    assert mrp.current_review_id(noon) == "sentinel-review-crypto-20260812-pm"
 
 
 # ── Payload structure ────────────────────────────────────────────────────────

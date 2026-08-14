@@ -31,6 +31,16 @@ poller._CONTEXT_BASE_URL = None
 poller._API_KEY = None
 
 
+@pytest.fixture(autouse=True)
+def _reset_poller_config():
+    """Ensure env vars and cached config are correct for this file's tests."""
+    os.environ["SIGBALBOT_WEBHOOK_URL"] = "https://sigbalbot.up.railway.app/api/v1/signals/trader-sentinel"
+    os.environ["SIGBALBOT_API_KEY"] = "test-poller-key-456"
+    poller._CONTEXT_BASE_URL = None
+    poller._API_KEY = None
+    yield
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _mock_response(status_code: int, body: dict) -> httpx.Response:
@@ -50,6 +60,7 @@ SAMPLE_CONTEXT_RESPONSE = {
             "symbol": "BSB/USDT",
             "label": "BSB",
             "mode": "sniper",
+            "exchanges": "mexc,bybit,binance",
             "market_cap_usd": 9000000,
             "volume_24h": 1250000,
             "liquidity_usd": 340000,
