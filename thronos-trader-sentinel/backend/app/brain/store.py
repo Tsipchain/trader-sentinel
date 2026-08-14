@@ -27,6 +27,7 @@ SUBSCRIPTIONS_DIR = DISK_BASE / "subscriptions"
 SECURITY_DIR = DISK_BASE / "security"
 SIGBALBOT_CONTEXT_DIR = DISK_BASE / "sigbalbot_context"
 LEARNING_JOURNAL_DIR = DISK_BASE / "learning_journal"
+RESEARCH_EVENTS_DIR = DISK_BASE / "research_events"
 
 
 def _safe(user_id: str) -> str:
@@ -279,6 +280,74 @@ def load_learning_journal(asset_class: str) -> list[dict]:
         return []
 
 
+# ── Research Events (durable, bounded) ────────────────────────────────────────
+
+_MAX_RESEARCH_EVENTS = 500
+_MAX_PROCESSED_EVENT_IDS = 1000
+
+
+def append_research_event(event: dict) -> None:
+    RESEARCH_EVENTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = RESEARCH_EVENTS_DIR / "events.json"
+
+    existing: dict = {"events": [], "updated_at": None}
+    if path.exists():
+        try:
+            with open(path) as f:
+                existing = json.load(f)
+        except Exception as exc:
+            log.warning("[store] could not read research events: %s", exc)
+
+    entries = existing.get("events", [])
+    entries.append(event)
+    existing["events"] = entries[-_MAX_RESEARCH_EVENTS:]
+    existing["updated_at"] = event.get("created_at")
+
+    try:
+        with open(path, "w") as f:
+            json.dump(existing, f)
+        log.info("[store] appended research event id=%s total=%d", event.get("event_id", "?"), len(existing["events"]))
+    except Exception as exc:
+        log.warning("[store] could not save research event: %s", exc)
+
+
+def load_research_events(limit: int = 100) -> list[dict]:
+    path = RESEARCH_EVENTS_DIR / "events.json"
+    if not path.exists():
+        return []
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data.get("events", [])[-limit:]
+    except Exception as exc:
+        log.warning("[store] could not load research events: %s", exc)
+        return []
+
+
+def save_processed_event_ids(event_ids: list[str]) -> None:
+    RESEARCH_EVENTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = RESEARCH_EVENTS_DIR / "processed_ids.json"
+    bounded = event_ids[-_MAX_PROCESSED_EVENT_IDS:]
+    try:
+        with open(path, "w") as f:
+            json.dump({"ids": bounded}, f)
+    except Exception as exc:
+        log.warning("[store] could not save processed event IDs: %s", exc)
+
+
+def load_processed_event_ids() -> list[str]:
+    path = RESEARCH_EVENTS_DIR / "processed_ids.json"
+    if not path.exists():
+        return []
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data.get("ids", [])
+    except Exception as exc:
+        log.warning("[store] could not load processed event IDs: %s", exc)
+        return []
+
+
 def storage_status() -> dict:
     def _count_files(path: Path, suffix: str = "") -> int:
         if not path.exists():
@@ -327,5 +396,10 @@ def storage_status() -> dict:
             "path": str(LEARNING_JOURNAL_DIR),
             "files": _count_files(LEARNING_JOURNAL_DIR, ".json"),
             "exists": LEARNING_JOURNAL_DIR.exists(),
+        },
+        "research_events": {
+            "path": str(RESEARCH_EVENTS_DIR),
+            "files": _count_files(RESEARCH_EVENTS_DIR, ".json"),
+            "exists": RESEARCH_EVENTS_DIR.exists(),
         },
     }

@@ -36,6 +36,7 @@ from app.brain import store as brain_store
 from app.brain import sigbalbot_publisher
 from app.brain import platinum_signal_enricher
 from app.brain import wallet_snapshot_consumer
+from app.brain import research_hints_consumer
 
 log = logging.getLogger(__name__)
 
@@ -128,6 +129,7 @@ async def check_context_capability() -> bool:
                 "sigbalbot-poller: context_feed capability confirmed: %s (contract_version=%s)",
                 context_feed, _contract_version,
             )
+            research_hints_consumer.check_research_hints_capability(body)
             return True
 
         log.info("sigbalbot-poller: context_feed capability not present yet (capabilities=%s)", capabilities)
@@ -577,6 +579,15 @@ async def poll_and_evaluate() -> dict[str, Any]:
         log.info("sigbalbot-poller: ingested %d wallet snapshots", snap_count)
     summary["wallet_snapshots_ingested"] = snap_count
 
+    processed_event_ids = set(brain_store.load_processed_event_ids())
+    new_events, processed_event_ids = research_hints_consumer.process_research_hints(
+        context, processed_event_ids,
+    )
+    for evt in new_events:
+        research_hints_consumer.accept_event(evt, processed_event_ids)
+    brain_store.save_processed_event_ids(list(processed_event_ids))
+    summary["research_events_processed"] = len(new_events)
+
     summary["context_items"] = len(watchlist) + len(native_signals)
     log.info(
         "sigbalbot-poller: pulled %d watchlist + %d native signals (cursor=%s)",
@@ -751,4 +762,5 @@ def get_poller_status() -> dict[str, Any]:
         "processed_ids_count": len(cursor_data.get("processed_signal_ids", [])),
         "last_summary": cursor_data.get("last_summary"),
         "wallet_snapshot": wallet_snapshot_consumer.get_snapshot_status(),
+        "research_hints": research_hints_consumer.get_diagnostics(),
     }

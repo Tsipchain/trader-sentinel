@@ -29,6 +29,16 @@ pub._WEBHOOK_URL = None
 pub._API_KEY = None
 
 
+@pytest.fixture(autouse=True)
+def _reset_publisher_config():
+    """Ensure env vars and cached config are correct for this file's tests."""
+    os.environ["SIGBALBOT_WEBHOOK_URL"] = "https://sigbalbot.up.railway.app/api/v1/signals/trader-sentinel"
+    os.environ["SIGBALBOT_API_KEY"] = "test-key-abc123"
+    pub._WEBHOOK_URL = None
+    pub._API_KEY = None
+    yield
+
+
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 SAMPLE_TRADE = {
